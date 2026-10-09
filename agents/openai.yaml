@@ -1,0 +1,4 @@
+interface:
+  display_name: "Seedance 场景分镜导演"
+  short_description: "内置剧本标准化与资产提取，按指定范围生成 Seedance 2.5 动态时长分镜"
+  default_prompt: "使用 $seedance-scene-director 处理完整剧本，并按我指定的范围生成 Seedance 2.5 分镜提示词。"

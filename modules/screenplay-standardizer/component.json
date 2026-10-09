@@ -1,0 +1,13 @@
+{
+  "component": "screenplay-standardizer",
+  "bundle_format": 1,
+  "files": {
+    "INSTRUCTIONS.md": "8db955e1c1bc4eabae5312382cfe339f60d6aea1d34f697a936c0e4bcec56cb4",
+    "references/asset-ledger.md": "e1dc5a905c68778de5891578145f0f954d18b2fd45de66ada4073fa536d7b073",
+    "references/review.md": "60ee9ff347e6487a5f9ff14bdd10fa6cf3c264c626d52db357f9008248e66d82",
+    "scripts/asset_ledger.py": "10113c875570791c205f410dbe653d6586341319f06c6f75f0c67301658f524a",
+    "scripts/asset_migrate.py": "92a874a01891699148774042bc03af9182294a3972b452d7e053ad14f22747dd",
+    "scripts/screenplay_io.py": "fd565002e84fa8fafb6e1fd046c3e64b366234080db99328b6dc90111378ce49",
+    "scripts/screenplay_review.py": "44c5adeb18a88fc4515db35ca7557ec7f1e9765a0dc1c90d1a3e21587f635559"
+  }
+}
