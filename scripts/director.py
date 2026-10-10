@@ -99,7 +99,7 @@ def build_records(script_text, ledger):
     records, cursor, scene, heading_line = [], 0, None, 0
     for line_no, raw in enumerate(script_text.splitlines(), 1):
         line = raw.strip()
-        heading = re.fullmatch(r"场景(\d+)：(日|夜)·(内|外)·(.+)", line)
+        heading = re.fullmatch(r"场景(\d+)(?=-(?:日|夜)-(?:内|外)-|：(?:日|夜)·(?:内|外)·)[：-](日|夜)[·-](内|外)[·-](.+)", line)
         if heading:
             scene = scenes[int(heading.group(1))]
             heading_line = line_no
@@ -142,6 +142,7 @@ def bind(args):
     script_text = paths["script"].read_text(encoding="utf-8-sig")
     require(script_text == merged, "标准剧本与通过复核的逐场稿合并内容不一致")
     ledger_mod.validate(ledger_mod.parse_script(paths["script"]), ledger_mod.source_paragraphs(paths["source"]), ledger)
+    require(ledger.get("schema_version") == 3, "新绑定须使用区分场次与布景的schema 3台账；旧项目先离线审计升级")
     require(not ledger.get("pending_reviews") and not any(ledger.get("inactive_assets", {}).values()), "资产仍有待核项目")
     records, length = build_records(script_text, ledger)
     state = {"schema_version": 1, "revision": 0, "phase": "asset_choice", "standardizer": str(dep),
@@ -238,7 +239,7 @@ def anchors(state, quote):
         # Review records use filename and local scene line numbers.
         match = re.search(r"scene_(\d+)_", scene.get("file", scene.get("filename", "")))
         if not match:
-            match = re.search(r"场景(\d+)：", scene.get("scene", ""))
+            match = re.search(r"场景(\d+)[：-]", scene.get("scene", ""))
         if not match:
             continue
         scene_id = scene_by_number[int(match.group(1))]
@@ -325,6 +326,53 @@ def fixed_header():
     return text.splitlines()
 
 
+def reference_catalog(state):
+    ledger = state["ledger"]
+    catalog = {item["id"]: item["name"] for category in ("characters", "props") for item in ledger[category]}
+    if ledger.get("schema_version") == 3:
+        catalog.update({item["id"]: item["name"] for item in ledger["scene_assets"]})
+    else:
+        # Legacy snapshots remain readable; canvas writes require an audited upgrade.
+        catalog.update({item["id"]: item["heading"] for item in ledger["scenes"]})
+    owners = {}
+    for asset_id, name in catalog.items():
+        require(name and name == name.strip() and name != "黑幕" and "@" not in name and not any(c in name for c in "{}\r\n"), f"资产名称为空、含引用分隔符或占用黑幕名称：{asset_id} {name}")
+        require(name not in owners, f"资产名称重名，无法唯一引用图片：{owners.get(name)} / {asset_id} {name}；请先处理台账命名")
+        owners[name] = asset_id
+    return catalog
+
+
+def scene_asset_ids(state, scene_ids):
+    scenes = {s["id"]: s for s in state["ledger"]["scenes"]}
+    return list(dict.fromkeys(scenes[sid]["scene_asset_id"] for sid in scene_ids)) if state["ledger"].get("schema_version") == 3 else list(scene_ids)
+
+
+def asset_text(state, unit, text):
+    """Resolve explicit references only; never replace bare substrings or dialogue."""
+    catalog = reference_catalog(state)
+    scenes = {s["id"]: s for s in state["ledger"]["scenes"]}
+    allowed = set(scene_asset_ids(state, unit["scene_ids"]) + unit["character_ids"])
+    allowed.update(pid for sid in unit["scene_ids"] for pid in scenes[sid]["prop_ids"])
+    by_name = {name: aid for aid, name in catalog.items()}
+    names = sorted(by_name, key=len, reverse=True)
+    pattern = re.compile(r"@(?:\{([^{}]+)\}|(" + "|".join(re.escape(name) for name in names) + r")(?= ))")
+    used, output, cursor = set(), [], 0
+    for at in re.finditer("@", text):
+        if at.start() < cursor:
+            continue
+        match = pattern.match(text, at.start())
+        require(match is not None, f"无法识别资产引用（名称后须有英文空格）：{text[at.start():at.start() + 40]}")
+        asset_id = match.group(1) or by_name[match.group(2)]
+        require(asset_id in catalog and asset_id in allowed, f"资产引用不属于本单元或不存在：{asset_id}")
+        output.extend([text[cursor:at.start()], "@" + catalog[asset_id]])
+        if match.group(1) and text[match.end():match.end() + 1] != " ":
+            output.append(" ")
+        used.add(asset_id)
+        cursor = match.end()
+    output.append(text[cursor:])
+    return "".join(output), used
+
+
 def validate_unit(state, unit, request_span):
     a, b = interval(unit["span"], state["length"])
     duration = unit["duration"]
@@ -360,6 +408,7 @@ def validate_unit(state, unit, request_span):
             and set(unit["character_ids"]) <= allowed_chars, "单元人物不在关联台账中或重复")
     require(isinstance(unit["prop_ids"], list) and len(unit["prop_ids"]) == len(set(unit["prop_ids"]))
             and set(unit["prop_ids"]) <= allowed_props, "单元主要道具不在关联台账中或重复")
+    asset_text(state, unit, unit["global"])
     shots, warnings = unit["shots"], []
     require(shots, "单元没有镜头")
     if duration >= 26:
@@ -387,14 +436,17 @@ def validate_unit(state, unit, request_span):
         text = shot["text"]
         require(isinstance(text, str) and text.strip() and "\n" not in text and "：“" not in text, "镜头正文须为非空单段，台词仅填入dialogue_parts由程序渲染")
         require(framing in text, "正文缺少已声明景别")
-        for sid in subjects:
-            require((chars.get(sid) or props.get(sid))["name"] in text, "正文缺少台账完整主体名称")
+        _, referenced = asset_text(state, unit, text)
+        require(set(subjects) <= referenced, "正文主体须使用@台账完整名称或@{资产ID}引用")
+        require(referenced <= set(scenes[shot["scene_id"]]["character_ids"] + scenes[shot["scene_id"]]["prop_ids"] + scene_asset_ids(state, [shot["scene_id"]])),
+                "镜头正文引用了其他场景的资产")
         if not subjects:
             evidence = shot.get("environment_evidence", "")
             require(evidence and evidence in excerpt(state, a, b), "无人物/核心道具镜头须有本范围原文明示环境证据")
         require(shot.get("angle") in ("正面", "斜侧", "侧拍", "背拍", "俯拍", "仰拍", "第一人称", "客观"), "机位分类不合法")
         if i:
             require(isinstance(shot.get("connector"), str) and shot["connector"].strip(), "缺少自然连接词")
+            asset_text(state, unit, shot["connector"])
         used_chars.update(set(subjects) & set(chars))
         used_props.update(set(subjects) & set(props))
         cursor, previous = end, framing
@@ -512,29 +564,49 @@ def validate(state, request, partial=False):
     return warnings
 
 
-def render_unit(state, unit):
+def render_unit(state, unit, reference_text=None):
+    convert = reference_text or (lambda text: text)
     chars = {c["id"]: c["name"] for c in state["ledger"]["characters"]}
     scenes = {s["id"]: s["heading"] for s in state["ledger"]["scenes"]}
+    catalog = reference_catalog(state)
     header = fixed_header()
-    audio_ids = list(dict.fromkeys(e["character_id"] for e in unit["audio"]))
-    lines = [f'{unit["id"]}（时长：{unit["duration"]}秒）', unit["style"] + ";" + header[0], header[1],
-             "人物：" + ("，".join(chars[c] for c in unit["character_ids"]) or "无") + "；",
-             "场景：" + "，".join(scenes[s] for s in unit["scene_ids"]) + f'；时间：{unit["time"]}；天气：{unit["weather"]}；',
-             "音频：" + ("，".join(chars[c] + "音频" for c in audio_ids) or "无") + "；", unit["global"]]
+    lines = [f'{unit["id"]}（时长：{unit["duration"]}秒）', convert("@黑幕"), unit["style"] + ";" + header[0], header[1],
+             "人物：" + ("".join(chars[c] + convert("@" + chars[c] + " ") + "；" for c in unit["character_ids"]) or "无；"),
+             "场景：" + "".join(scenes[s] + convert("@" + catalog[scene_asset_ids(state, [s])[0]] + " ") + "；" for s in unit["scene_ids"]) + f'时间：{unit["time"]}；天气：{unit["weather"]}；',
+             convert(asset_text(state, unit, unit["global"])[0])]
     for i, shot in enumerate(unit["shots"]):
         if i:
-            lines.append(shot["connector"])
+            lines.append(convert(asset_text(state, unit, shot["connector"])[0]))
         parts = []
         for part in shot.get("dialogue_parts", []):
             event = next(e for e in unit["audio"] if e["record"] == part["record"])
-            parts.append(chars[event["character_id"]] + event["voice"] + '：“' + part["text"] + '”')
+            parts.append(convert("@" + chars[event["character_id"]] + " ") + event["voice"] + '：“' + part["text"] + '”')
         speech = (" " + " ".join(parts)) if parts else ""
-        lines.append(f'[{shot["start"]}秒-{shot["end"]}秒] {shot["text"]}{speech}')
+        lines.append(f'[{shot["start"]}秒-{shot["end"]}秒] {convert(asset_text(state, unit, shot["text"])[0])}{speech}')
     return "\n".join(lines)
 
 
 def render_receipt(state, receipt):
     atomic_text(receipt["output"], "\n\n".join(render_unit(state, u) for u in receipt["units"]) + "\n")
+
+
+def receipt_summary(receipt):
+    total = sum(unit["duration"] for unit in receipt["units"])
+    minutes, seconds = divmod(total, 60)
+    count = len(receipt["units"])
+    action = "修改" if receipt.get("mode") == "replace" else "生成"
+    return {"unit_count": count, "total_seconds": total, "minutes": minutes, "seconds": seconds,
+            "summary": f"本次{action}分镜共{count}个，总时长{minutes}分{seconds}秒。"}
+
+
+def sync_canvas_replacements(project, receipt):
+    if receipt.get("mode") != "replace" or not (project / "canvas" / "state.json").is_file():
+        return {"status": "not_bound"}
+    try:
+        from canvas import sync_replacements
+        return sync_replacements(project, [u["id"] for u in receipt["units"]])
+    except (OSError, ValueError, KeyError, TypeError, ImportError) as exc:
+        return {"status": "pending", "message": str(exc)}
 
 
 def commit(args, state):
@@ -544,7 +616,8 @@ def commit(args, state):
     if old_receipt:
         require(old_receipt["request_hash"] == request_hash, "request_id已用于不同请求；请使用新ID")
         render_receipt(state, old_receipt)
-        return {"status": "already_committed", "output": old_receipt["output"], "ids": [u["id"] for u in old_receipt["units"]]}
+        return {"status": "already_committed", "output": old_receipt["output"], "ids": [u["id"] for u in old_receipt["units"]],
+                "canvas_sync": sync_canvas_replacements(args.project, old_receipt), **receipt_summary(old_receipt)}
     warnings = validate(state, request)
     style = (args.project / "video-style.txt").read_text(encoding="utf-8-sig").strip()
     units = copy.deepcopy(request["units"])
@@ -571,13 +644,14 @@ def commit(args, state):
     protected = [Path(x["path"]).resolve() for x in state["files"].values()] + [(args.project / n).resolve() for n in ("session.json", "video-style.txt")]
     require(output not in protected and ROOT not in output.parents, "交付路径不能覆盖来源、运行状态或Skill文件")
     require(not output.exists(), "交付文件已存在；请使用新文件名以保留旧版本")
-    receipt = {"request_id": request["request_id"], "request_hash": request_hash, "output": str(output), "units": copy.deepcopy(units)}
+    receipt = {"request_id": request["request_id"], "request_hash": request_hash, "mode": request["mode"], "output": str(output), "units": copy.deepcopy(units)}
     state["receipts"].append(receipt)
     state["phase"] = "nodes_choice"
     save(args.project, state)
     # State is authoritative. A failed filesystem delivery can be recovered with render.
     render_receipt(state, receipt)
-    return {"status": "committed", "output": str(output), "ids": [u["id"] for u in units], "warnings": warnings}
+    return {"status": "committed", "output": str(output), "ids": [u["id"] for u in units], "warnings": warnings,
+            "canvas_sync": sync_canvas_replacements(args.project, receipt), **receipt_summary(receipt)}
 
 
 def main():
@@ -600,7 +674,7 @@ def main():
             p.add_argument("--choice", choices=("1", "2", "3"), required=True)
             p.add_argument("--file", type=Path)
         elif command == "phase":
-            p.add_argument("--value", choices=("asset_choice", "style", "range", "nodes_choice", "followup"), required=True)
+            p.add_argument("--value", choices=("asset_choice", "image_choice", "image_folder", "style", "range", "nodes_choice", "followup"), required=True)
         elif command == "locate":
             p.add_argument("--anchors", type=Path, required=True)
         elif command == "range":
@@ -643,7 +717,7 @@ def main():
                 receipt = next((r for r in state["receipts"] if r["request_id"] == args.request_id), None)
                 require(receipt is not None, "找不到该提交记录")
                 render_receipt(state, receipt)
-                result = {"status": "rendered", "output": receipt["output"]}
+                result = {"status": "rendered", "output": receipt["output"], **receipt_summary(receipt)}
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError, StopIteration) as exc:
         print(json.dumps({"status": "error", "message": str(exc)}, ensure_ascii=False), file=sys.stderr)

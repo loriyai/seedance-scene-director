@@ -2,6 +2,7 @@
 """Initialize, validate, and render a screenplay asset ledger."""
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -10,13 +11,14 @@ import tempfile
 from pathlib import Path
 
 
-HEADING = re.compile(r"场景(\d+)：(日|夜)·(内|外)·(.+)")
+HEADING = re.compile(r"场景(\d+)(?=-(?:日|夜)-(?:内|外)-|：(?:日|夜)·(?:内|外)·)[：-](日|夜)[·-](内|外)[·-](.+)")
 SCENE_FILE = re.compile(r"scene_(\d+)_(\d+)-(\d+)\.txt")
 ID_PATTERNS = {
     "scenes": re.compile(r"SC\d{4,}"),
     "characters": re.compile(r"CHAR\d{4,}"),
     "locations": re.compile(r"LOC\d{4,}"),
     "props": re.compile(r"PROP\d{4,}"),
+    "scene_assets": re.compile(r"SET\d{4,}"),
 }
 GENERIC_ROLE = re.compile(r"^(?:宾客|同学|女生|男生|医生|男医生|女医生|护士|保镖|工作人员|服务员|路人|司机|助理|店员|老师|教授|大爷|阿姨|侍者|主持人)")
 
@@ -56,6 +58,8 @@ def parse_script(path: Path) -> list[dict]:
         if not match:
             continue
         number = int(match.group(1))
+        if line.strip().startswith(f"场景{match.group(1)}-"):
+            validate_image_name(line.strip())
         if number != len(scenes) + 1:
             raise ValueError(f"剧本场景序号不连续：{number}")
         if i + 1 >= len(lines) or not lines[i + 1].startswith("人物："):
@@ -87,6 +91,11 @@ def parse_script(path: Path) -> list[dict]:
         end = heading_positions[index + 1] if index + 1 < len(scenes) else len(lines)
         scene["body_text"] = "\n".join(lines[heading_positions[index] + 2:end])
     return scenes
+
+
+def validate_image_name(name: str) -> None:
+    if re.search(r'[<>:"/\\|?*\x00-\x1f]', name) or name.endswith((" ", ".")):
+        raise ValueError(f"场景名称含文件名不支持的字符或结尾：{name}")
 
 
 def scene_ranges(workdir: Path, count: int, source_count: int) -> list[list[int]]:
@@ -144,7 +153,7 @@ def fact_list(records: list[dict], paragraphs: list[str], scenes_by_id: dict, la
 
 
 def validate(script: list[dict], paragraphs: list[str], data: dict) -> None:
-    if data.get("schema_version") != 2:
+    if data.get("schema_version") not in (2, 3):
         raise ValueError("不支持的资产台账 schema_version")
     if not isinstance(data.get("pending_reviews", []), list):
         raise ValueError("pending_reviews 必须是数组")
@@ -152,13 +161,14 @@ def validate(script: list[dict], paragraphs: list[str], data: dict) -> None:
         raise ValueError("台账仍有改稿迁移待核项；请处理后再生成资产 TXT")
     if data.get("source_digest") != digest(paragraphs):
         raise ValueError("资产台账与当前原文版本不匹配")
-    for category in ID_PATTERNS:
+    categories = {k: v for k, v in ID_PATTERNS.items() if k != "scene_assets" or data["schema_version"] == 3}
+    for category in categories:
         if not isinstance(data.get(category), list):
             raise ValueError(f"资产台账缺少 {category} 数组")
     if len(data["scenes"]) != len(script):
         raise ValueError("台账场景数与标准剧本不一致")
     all_ids = set()
-    for category, pattern in ID_PATTERNS.items():
+    for category, pattern in categories.items():
         for item in data[category]:
             asset_id = item.get("id") if isinstance(item, dict) else None
             if not isinstance(asset_id, str) or not pattern.fullmatch(asset_id):
@@ -272,6 +282,98 @@ def validate(script: list[dict], paragraphs: list[str], data: dict) -> None:
     for ref, names in location_heading_names.items():
         if names and locations[ref]["name"] not in names:
             raise ValueError(f"地点 {ref} 的主名称未出现在关联场景标题中")
+    if data["schema_version"] == 3:
+        validate_scene_assets(data, paragraphs, scenes_by_id, locations)
+
+
+def validate_scene_assets(data, paragraphs, scenes, locations):
+    """SC identifies an occurrence; SET identifies a reusable visual set."""
+    assets = {item["id"]: item for item in data["scene_assets"]}
+    names = {item["name"] for category in ("characters", "props") for item in data[category]}
+    bases = {}
+    for location in locations.values():
+        if location.get("identity_status") != "confirmed" or not str(location.get("identity_basis", "")).strip():
+            raise ValueError(f"地点 {location['id']} 身份尚未核实，不能建立布景资产")
+    for item in assets.values():
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip() or name != name.strip() or name in names or name == "黑幕" or any(c in name for c in "@{}\r\n"):
+            raise ValueError(f"布景资产名称为空、重复或含引用分隔符：{item['id']}")
+        validate_image_name(name)
+        names.add(name)
+        location = locations.get(item.get("location_id"))
+        if not location:
+            raise ValueError(f"布景资产 {item['id']} 的地点不存在")
+        variant = item.get("variant")
+        if variant == "base":
+            if item.get("parent_id") is not None or location["id"] in bases:
+                raise ValueError(f"地点 {location['id']} 只能有一个基础布景")
+            bases[location["id"]] = item["id"]
+        elif variant == "decor":
+            parent = assets.get(item.get("parent_id"))
+            if not parent or parent.get("variant") != "base" or parent.get("location_id") != location["id"]:
+                raise ValueError(f"布景版本 {item['id']} 必须关联同地点的基础布景")
+            if not item.get("visual_facts"):
+                raise ValueError(f"布景版本 {item['id']} 缺少真实布景变化的原文证据")
+        else:
+            raise ValueError(f"布景资产 {item['id']} variant 须为 base 或 decor")
+        facts = item.get("visual_facts")
+        if not isinstance(facts, list):
+            raise ValueError(f"布景资产 {item['id']} 缺少 visual_facts")
+        fact_list(facts, paragraphs, scenes, item["id"])
+        for fact in facts:
+            for sid in fact["scene_ids"]:
+                scene = scenes[sid]
+                if scene["location_id"] != location["id"] or (variant == "decor" and scene.get("scene_asset_id") != item["id"]):
+                    raise ValueError(f"布景资产 {item['id']} 的证据关联了其他地点或版本")
+    for scene in scenes.values():
+        asset = assets.get(scene.get("scene_asset_id"))
+        if not asset or asset["location_id"] != scene["location_id"]:
+            raise ValueError(f"场次 {scene['id']} 缺少同地点的有效 scene_asset_id")
+    used_locations = {scene["location_id"] for scene in scenes.values()}
+    if set(bases) != used_locations or set(locations) != used_locations:
+        raise ValueError("每个现用地点须恰有一个基础布景；未用地点请归档而非创建节点")
+    used_assets = {scene["scene_asset_id"] for scene in scenes.values()}
+    if any(item["variant"] == "decor" and item["id"] not in used_assets for item in assets.values()):
+        raise ValueError("未使用的布景版本须先核实去向，不创建多余节点")
+
+
+def build_scene_assets(data):
+    """Group only by explicitly confirmed LOC IDs, never by heading/name/daylight."""
+    if data.get("schema_version") != 3:
+        raise ValueError("旧台账须先制定保留/修改/合并/删除方案并审核升级，不自动转换")
+    result = copy.deepcopy(data)
+    locations = {item["id"]: item for item in result["locations"]}
+    used_locations = {scene["location_id"] for scene in result["scenes"]}
+    if set(locations) != used_locations:
+        raise ValueError("请先合并已确认同一实体的地点，并归档未用地点")
+    for item in locations.values():
+        if item.get("identity_status") != "confirmed" or not str(item.get("identity_basis", "")).strip():
+            raise ValueError(f"地点 {item['id']} 身份尚未核实；不按同名自动合并")
+    assets = result.setdefault("scene_assets", [])
+    used_ids = {item["id"] for item in assets} | set(result.get("retired_ids", []))
+    number = max([int(a[3:]) for a in used_ids if re.fullmatch(r"SET\d{4,}", a)] + [0])
+    bases = {}
+    for item in assets:
+        if item.get("variant") == "base":
+            lid = item["location_id"]
+            if lid in bases:
+                raise ValueError(f"地点 {lid} 有重复基础布景；请先审核合并")
+            bases[lid] = item["id"]
+    for lid, location in locations.items():
+        if lid not in bases:
+            number += 1
+            aid = f"SET{number:04d}"
+            bases[lid] = aid
+            assets.append({"id": aid, "name": location["name"], "location_id": lid,
+                           "variant": "base", "parent_id": None, "visual_facts": []})
+    by_id = {item["id"]: item for item in assets}
+    for scene in result["scenes"]:
+        aid = scene.get("scene_asset_id")
+        if aid is None:
+            scene["scene_asset_id"] = bases[scene["location_id"]]
+        elif aid not in by_id or by_id[aid]["location_id"] != scene["location_id"]:
+            raise ValueError(f"场次 {scene['id']} 已有布景关联无效；请审核，不自动覆盖")
+    return result
 
 
 def initialize(script_path: Path, workdir: Path, output: Path) -> None:
@@ -287,7 +389,8 @@ def initialize(script_path: Path, workdir: Path, output: Path) -> None:
         # Identical generic headings can denote different places. Start separately;
         # merge only after checking the original scene context.
         location_id = f"LOC{len(locations) + 1:04d}"
-        locations.append({"id": location_id, "name": location_name, "aliases": [], "visual_facts": []})
+        locations.append({"id": location_id, "name": location_name, "aliases": [], "visual_facts": [],
+                          "identity_status": "pending", "identity_basis": ""})
         linked = []
         for entry in base["cast_entries"]:
             role_name, _ = split_cast_entry(entry)
@@ -303,12 +406,12 @@ def initialize(script_path: Path, workdir: Path, output: Path) -> None:
         scenes.append({
             "id": f"SC{base['number']:04d}", "number": base["number"],
             "heading": base["heading"], "source_range": source_range,
-            "location_id": location_id, "character_ids": linked,
+            "location_id": location_id, "scene_asset_id": None, "character_ids": linked,
             "prop_ids": [], "visual_facts": [],
             "time_basis": {"kind": "待核", "source_paragraphs": []},
         })
     data = {
-        "schema_version": 2, "source_digest": digest(paragraphs),
+        "schema_version": 3, "source_digest": digest(paragraphs), "scene_assets": [],
         "scenes": scenes, "characters": characters, "locations": locations,
         "props": [], "retired_ids": [], "inactive_assets": {"characters": []}, "pending_reviews": [],
     }
@@ -342,10 +445,18 @@ def render(script_path: Path, source_path: Path, ledger_path: Path, output: Path
     for item in data["characters"]:
         features = "、".join(visual_text(item["visual_facts"])) or "外观未明示"
         lines.append(f"- {item['name']}：{features}。")
+        numbers = sorted({scene["number"] for scene in data["scenes"] if item["id"] in scene["character_ids"]})
+        lines.append("  出现的场景：" + ("，".join(f"场景{number}" for number in numbers) or "无") + "。")
 
     lines.extend(["", "场景列表"])
-    for scene in data["scenes"]:
+    for scene in (data["scene_assets"] if data["schema_version"] == 3 else data["scenes"]):
         loc = locations[scene["location_id"]]
+        if data["schema_version"] == 3:
+            elements = visual_text(loc["visual_facts"]) + visual_text(scene["visual_facts"])
+            lines.append(f"- {scene['name']}｜关键元素：{'、'.join(dict.fromkeys(elements)) or '未明示'}。")
+            numbers = sorted(s["number"] for s in data["scenes"] if s["scene_asset_id"] == scene["id"])
+            lines.append("  使用的场次：" + ("，".join(f"场景{n}" for n in numbers) or "无（基础布景供版本继承）") + "。")
+            continue
         scene_facts = visual_text(scene["visual_facts"])
         atmosphere = [part for part in scene_facts if ATMOSPHERE.search(part)]
         elements = [part for part in scene_facts if part not in atmosphere]
@@ -378,6 +489,9 @@ def main() -> None:
     init.add_argument("script", type=Path)
     init.add_argument("workdir", type=Path)
     init.add_argument("--output", type=Path, required=True)
+    build = commands.add_parser("build-scenes", help="按已核实的地点ID建立可复用布景，不按场次/日夜拆分")
+    build.add_argument("ledger", type=Path)
+    build.add_argument("--output", type=Path, required=True)
     view = commands.add_parser("render", help="验证台账并生成易读资产 TXT")
     view.add_argument("script", type=Path)
     view.add_argument("source", type=Path)
@@ -387,6 +501,13 @@ def main() -> None:
     try:
         if args.command == "init":
             initialize(args.script, args.workdir, args.output)
+        elif args.command == "build-scenes":
+            if args.output.exists():
+                raise ValueError("输出已存在；请另选文件，避免覆盖人工修改")
+            data = build_scene_assets(json.loads(args.ledger.read_text(encoding="utf-8-sig")))
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            print(f"已建立 {len(data['scene_assets'])} 个布景资产索引：{args.output}")
         else:
             render(args.script, args.source, args.ledger, args.output)
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:

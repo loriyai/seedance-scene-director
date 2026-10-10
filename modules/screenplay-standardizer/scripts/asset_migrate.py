@@ -7,7 +7,7 @@ import json
 import re
 from pathlib import Path
 
-from asset_ledger import GENERIC_ROLE, digest, parse_script, scene_ranges, source_paragraphs, split_cast_entry
+from asset_ledger import HEADING, GENERIC_ROLE, digest, parse_script, scene_ranges, source_paragraphs, split_cast_entry
 
 
 PREFIXES = {"scenes": "SC", "characters": "CHAR", "locations": "LOC", "props": "PROP"}
@@ -128,8 +128,8 @@ def migrate_fact(fact, old_by_id, lineage, new_scenes_by_number, old_paragraphs,
 
 def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requested):
     old = json.loads(old_ledger_path.read_text(encoding="utf-8-sig"))
-    if old.get("schema_version") not in (1, 2):
-        raise ValueError("旧台账 schema_version 须为 1 或 2")
+    if old.get("schema_version") not in (1, 2, 3):
+        raise ValueError("旧台账 schema_version 须为 1、2 或 3")
     old_paragraphs = source_paragraphs(old_source_path)
     if old.get("source_digest") != digest(old_paragraphs):
         raise ValueError("旧台账与旧原文摘要不匹配")
@@ -157,6 +157,7 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
     for category in PREFIXES:
         used.update(item["id"] for item in old[category])
     used.update(item["id"] for item in inactive["characters"])
+    used.update(item["id"] for item in old.get("scene_assets", []))
     retired = set(old.get("retired_ids", []))
     retired.update(set(old_by_id) - set(primary.values()))
     pending = [{"kind": "旧台账待核项", "item": item} for item in old.get("pending_reviews", [])]
@@ -262,9 +263,9 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
             continue
         prior = old_by_id[ids[0]]
         old_time = prior.get("time_basis", {"kind": "待核", "source_paragraphs": []})
-        old_mark = re.search(r"：(日|夜)·", prior["heading"])
-        new_mark = re.search(r"：(日|夜)·", scene["heading"])
-        if old_mark.group(1) != new_mark.group(1):
+        old_mark = HEADING.fullmatch(prior["heading"])
+        new_mark = HEADING.fullmatch(scene["heading"])
+        if not old_mark or not new_mark or old_mark.group(2) != new_mark.group(2):
             pending.append({"kind": "时间依据待核", "new_scene": number, "old_value": old_time})
             continue
         if old_time["kind"] == "格式默认":
@@ -308,6 +309,38 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
     result = {"schema_version": 2, "source_digest": digest(new_paragraphs), "scenes": scenes,
               "characters": characters, "locations": locations, "props": props,
               "retired_ids": sorted(retired), "inactive_assets": inactive, "pending_reviews": pending}
+    if old.get("schema_version") == 3:
+        result["schema_version"] = 3
+        result["scene_assets"] = copy.deepcopy(old["scene_assets"])
+        assets = {item["id"]: item for item in result["scene_assets"]}
+        for location in locations:
+            if "identity_status" not in location:
+                location.update(identity_status="pending", identity_basis="")
+        for scene in scenes:
+            prior = [old_by_id[sid] for sid in incoming[scene["number"]]]
+            options = {s.get("scene_asset_id") for s in prior if s["location_id"] == scene["location_id"]}
+            options.discard(None)
+            scene["scene_asset_id"] = next(iter(options)) if len(options) == 1 else None
+            unchanged = len(prior) == 1 and len(lineage[prior[0]["id"]]) == 1 and (
+                old_paragraphs[prior[0]["source_range"][0] - 1:prior[0]["source_range"][1]] ==
+                new_paragraphs[scene["source_range"][0] - 1:scene["source_range"][1]])
+            if scene["scene_asset_id"] not in assets or not unchanged:
+                pending.append({"kind": "布景版本关联待核", "scene_id": scene["id"],
+                                "candidate_asset_id": scene["scene_asset_id"]})
+        for item in result["scene_assets"]:
+            facts = []
+            for fact in item["visual_facts"]:
+                revised = migrate_fact(fact, old_by_id, lineage, new_by_number, old_paragraphs, new_paragraphs, new_index)
+                linked = revised and all(new_by_id[sid]["location_id"] == item["location_id"] and
+                    (item["variant"] == "base" or new_by_id[sid]["scene_asset_id"] == item["id"])
+                    for sid in revised["scene_ids"])
+                if linked:
+                    facts.append(revised)
+                else:
+                    pending.append({"kind": "布景版本证据待核", "asset_id": item["id"], "fact": fact})
+            item["visual_facts"] = facts
+            if item["variant"] == "decor" and not any(s["scene_asset_id"] == item["id"] for s in scenes):
+                pending.append({"kind": "未用布景版本去向待核", "asset_id": item["id"]})
     report = {"status": "迁移草稿", "scene_lineage": lineage, "primary_ids": primary,
               "retired_scene_ids": sorted(set(old_by_id) - set(primary.values())),
               "pending_reviews": pending,

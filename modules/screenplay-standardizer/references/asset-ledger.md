@@ -1,9 +1,10 @@
 # 资产台账结构
 
-后台主文件使用 UTF-8 JSON；分类视觉描述 TXT 由它生成。标准剧本的场景序号用于显示，`SC`、`LOC`、`CHAR`、`PROP` ID 用于长期关联。首次建立台账可用 `asset_ledger.py init` 生成无事实的索引骨架；若已有台账，先用 `asset_migrate.py` 迁移并审核，不重新初始化或重编号。`init` 生成的 `time_basis: 待核` 是草稿，须逐场确认后才能渲染。
+后台主文件使用 UTF-8 JSON；分类视觉描述 TXT 由它生成。标准剧本的场景序号用于显示，`SC`（场次）、`LOC`（物理地点）、`SET`（布景）、`CHAR`、`PROP` ID 用于长期关联。首次建立台账可用 `asset_ledger.py init` 生成无事实的索引骨架；若已有台账，先用 `asset_migrate.py` 迁移并审核，不重新初始化或重编号。`init` 生成的 `time_basis: 待核` 是草稿，须逐场确认后才能渲染。
 
 ```text
 python scripts/asset_ledger.py init <standard-script.txt> <task-work-dir> --output <asset-ledger.json>
+python scripts/asset_ledger.py build-scenes <identity-reviewed-ledger.json> --output <sets-draft.json>
 python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/source.json <asset-ledger.json> --output <asset-catalog.txt>
 ```
 
@@ -11,15 +12,16 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "source_digest": "由 init 计算的原文段落摘要",
   "scenes": [
     {
       "id": "SC0001",
       "number": 1,
-      "heading": "场景1：日·内·昏暗房间",
+      "heading": "场景1-日-内-昏暗房间",
       "source_range": [1, 19],
       "location_id": "LOC0001",
+      "scene_asset_id": "SET0001",
       "character_ids": ["CHAR0001"],
       "prop_ids": [],
       "visual_facts": [],
@@ -36,7 +38,10 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
     }
   ],
   "locations": [
-    {"id": "LOC0001", "name": "昏暗房间", "aliases": [], "visual_facts": []}
+    {"id": "LOC0001", "name": "昏暗房间", "aliases": [], "visual_facts": [], "identity_status": "confirmed", "identity_basis": "核实原文所属主体及空间，关联场次为同一物理房间"}
+  ],
+  "scene_assets": [
+    {"id": "SET0001", "name": "昏暗房间", "location_id": "LOC0001", "variant": "base", "parent_id": null, "visual_facts": []}
   ],
   "props": [
     {"id": "PROP0001", "name": "枪", "aliases": [], "visual_facts": []}
@@ -47,9 +52,11 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
 }
 ```
 
-`init` 只建立场景、人物和地点索引，不自动提取资产事实或主要道具。地点按场景先分配独立 ID，核实是同一地点后再合并；明确姓名的角色只按完整人物条目初步归并。`卢筱筱-基础形象` 与 `卢筱筱-黑色裙子` 分别建立稳定 ID；同一完整条目在多场出现且身份明确时复用 ID。泛称角色及 `称谓-群像` 按场景分开，仍需人工核实。群像只用于无姓名、无台词且原文明示阵营、身份、人设或职业的背景人物。若相同条目指向不同实体，拆成不同 ID，并用逐场关联指向各自实体。新 ID 只追加，废弃的 ID 放入 `retired_ids`，不回收。场景的 `number`、`heading` 可随剧本修改；`id` 保持稳定。
+`init` 只建立场次、人物和待核地点索引，scene_assets为空且scene_asset_id为null，不自动提取资产事实或主要道具。地点按场景先分配独立 ID，核实是同一地点后再合并；明确姓名的角色只按完整人物条目初步归并。`卢筱筱-基础形象` 与 `卢筱筱-黑色裙子` 分别建立稳定 ID；同一完整条目在多场出现且身份明确时复用 ID。泛称角色及 `称谓-群像` 按场景分开，仍需人工核实。群像只用于无姓名、无台词且原文明示阵营、身份、人设或职业的背景人物。若相同条目指向不同实体，拆成不同 ID，并用逐场关联指向各自实体。新 ID 只追加，废弃的 ID 放入 `retired_ids`，不回收。场景的 `number`、`heading` 可随剧本修改；`id` 保持稳定。
 
 名称取自标准剧本：人物 `name` 对应 `人物：` 行中的完整条目（角色名 + 简单形象描述），连字符和描述文字均须一致；场景 `heading` 对应完整标题；地点主名称对应至少一个关联场景标题中的地点字样，其他已确认同一地点的标题字样可放入 `aliases`；主要道具 `name` 必须原样出现在至少一个关联场景的正文，每个关联场景须出现主名称或该场使用的别名。不要把颜色、价格、用途或剧情说明拼成剧本里没有的道具名，这些信息放入事实字段。
+
+新项目heading统一为 `场景X-日/夜-内/外-地点`，例如 `场景1-日-内-昏暗房间`，实际名称不含选项斜杠，并通过文件名字符检查。读取兼容旧项目的冒号与间隔点标题，保持绑定剧本与台账场次标题一致；图片文件名使用scene_assets的name，不自动迁移旧项目。
 
 `time_basis.kind` 只能是 `原文明示` 或 `格式默认`。前者的 `source_paragraphs` 必须列出该场原文明示时间的段落；后者须为空数组。标题中默认写 `日` 不代表原文明确是白天。脚本生成的待核值不能直接通过 `render`。
 
@@ -67,7 +74,7 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
 
 人物性格只填原文直接命名的稳定特点。出自人物自述或他人评价时，`attribution` 填实际说话人并在 `text` 中写成“某人自述／某人认为……”，不把评价升级成客观结论。仅有一次温柔语气、一次发怒或某个行动时，`personality_facts` 保持空数组。性格也不写入剧本人物行的“形象”。
 
-可记录的明示视觉信息包括：人物外貌、明显年龄、发型、衣着及配饰；地点布局、固定陈设、可见材质；道具形状、颜色、材质、相对大小、标记与状态。逐场临时的天气、光线、布置放在 `scenes[].visual_facts`。未知信息留空。`基础形象`、默认的 `日`、自动生成的 ID 和未出现的生图风格都不是原文事实。
+可记录的明示视觉信息包括：人物外貌、明显年龄、发型、衣着及配饰；地点布局、固定陈设、可见材质；道具形状、颜色、材质、相对大小、标记与状态。逐场临时的天气、光线放在 `scenes[].visual_facts`；固定布局与陈设放在locations，真实布景变化以有证据的decor版本记录。未知信息留空。`基础形象`、默认的 `日`、自动生成的 ID 和未出现的生图风格都不是原文事实。
 
 道具只收录对剧情、人物动作或视觉识别有作用的主要物件。若原文无法确认两次提到的是同一件道具，保留不同 ID 或标记待核，不靠近义词自行合并。`prop_ids` 记录其出现的场景；服装通常作为人物视觉事实，不自动建为道具。
 
@@ -75,7 +82,7 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
 
 `render` 检查：原文摘要、场景与段落范围、ID 引用、每场人物资产 `name` 列表与该场 `人物：` 行完整条目逐项、逐字、按顺序匹配、场景标题及地点名称与剧本一致、道具主名称和别名在关联场景正文中出现、资产事实的场景出现关系、证据在原文段落中出现。`pending_reviews` 或 `inactive_assets.characters` 未处理完时不能渲染。它无法判断摘要是否正确表达证据，也无法证明“性格”是否真的被原文明确写出；这些仍需人工逐条核对。
 
-生成的 TXT 只保留三个标题及其列表：`角色列表`、`场景列表`、`主要道具列表`。角色以完整人物资产 `name` 为标签，列核心可见特征；场景以标准剧本标题为名，列有事实依据的氛围与关键元素；主要道具列核心可见特征。没有明示信息时写“未明示”，不从 `基础形象` 或格式默认时间补造。TXT 不展示后台 ID、出处段落、证据原句、别名表、逐场索引或性格栏；完整信息仍由 JSON 保存。
+生成的 TXT 只保留三个标题及其列表：`角色列表`、`场景列表`、`主要道具列表`。角色以完整人物资产 `name` 为标签，列核心可见特征，其下另起一行 `出现的场景：场景1，场景3。`。该行由scenes[].character_ids反查角色ID，场景号取number，排序去重，不同形象分别统计；仅发声的OS/画外音角色也计入。场景按scene_assets的name逐项列固定元素与真实布景版本，其下另起“使用的场次：场景1，场景3。”，按scene_asset_id反查并排序；不逐场重复列布景，不混入临时日夜、天气及光照；主要道具列核心可见特征。没有明示信息时写“未明示”，不从 `基础形象` 或格式默认时间补造。TXT 不展示后台 ID、出处段落、证据原句、别名表、其他逐场索引或性格栏；完整信息仍由 JSON 保存。
 
 ## 改稿迁移
 
@@ -102,3 +109,13 @@ python scripts/asset_migrate.py <old-ledger.json> <old-source.json> <new-script.
 未改场景的原文段落序列完全一致时，证据编号按场景起点偏移直接迁移；只对改动场景重新搜索证据。迁移报告列出 `unchanged_source_scenes` 数量，方便判断复用范围。
 
 旧人物完整条目没有在新剧本人物行出现时，完整记录先放入 `inactive_assets.characters`，同时加入 `pending_reviews`；这表示“可能改名、换形象或退场”，并不立即废弃人物 ID。若实际改名或原有形象条目更名，在映射中用 `characters` 指定旧 ID 对应的新人物行完整条目后重新迁移；若出现新形象，则分配新的 `CHAR` ID，不将旧形象 ID 改名挪用。若确认退场，人工把 ID 放入 `retired_ids`，移除暂存记录，并核对其旧事实是否需要保留为历史记录。处理所有待核项后才清空 `pending_reviews` 并渲染。旧版 `schema_version: 1` 可迁移，但每场 `time_basis` 都须复核。
+
+## 物理地点与布景版本
+
+scenes保留全部剧情场次及heading，不删场、不合并叙事；scene_assets存储真正要创建节点的布景资产。先结合原文的所属主体、建筑、楼层、具体空间核实LOC身份。别名和同名不等于同一物理空间；确认同一实体才合并LOC并重指场次，废弃LOC ID写入retired_ids。填写identity_status="confirmed"和非空identity_basis说明核实依据；无法确认保持pending，最终render及bind阻止通过。不同地点的泛称相同时，用有原文依据的所属主体或空间限定区分布景name，禁止编造地点。
+
+build-scenes是确定性索引脚本：只按已确认LOC ID建立每个地点唯一的base SET，填写各场scene_asset_id；不按名称字符串自动合并、不提取或杜撰事实。已有SET ID与decor关联保持，新增ID高于现用及废弃SET；输入错误不静默覆盖。输出为新文件，再补充原文事实并完整render校验。身份待核、重复基础布景、无效关联均阻止后续阶段。
+
+日夜、天气、光照、取景方向、场次号与排序仅属于SC或分镜，不能作为增加SET的理由。真实布景变化才允许少量版本：variant="decor"，parent_id指向同LOC基础SET，name为“地点-有依据的布景状态”，visual_facts须有原文证据并关联确实使用该版本的SC。同一视觉状态复用SET，不逐场建立新版本；基础布景只承载共用固定元素。程序验证结构和证据出处，语义上是否真实改变布景仍须人工核实。
+
+旧schema 2可读取或按旧版改稿迁移，不能直接传输画布。升级须先离线给出旧SC→LOC/SET及节点的保留/修改/合并/删除方案，保留旧文件和映射快照，由用户抉择后再建立schema 3新绑定。不得自动把所有旧SC改为SET、静默合并图片或删除节点。schema 3改稿迁移保持SET ID和可定位证据；原文变动、版本关联不唯一或版本未使用进入pending_reviews，处理后才能生成最终台账。

@@ -11,10 +11,11 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
+from asset_ledger import HEADING, validate_image_name
+
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 SCENE_FILE = re.compile(r"scene_(\d+)_(\d+)-(\d+)\.txt$")
-HEADING = re.compile(r"场景(\d+)：(日|夜)·(内|外)·\S+$")
 DIALOGUE = re.compile(r"[^：:\s△]{1,30}(?:\([^()]+\)|（[^（）]+）)?：\S.*$")
 
 
@@ -71,7 +72,12 @@ def validate_scene(content: str, number: int, path: Path) -> list[str]:
     if len(lines) < 2:
         return [f"{path.name}：缺少场景标题或人物行"]
     if not (match := HEADING.fullmatch(lines[0][1])) or int(match.group(1)) != number:
-        errors.append(f"{path.name}:{lines[0][0]}：场景标题应为 场景{number}：日/夜·内/外·地点")
+        errors.append(f"{path.name}:{lines[0][0]}：场景标题应为 场景{number}-日/夜-内/外-地点")
+    elif lines[0][1].startswith(f"场景{match.group(1)}-"):
+        try:
+            validate_image_name(lines[0][1])
+        except ValueError as exc:
+            errors.append(f"{path.name}:{lines[0][0]}：{exc}")
     cast = lines[1][1]
     if not cast.startswith("人物："):
         errors.append(f"{path.name}:{lines[1][0]}：第二行必须以 人物： 开头")

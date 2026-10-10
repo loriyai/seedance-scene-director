@@ -123,7 +123,7 @@ def context(paragraphs, start, end, first, last):
 
 
 def review_key(kind, scene_label, text, before, after, ordinal):
-    payload = [kind, re.sub(r"^场景\d+：", "", scene_label), compact(text),
+    payload = [kind, re.sub(r"^场景\d+[：-]", "", scene_label), compact(text),
                [compact(x) for x in before], [compact(x) for x in after], ordinal]
     return sha(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))[:24]
 

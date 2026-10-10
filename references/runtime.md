@@ -4,9 +4,11 @@
 
 ## 内置剧本标准化模块
 
-转换/提取资产/改稿时读取[内置规则](../modules/screenplay-standardizer/INSTRUCTIONS.md)。该文件保留原标准化Skill的完整规则，其相对链接以模块目录为根。运行其中示例命令时，将`scripts/文件.py`解析为`<skill>/modules/screenplay-standardizer/scripts/文件.py`，工作产物仍放项目工作目录。完整包包含规则、两份参考文件、四份Python脚本和`component.json`摘要清单。
+转换/提取资产/改稿时读取[内置规则](../modules/screenplay-standardizer/INSTRUCTIONS.md)。其相对链接以模块目录为根。运行其中示例命令时，将`scripts/文件.py`解析为`<skill>/modules/screenplay-standardizer/scripts/文件.py`，工作产物仍放项目工作目录。完整包包含规则、两份参考文件、四份Python脚本和`component.json`摘要清单。
 
 默认仅加载包内版本；同级目录、用户主目录或CODEX_HOME中同名Skill均不会被自动调用。缺失/损坏时停止并提示恢复完整包，不回退外部版本。兼容旧调用的`--standardizer <目录>`仅在用户明确指定外部版本时使用，不作为常规命令，也不因旧session记录了外部路径而自动沿用。旧session的来源、编号、范围、版本数据格式仍兼容，无须因本次内置升级重新转换未变剧本。
+
+新项目标准标题、台账heading均使用 `场景X-日/夜-内/外-地点`，实际日夜、内外各取一个值。标题解析、复核、迁移与绑定同时兼容旧格式；已有绑定及已交付文件不自动改名，禁止仅在渲染分镜时把旧heading替换成新格式。
 
 ## 命令顺序
 
@@ -28,7 +30,9 @@ python <skill>/scripts/director.py render --project <project> --request-id <已�
 
 示例中的省略号不是可执行参数；默认整数4～30秒无需传`--durations`，只有实际入口明确为离散档位才列出合法值。PowerShell使用`& '<Python绝对路径>' '<脚本绝对路径>' ...`，路径逐个引用。用户文字通过JSON文件传递，不拼进shell命令。
 
-phase只记录交互位置，不代表外部操作授权。bind后为asset_choice；用户无论选1/2均phase→style，再展示风格菜单。style后自动为range；commit后为nodes_choice；用户无论选1/2均phase→followup并显示两条续接提示。恢复时status读当前阶段，避免重复菜单。没有小云雀网络操作或工具依赖。
+phase只记录交互位置，不代表外部操作授权。bind后为asset_choice；选1按[画布接口](canvas.md)执行资产传输，完成后phase→image_choice并显示上传菜单，选上传后phase→image_folder再询问图片文件夹；完成上传或选暂不上传后phase→style。资产菜单选2直接phase→style。style后自动为range；commit后为nodes_choice；选1按本次request_id批量创建视频节点，选2跳过，随后phase→followup并显示两条续接提示。恢复时status读当前阶段，避免重复菜单。小云雀按需调用官方CLI，分镜生成本身不依赖登录。
+
+`commit`返回`canvas_sync`：replace且已有视频映射时尝试同步当前有效单元的提示词及单元时长，核对Seedance 2.5与720P；未绑定为not_bound，云端冲突或失败为pending。先保留本地已提交版本及TXT，再处理云端待同步项。幂等重放不会用旧receipt单元覆盖更晚的有效版本。TXT渲染默认不含小云雀内部标签；画布引用绑定使用同一render_unit的reference_text入口，仅转换资产位置，保留台词引号内原文。
 
 ## 范围坐标
 
@@ -71,7 +75,7 @@ replace请求：mode=`replace`，新的request_id，units列出要替换的原ID
 | character_ids | 本单元所有出镜或发声的CHAR ID，不列本单元没出现的人 |
 | prop_ids | 作为镜头主体的主要道具PROP ID；其他正文提到的道具仍用台账主名 |
 | time / weather | 中文；时间按标准标题、天气未知填未明示 |
-| global | 单段中文全局光照/色彩/层次/景深/站位/构图/已有环境描述 |
+| global | 单段中文全局光照/色彩/层次/景深/站位/构图/已有环境描述；资产名称使用显式@引用 |
 | start_state / end_state | 后台中文承接状态，含已有站位、朝向、持物、伤势、动作进度、发声接续 |
 | shots / audio | 见下表 |
 
@@ -83,12 +87,12 @@ replace请求：mode=`replace`，新的request_id，units列出要替换的原ID
 | scene_id | 当前实际场景SC ID，属于scene_ids |
 | framing | 大远景、大全景、远景、全景、中景、中近景、近景、特写之一 |
 | angle | 正面、斜侧、侧拍、背拍、俯拍、仰拍、第一人称、客观之一 |
-| subjects | 本镜明确主体CHAR/PROP ID数组；正文必须含每个主体的台账完整主名 |
+| subjects | 本镜明确主体CHAR/PROP ID数组；正文必须含每个主体的@台账完整主名或@{资产ID} |
 | closeup_reason | 近景/特写必填：情绪峰值、核心道具、动作高光、剧情伏笔之一 |
 | face_closeup | 脸部特写时true；首镜不能true |
 | environment_evidence | subjects为空时，填本单元标准正文中的原句，生成者确认确为原有无人/无核心道具环境镜头 |
-| connector | 第2镜起必填单行自然连接词；不代替运镜 |
-| text | 中文单行摄影/动作/环境/副反应/音效描述，包含声明的景别与主体全名；不要手写台词标签与对白引号 |
+| connector | 第2镜起必填单行自然连接词；不代替运镜；提到资产名时使用显式@引用 |
+| text | 中文单行摄影/动作/环境/副反应/音效描述，包含声明的景别与主体的显式@引用；不要手写台词标签与对白引号 |
 | dialogue_parts | 无对白可省略/空数组；有则为`[{"record":"L000004","text":"原台词连续片段"}]`，程序补完整人物名、发声标签和引号 |
 
 声音字段：每个本单元涉及的标准台词record恰好一个事件，不按镜头重复登记。跨单元时分别填该单元来源截取的准确片段。
@@ -106,14 +110,30 @@ replace请求：mode=`replace`，新的request_id，units列出要替换的原ID
 
 同一声音事件可以跨镜头，但各dialogue_parts按镜头顺序拼接必须逐字等于该事件text，包括标点。每片段所在镜头必须与事件时间相交；生成者还须核对片段长度与该镜实际发音时间，不能把长台词全部放到最后一镜。声音连续期间的反应镜仍安排原句的连续片段，标注自然续声。
 
+## 引用与统计
+
+global、shots[].text与connector中的人物、场景、主要道具名称使用 `@台账完整主名称 `（名称后必须有英文空格），或后台稳定ID形式 `@{CHAR0001}`、`@{SET0001}`、`@{PROP0001}`；程序只解析显式引用，按ID输出 `@完整名称 `，自动补齐名称后的英文空格，不自动替换裸词或台词内的人名、道具词。人工复核所有资产名称均已标记@且使用主名称，不使用别名或简称；程序检查主体引用、ID归属、重名、未知引用与重复@。相同名称对应不同资产ID时先处理台账命名，不自行合并或猜测图片归属。
+
+人物行渲染为 `人物：完整name@完整name ；`，多人物逐项连接，无人为 `人物：无；`。场景行渲染为 `场景：完整heading@所关联SET完整name ；时间：…；天气：…；`，多场景逐项连接。原音频名单行替换为紧随标题下一行、独占一行的 `@黑幕`，无分号及空格；不新增镜头或时长，不写入剧本道具。audio结构与校验不变；对白说话人标签加@，dialogue_parts.text原样保留。
+
+commit、幂等重试及render成功后返回unit_count、total_seconds、minutes、seconds、summary。统计仅使用该receipt.units：unit_count为单元数，total_seconds为duration求和，minutes与seconds为divmod(total_seconds,60)。append的summary为 `本次生成分镜共N个，总时长x分x秒。`；replace为 `本次修改分镜共N个，总时长x分x秒。`。首次交付、重试及局部修改均不累计其他批次或旧版本，只有文件写入成功才向用户显示统计与文件链接。
+
 ## 执行与恢复
 
 写完第一个单元，用相同顶层span和当前units前缀执行check --partial；通过并人工检查后追加下一单元，再检查。partial不要求覆盖选定范围尾部，但已写部分仍满足全部单元规则。最后完整check后commit；partial结果不能作为全批交付依据。
 
-程序检查：来源与台词、归属、资产关联、场景硬切、短段边界、镜数/镜时长/声音合法性、特写数量/累计比例、相邻景别、范围异常确认、版本与固定抬头。语速估计超档仅返回warnings；应后台复核，明确实际不自然时修正，不把估计误差当确定错误。
+程序检查：来源与台词、归属、资产关联与主体@引用、重名及引用归属、场景硬切、短段边界、镜数/镜时长/声音合法性、特写数量/累计比例、相邻景别、范围异常确认、版本与固定抬头。语速估计超档仅返回warnings；应后台复核，明确实际不自然时修正，不把估计误差当确定错误。
 
 摄影目的、环境依据、人物微动作、具体化是否新增事件、实际口型、动作/声音是否同期、完整事件覆盖均需生成者人工复核。来源span完整覆盖不等于语义已完整呈现，程序不作此承诺。
 
 commit先原子保存session，再渲染交付；同request_id、同内容重试不会重复编号或范围记录。交付失败用render重建已提交文件。指定新输出名以保存历史；不能覆盖来源、风格、session或Skill文件。渲染旧receipt得到当批原版本，当前有效版本以session.units为准。
 
 状态通过单一session.json原子提交。单项目顺序执行，不并发写同一项目；读取/校验不会改变历史。程序运行产生的JSON只供后台查看。
+
+## 可复用布景
+
+新绑定使用schema 3台账。unit.scene_ids、main_scene及shot.scene_id仍是SC剧情场次，保持来源定位、编号、时间与边界判断；图片引用目录使用CHAR、SET、PROP，不能拿SC当图片ID。每个SC的scene_asset_id指向对应SET，允许多SC复用同一SET；镜头只能引用该SC所属的SET。节点清单包含全部视觉资产，不根据当前单元筛选。图片上传后刷新引用及缺图报告也按SET判断。
+
+本地回归检查：`python <skill>/scripts/self_check.py`。只使用临时目录内的虚构剧本样本，覆盖布景复用/版本、名称空格边界、标题后黑幕、固定抬头、图片文件名、缺图报告及改稿迁移，不连接CLI或画布，不处理用户当前项目。
+
+内置asset_ledger.py init产生草稿；地点身份核实及别称归并后运行build-scenes，按确认的LOC归组，不按标题字符串/日夜猜测归并。真实布景版本需手动添加decor、parent_id及visual_facts原文证据，具体字段见内置资产台账参考。旧schema 2可供读取审计，但画布资产和视频写入须先通过离线方案升级，不复用SC映射冒充SET。
