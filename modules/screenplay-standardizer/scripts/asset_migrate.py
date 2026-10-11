@@ -179,6 +179,8 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
         if char_id not in char_by_id or not isinstance(name, str) or not name.strip():
             raise ValueError(f"人物改名映射无效：{char_id}")
         item = char_by_id[char_id]
+        if 'source_entry' in item:
+            item['source_entry'] = name
         if item["name"] != name:
             if item["name"] not in item["aliases"]:
                 item["aliases"].append(item["name"])
@@ -207,10 +209,10 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
         linked = []
         for name in base["cast_entries"]:
             role_name, _ = split_cast_entry(name)
-            options = {ref for scene in prior for ref in scene["character_ids"] if char_by_id[ref]["name"] == name}
+            options = {ref for scene in prior for ref in scene["character_ids"] if char_by_id[ref].get("source_entry", char_by_id[ref]["name"]) == name}
             generic = bool(GENERIC_ROLE.match(role_name) or role_name.endswith("-群像"))
             if not options and not generic:
-                options = {item["id"] for item in characters if item["name"] == name}
+                options = {item["id"] for item in characters if item.get("source_entry", item["name"]) == name}
             if len(options) == 1:
                 linked.append(next(iter(options)))
             else:
@@ -282,9 +284,9 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
 
     for category, items in (("characters", characters), ("locations", locations), ("props", props)):
         for item in items:
-            for field in ("visual_facts", "personality_facts") if category == "characters" else ("visual_facts",):
+            for field in ("visual_facts", "personality_facts", "production_design") if category == "characters" else ("visual_facts",):
                 migrated = []
-                for fact in item[field]:
+                for fact in item.get(field, []):
                     revised = migrate_fact(fact, old_by_id, lineage, new_by_number, old_paragraphs, new_paragraphs, new_index)
                     field_name = {"characters": "character_ids", "locations": "location_id", "props": "prop_ids"}[category]
                     linked = bool(revised) and all(item["id"] in (
@@ -295,6 +297,21 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
                     else:
                         pending.append({"kind": "资产事实证据或出现关系待核", "asset_id": item["id"], "fact": fact})
                 item[field] = migrated
+            if category == 'characters' and item.get('appearance'):
+                old_anchor = item['appearance']['active_from']
+                for field in ('active_from', 'active_until'):
+                    old_sid = item['appearance'].get(field)
+                    if not old_sid:
+                        continue
+                    numbers = lineage.get(old_sid, [])
+                    if len(numbers) == 1:
+                        item['appearance'][field] = new_by_number[numbers[0]]['id']
+                    else:
+                        pending.append({'kind': '形象启停场次待核', 'asset_id': item['id'], 'old_scene_id': old_sid})
+                anchor = old_by_id.get(old_anchor)
+                target = new_by_id.get(item['appearance']['active_from'])
+                if not anchor or not target or old_paragraphs[anchor['source_range'][0]-1:anchor['source_range'][1]] != new_paragraphs[target['source_range'][0]-1:target['source_range'][1]]:
+                    pending.append({'kind': '形象启用依据待核', 'asset_id': item['id']})
     used_characters = {ref for scene in scenes for ref in scene["character_ids"]}
     for item in list(characters):
         if item["id"] not in used_characters:
@@ -327,6 +344,11 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
             if scene["scene_asset_id"] not in assets or not unchanged:
                 pending.append({"kind": "布景版本关联待核", "scene_id": scene["id"],
                                 "candidate_asset_id": scene["scene_asset_id"]})
+            if len(prior) == 1 and unchanged and prior[0].get('prop_occurrences'):
+                scene['prop_occurrences'] = copy.deepcopy(prior[0]['prop_occurrences'])
+            elif any(s.get('prop_occurrences') for s in prior):
+                pending.append({'kind': '道具实体出现关系待核', 'scene_id': scene['id'],
+                                'old_occurrences': [s.get('prop_occurrences', []) for s in prior]})
         for item in result["scene_assets"]:
             facts = []
             for fact in item["visual_facts"]:

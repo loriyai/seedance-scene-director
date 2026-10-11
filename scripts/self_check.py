@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -14,10 +15,50 @@ sys.dont_write_bytecode = True
 import director as d
 import canvas as c
 import canvas_media as media
+import ensure_dependencies as dependencies
 from test_dialogue_layout import DialogueLayoutChecks
 
 _, ledger, _ = d.dependency()
 import asset_migrate
+
+
+class DependencyChecks(unittest.TestCase):
+    def module(self):
+        return SimpleNamespace(__version__='test', safe_load=lambda value: value)
+
+    def test_installed_pyyaml_is_not_reinstalled(self):
+        with patch.object(dependencies, 'load_yaml', return_value=self.module()), patch.object(dependencies.subprocess, 'run') as install:
+            self.assertEqual(dependencies.ensure_pyyaml()['status'], 'already_installed')
+            install.assert_not_called()
+
+    def test_missing_pyyaml_installs_into_the_selected_python_then_verifies(self):
+        with patch.object(dependencies, 'load_yaml', side_effect=[None, self.module()]) as load, patch.object(dependencies.subprocess, 'run') as install:
+            self.assertEqual(dependencies.ensure_pyyaml()['status'], 'installed')
+            self.assertEqual(load.call_count, 2)
+            command = install.call_args.args[0]
+            self.assertEqual(command[:4], [sys.executable, '-m', 'pip', 'install'])
+            self.assertEqual(command[-1], 'PyYAML')
+            self.assertNotIn('--upgrade', command)
+            install.assert_called_once()
+
+    def test_failed_install_does_not_retry(self):
+        with patch.object(dependencies, 'load_yaml', return_value=None), patch.object(dependencies.subprocess, 'run', side_effect=dependencies.subprocess.CalledProcessError(1, ['pip'])) as install:
+            with self.assertRaisesRegex(RuntimeError, '安装失败'):
+                dependencies.ensure_pyyaml()
+            install.assert_called_once()
+
+    def test_broken_import_does_not_overwrite_an_existing_package(self):
+        missing = ModuleNotFoundError('missing transitive dependency', name='other_dependency')
+        with patch.object(dependencies.importlib, 'import_module', side_effect=missing), patch.object(dependencies.subprocess, 'run') as install:
+            with self.assertRaisesRegex(RuntimeError, '依赖损坏'):
+                dependencies.ensure_pyyaml()
+            install.assert_not_called()
+
+    def test_install_success_still_requires_a_working_import(self):
+        with patch.object(dependencies, 'load_yaml', return_value=None), patch.object(dependencies.subprocess, 'run') as install:
+            with self.assertRaisesRegex(RuntimeError, '仍无法导入'):
+                dependencies.ensure_pyyaml()
+            install.assert_called_once()
 
 
 class SkillChecks(unittest.TestCase):
@@ -62,7 +103,7 @@ class SkillChecks(unittest.TestCase):
             'records': [{'id': 'L000001', 'scene': 'SC0001', 'start': 0, 'end': 8,
                          'kind': 'action', 'text': '陈默将笔放在桌上'}]}
         self.unit = {'id': '场景1-分镜1', 'version': 1, 'span': [0, 8], 'duration': 4,
-            'output_format': 'reference-v1',
+            'output_format': 'reference-v2',
             'scene_ids': ['SC0001'], 'main_scene': 'SC0001', 'character_ids': ['CHAR0001'],
             'prop_ids': ['PROP0001'], 'time': '白天', 'weather': '未明示', 'style': '3D国风动漫',
             'global': '@{CHAR0001} 站在桌前。', 'start_state': '站立', 'end_state': '放笔',
@@ -252,12 +293,12 @@ class SkillChecks(unittest.TestCase):
         rendered = d.render_unit(self.state, self.unit)
         lines = rendered.splitlines()
         self.assertEqual(lines[4], '人物：@陈默-基础形象 ；')
-        self.assertEqual(len(lines), 8)
-        self.assertNotIn(self.unit['global'], rendered)
-        self.assertIn('·00秒-02秒[镜头1-放笔]：（景别：@陈默-基础形象 的中景；转场：硬切）', lines[6])
-        self.assertIn('·02秒-04秒[镜头2-落点]：（景别：@笔 的中景；转场：动作匹配剪辑）', lines[7])
-        self.assertIn('承接放笔动作。音效：落桌轻响+室内底噪。', lines[7])
-        self.assertTrue(lines[6].endswith('音效：无。'))
+        self.assertEqual(len(lines), 9)
+        self.assertEqual(lines[6], '人物站位：@陈默-基础形象 站在桌前。')
+        self.assertIn('·00秒-02秒[镜头1-放笔]：景别：@陈默-基础形象 的中景；转场：硬切，', lines[7])
+        self.assertIn('·02秒-04秒[镜头2-落点]：景别：@笔 的中景；转场：动作匹配剪辑，', lines[8])
+        self.assertIn('承接放笔动作。音效：落桌轻响+室内底噪。', lines[8])
+        self.assertTrue(lines[7].endswith('音效：无。'))
 
     def test_reference_focal_field_counts_as_subject_reference(self):
         # The focus is referenced by the generated framing field; other participants remain explicit.
@@ -277,7 +318,7 @@ class SkillChecks(unittest.TestCase):
         self.assertEqual(d.validate_unit(self.state, self.unit, self.unit['span']), [])
         rendered = d.render_unit(self.state, self.unit)
         self.assertIn('人物：无；', rendered)
-        self.assertIn('（景别：@陈默卧室 的远景；转场：硬切）', rendered)
+        self.assertIn('景别：@陈默卧室 的远景；转场：硬切，', rendered)
         shot.pop('environment_evidence')
         with self.assertRaisesRegex(ValueError, '环境证据'):
             d.validate_unit(self.state, self.unit, self.unit['span'])
@@ -317,7 +358,7 @@ class SkillChecks(unittest.TestCase):
                     unit.pop('output_format')
                 else:
                     unit['output_format'] = version
-                with self.assertRaisesRegex(ValueError, 'reference-v1'):
+                with self.assertRaisesRegex(ValueError, 'reference-v2'):
                     d.validate(state, {'mode': 'append', 'request_id': 'new', 'span': [0, 8], 'units': [unit]})
 
     def test_sound_fields_validate_references_and_convert_separately(self):
@@ -374,7 +415,146 @@ class SkillChecks(unittest.TestCase):
             d.validate_unit(self.state, self.unit, self.unit['span'])
         self.unit['audio'][0]['recording_evidence'] = '虚构测试录音：测量区间0至2.34秒'
         self.assertEqual(d.validate_unit(self.state, self.unit, self.unit['span']), [])
-        self.assertIn('实配音0秒至2.34秒', d.render_unit(self.state, self.unit))
+        self.assertNotIn('实配音', d.render_unit(self.state, self.unit))
+        self.assertNotIn('发声估时', d.render_unit(self.state, self.unit))
+
+    def test_source_and_production_names_are_independent(self):
+        character = self.data['characters'][0]
+        character.update(name='陈默-第一世-基础形象', source_entry='陈默-基础形象')
+        self.data['props'][0].update(name='笔-制作主名', source_name='笔')
+        self.validate()
+        self.assertIn('@陈默-第一世-基础形象 ', d.render_unit(self.state, self.unit))
+        self.assertIn('@笔-制作主名 ', d.render_unit(self.state, self.unit))
+        path = self.work / 'named.json'
+        d.write_json(path, self.data)
+        migrated, report = asset_migrate.migrate(path, self.source, self.script, self.work, {})
+        self.assertEqual(report['pending_reviews'], [])
+        self.assertEqual(migrated['characters'][0]['id'], character['id'])
+        self.validate(migrated)
+
+    def test_asset_stage_rejects_global_duplicates(self):
+        duplicate = copy.deepcopy(self.data['characters'][0])
+        duplicate['id'] = 'CHAR0002'
+        self.data['characters'].append(duplicate)
+        with self.assertRaisesRegex(ValueError, '资产阶段'):
+            self.validate()
+
+    def test_unrelated_legacy_duplicate_does_not_block_local_unit(self):
+        self.data['props'].extend([{'id': 'PROP0003', 'name': '黄绫'}, {'id': 'PROP0004', 'name': '黄绫'}])
+        d.validate_unit(self.state, self.unit, self.unit['span'])
+        self.assertIn('景别：', d.render_unit(self.state, self.unit))
+        with self.assertRaisesRegex(ValueError, '重名'):
+            d.reference_catalog(self.state)
+
+    def test_natural_short_unit_is_not_required_to_reach_range_end(self):
+        self.unit.update(short_reason='natural_beat', short_basis='放笔动作已完成，无需停留凑时长')
+        d.validate_unit(self.state, self.unit, [0, 16])
+        self.unit.pop('short_basis')
+        with self.assertRaisesRegex(ValueError, '自然短单元'):
+            d.validate_unit(self.state, self.unit, [0, 16])
+
+    def test_abstract_continuation_is_rejected(self):
+        for text in ('继续说完同一誓言。', '凝定的目光承接誓言最后一部分。', '发声估时3.1秒至12.7秒。'):
+            self.unit['shots'][0]['text'] = text
+            with self.assertRaisesRegex(ValueError, '抽象续声'):
+                d.validate_unit(self.state, self.unit, self.unit['span'])
+
+    def test_reference_v1_receipt_keeps_parentheses_and_no_position_line(self):
+        self.unit['output_format'] = 'reference-v1'
+        rendered = d.render_unit(self.state, self.unit)
+        self.assertIn('：（景别：', rendered)
+        self.assertNotIn('人物站位：', rendered)
+
+    def test_v2_commit_and_idempotent_render_use_the_same_template(self):
+        state = copy.deepcopy(self.state)
+        state.update(revision=0, style_hash=d.sha('3D国风动漫'), units=[], ranges=[], receipts=[], next_numbers={})
+        d.atomic_text(self.work / 'video-style.txt', '3D国风动漫\n')
+        request_path, output = self.work / 'new-request.json', self.work / 'new-output.txt'
+        d.write_json(request_path, {'mode': 'append', 'request_id': 'v2-regression', 'span': [0, 8], 'units': [self.unit]})
+        args = d.argparse.Namespace(project=self.work, request=request_path, output=output)
+        result = d.commit(args, state)
+        self.assertEqual(result['status'], 'committed')
+        self.assertEqual(result['total_seconds'], 4)
+        self.assertEqual(result['canvas_sync']['status'], 'not_bound')
+        first = output.read_bytes()
+        self.assertIn('人物站位：', first.decode('utf-8'))
+        self.assertNotIn('（景别：', first.decode('utf-8'))
+        self.assertEqual(d.commit(args, state)['status'], 'already_committed')
+        self.assertEqual(output.read_bytes(), first)
+
+    def test_normalization_reuses_groups_by_confirmed_place_and_props_by_source(self):
+        data = {'schema_version': 3, 'characters': [], 'props': [], 'scene_assets': [], 'retired_ids': [],
+                'locations': [{'id': 'LOC1', 'name': '山村', 'identity_status': 'confirmed'},
+                              {'id': 'LOC2', 'name': '城门', 'identity_status': 'confirmed'}], 'scenes': []}
+        for i, lid in enumerate(('LOC1', 'LOC1', 'LOC2'), 1):
+            data['characters'].append({'id': f'CHAR{i}', 'name': '村民-群像-基础形象',
+                                       'aliases': [], 'visual_facts': [], 'personality_facts': []})
+            data['props'].append({'id': f'PROP{i}', 'name': '黄绫', 'aliases': [], 'visual_facts': []})
+            data['scenes'].append({'id': f'SC{i}', 'location_id': lid, 'character_ids': [f'CHAR{i}'],
+                                   'prop_ids': [f'PROP{i}'], 'prop_occurrences': [
+                                       {'id': f'实体{i}', 'asset_id': f'PROP{i}', 'count': 2 if i == 3 else 1}]})
+        original = copy.deepcopy(data)
+        normalized, report = ledger.normalize_assets(data)
+        self.assertEqual(data, original)
+        self.assertEqual([c['name'] for c in normalized['characters']],
+                         ['村民-群像-基础形象-山村', '村民-群像-基础形象-城门'])
+        self.assertEqual(len(normalized['props']), 1)
+        self.assertEqual(normalized['scenes'][0]['character_ids'], normalized['scenes'][1]['character_ids'])
+        self.assertNotEqual(normalized['scenes'][0]['character_ids'], normalized['scenes'][2]['character_ids'])
+        self.assertEqual([s['prop_occurrences'][0]['count'] for s in normalized['scenes']], [1, 1, 2])
+        self.assertEqual(report['redirects'], {'CHAR2': 'CHAR1', 'PROP2': 'PROP1', 'PROP3': 'PROP1'})
+        twice, repeated = ledger.normalize_assets(normalized)
+        self.assertEqual(twice, normalized)
+        self.assertEqual(repeated['redirects'], {})
+
+    def test_explicit_prop_transformation_gets_separate_visual_version(self):
+        data = copy.deepcopy(self.data)
+        transformed = copy.deepcopy(data['props'][0])
+        transformed.update(id='PROP0003', source_name='笔', visual_version='升级后')
+        data['props'].append(transformed)
+        data['scenes'][2]['prop_ids'] = ['PROP0003']
+        normalized, report = ledger.normalize_assets(data)
+        self.assertEqual([p['name'] for p in normalized['props']], ['笔', '笔记本电脑', '笔-升级后'])
+        self.assertEqual(report['redirects'], {})
+
+    def test_incarnation_and_wardrobe_activation_wait_for_actual_scene(self):
+        paragraphs = ['第二世即将重开。', '他重生成为林默。', '他穿旧衣来到富裕家庭认亲。', '次日他换上新衣。']
+        scenes = {f'SC{i}': {'id': f'SC{i}', 'number': i, 'source_range': [i, i], 'character_ids': []}
+                  for i in range(1, 5)}
+        appearance = {'identity': '陈默', 'incarnation': '第二世', 'variant': '基础形象',
+                      'active_from': 'SC2', 'trigger': 'rebirth', 'basis': '他重生成为林默'}
+        character = {'id': 'CHAR2', 'appearance': appearance}
+        scenes['SC2']['character_ids'] = ['CHAR2']
+        scenes['SC3']['character_ids'] = ['CHAR2']
+        ledger.validate_appearance(character, paragraphs, scenes)
+        scenes['SC1']['character_ids'] = ['CHAR2']
+        with self.assertRaisesRegex(ValueError, '不能提前'):
+            ledger.validate_appearance(character, paragraphs, scenes)
+        scenes['SC1']['character_ids'] = []
+        character['appearance'].update(active_from='SC4', trigger='change_clothes', basis='换上新衣')
+        with self.assertRaisesRegex(ValueError, '不能提前'):
+            ledger.validate_appearance(character, paragraphs, scenes)
+        scenes['SC2']['character_ids'] = scenes['SC3']['character_ids'] = []
+        scenes['SC4']['character_ids'] = ['CHAR2']
+        ledger.validate_appearance(character, paragraphs, scenes)
+        character['appearance']['trigger'] = '发财'
+        with self.assertRaisesRegex(ValueError, '发财'):
+            ledger.validate_appearance(character, paragraphs, scenes)
+
+    def test_production_design_is_separate_from_original_facts(self):
+        item = self.data['characters'][0]
+        item['production_design'] = [{'text': '简朴日常衣装', 'evidence': self.paragraphs[2],
+                                     'source_paragraphs': [3], 'scene_ids': ['SC0001'], 'attribution': '制作设计'}]
+        self.validate()
+        lp, output = self.work / 'design.json', self.work / 'design.txt'
+        d.write_json(lp, self.data)
+        with contextlib.redirect_stdout(io.StringIO()):
+            ledger.render(self.script, self.source, lp, output)
+        self.assertIn('制作设计：简朴日常衣装', output.read_text(encoding='utf-8'))
+        self.assertEqual(item['visual_facts'], [])
+        migrated, report = asset_migrate.migrate(lp, self.source, self.script, self.work, {})
+        self.assertEqual(report['pending_reviews'], [])
+        self.assertEqual(migrated['characters'][0]['production_design'], item['production_design'])
 
     def test_unknown_or_empty_focus_rejected(self):
         for focus in (['CHAR9999'], [], ['CHAR0001', 'CHAR0001']):

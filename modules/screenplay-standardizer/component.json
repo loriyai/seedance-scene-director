@@ -2,11 +2,11 @@
   "component": "screenplay-standardizer",
   "bundle_format": 1,
   "files": {
-    "INSTRUCTIONS.md": "3a314a2275dedfc9748aba3a3397d2515b7078ff6311dd562f023ecd4dfec090",
-    "references/asset-ledger.md": "b4a673f1e95618b6d8b0143fde5401f9b779ee450069a2fad4de7a93a6dd27af",
+    "INSTRUCTIONS.md": "633f903546a67321ce58e1d0f71d143a3c075a534c8ae6ef6d92c91cec0ae2b1",
+    "references/asset-ledger.md": "cba70516f3bf909717f5d309406885d8ae53c03509cfca823c6f8692d6b2f3b1",
     "references/review.md": "60ee9ff347e6487a5f9ff14bdd10fa6cf3c264c626d52db357f9008248e66d82",
-    "scripts/asset_ledger.py": "b4d87d0bc07ec8bae233699602e63b62f647008739063eaafcacc3675dd90aba",
-    "scripts/asset_migrate.py": "cbe47db99d61472a4492498060da9969c2e1e235414b48c718cd64cf46d3e859",
+    "scripts/asset_ledger.py": "942948a2150f385d9ba710ccb2bf6be7af3a664283671473bae02010af554342",
+    "scripts/asset_migrate.py": "492eea77405347b0377fdb667f5b92da69c16050f570ee6d0c2509181bdc8de2",
     "scripts/screenplay_io.py": "d1d8545f3c009fe5d7be587ff295ecef8af36339dfcdc555cfd304d4c06701d7",
     "scripts/screenplay_review.py": "779debca62fc7427c1569b4e8c33bfebd8bc030a0f6b818fd83f8684639c5f86"
   }

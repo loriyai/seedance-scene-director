@@ -1,7 +1,8 @@
 """Explicit speech layout; never divide words by shot-duration proportions."""
 import re
 
-POLICY = 'semantic-v1'
+POLICY = 'semantic-v2'
+LEGACY_POLICY = 'semantic-v1'
 PUNCTUATION = '，、,。？！?!；;…—～~：:'
 TAILS = set('了呢吧啊呀哦嘛么啦呗哟喽的')
 
@@ -25,10 +26,10 @@ def attach(unit, plans=None):
     """Place whole utterances or author-supplied semantic chunks at exact times.
 
     plans: record -> [{text,start,end}]. Default: quote the entire event once.
-    A short utterance crossing a cut fails; replan the shot instead of cutting
-    words. Long chunks get continuation links without repeated quotation.
+    New chunks must fit their own shot. Authors supply semantic boundaries;
+    this helper never guesses word cuts. Legacy receipts retain v1 links.
     """
-    unit['dialogue_layout'] = POLICY
+    unit['dialogue_layout'] = LEGACY_POLICY if unit.get('output_format') == 'reference-v1' else POLICY
     for shot in unit['shots']:
         shot['dialogue_parts'] = []
         shot.pop('dialogue_continuations', None)
@@ -41,14 +42,15 @@ def attach(unit, plans=None):
             require(shot is not None, '台词起点无对应镜头')
             shot['dialogue_parts'].append(part)
             for following in unit['shots']:
-                if following['start'] > shot['start'] and following['start'] < part['end']:
+                if unit['dialogue_layout'] == LEGACY_POLICY and following['start'] > shot['start'] and following['start'] < part['end']:
                     following.setdefault('dialogue_continuations', []).append(
                         {'record': event['record'], 'segment': index})
     validate(unit)
     return unit
 
 def validate(unit):
-    require(unit.get('dialogue_layout') == POLICY, '新分镜须采用semantic-v1台词布局；禁止按镜时比例切字')
+    require(unit.get('dialogue_layout') in (POLICY, LEGACY_POLICY), '须采用semantic-v2台词布局；禁止按镜时比例切字')
+    local = unit['dialogue_layout'] == POLICY
     events = {e['record']: e for e in unit['audio']}
     grouped = {rid: [] for rid in events}
     actual_links = []
@@ -60,6 +62,7 @@ def validate(unit):
             require(link.get('record') in events and type(link.get('segment')) is int, '续声引用无效')
             actual_links.append((i, link['record'], link['segment']))
     expected_links = []
+    require(not local or not actual_links, 'semantic-v2逐镜写实际台词，不使用抽象续声引用')
     for rid, event in events.items():
         parts = grouped[rid]
         require(parts and ''.join(p['text'] for _, p in parts) == event['text'], '语义台词有漏字、重复或改词')
@@ -83,6 +86,8 @@ def validate(unit):
                 require(text.lstrip()[0] not in PUNCTUATION, '禁止将标点留给下一台词片段')
             shot = unit['shots'][i]
             require(shot['start'] <= t0 < shot['end'], '完整台词必须写在实际开始发声的镜头')
+            if local:
+                require(t1 <= shot['end']+.001, '台词片段必须完整落在本镜；长句按标点和语义分句，或重排切点')
             if t1-t0 <= 5+.001:
                 require(t1 <= shot['end']+.001, '可在单镜说完的短句必须完整落在一镜；调整切点或发声起点')
             if len(parts) == 1:

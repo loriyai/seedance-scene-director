@@ -9,11 +9,11 @@ class DialogueLayoutChecks(unittest.TestCase):
         for length in durations:
             shots.append({'start':cursor,'end':cursor+length,'dialogue_parts':[]})
             cursor+=length
-        return {'audio':[{'record':'L1','text':text,'start':1,'end':end,'units':units,
+        return {'output_format':'reference-v1','audio':[{'record':'L1','text':text,'start':1,'end':end,'units':units,
                          'pause':dl.pause_seconds(text),'speed':'常速'}], 'shots':shots}
 
     def plan(self,u,pieces):
-        u['dialogue_layout']=dl.POLICY
+        u['dialogue_layout']=dl.LEGACY_POLICY
         for i,(text,start,end) in enumerate(pieces):
             u['shots'][i]['dialogue_parts']=[{'record':'L1','text':text,'start':start,'end':end}]
         return u
@@ -112,6 +112,48 @@ class DialogueLayoutChecks(unittest.TestCase):
     def test_new_requests_cannot_reuse_legacy_word_splitter(self):
         import director as d
         unit=self.sample()
-        unit['output_format']='reference-v1'
-        with self.assertRaisesRegex(ValueError,'semantic-v1'):
+        unit['output_format']='reference-v2'
+        with self.assertRaisesRegex(ValueError,'semantic-v2'):
             d.validate({'style_hash':'style'}, {'mode':'replace','request_id':'test','units':[unit]})
+
+    def test_v2_long_speech_requires_explicit_per_shot_chunks(self):
+        text = '爹！娘！我捡到一本绝世秘籍《玄清功》，给我十年，我一定提着仇人的头，来祭拜你们。'
+        u = self.sample(text, end=13, units=len(dl.compact(text)), durations=(3, 3, 3, 4))
+        u['output_format'] = 'reference-v2'
+        with self.assertRaisesRegex(ValueError, '完整落在本镜'):
+            dl.attach(u)
+        pieces = ['爹！娘！', '我捡到一本绝世秘籍《玄清功》，', '给我十年，我一定提着仇人的头，', '来祭拜你们。']
+        dl.attach(u, {'L1': [{'text': p, 'start': a, 'end': b}
+                             for p, a, b in zip(pieces, (1, 3, 6, 9), (3, 6, 9, 13))]})
+        self.assertEqual(u['dialogue_layout'], 'semantic-v2')
+        self.assertEqual(''.join(p['text'] for s in u['shots'] for p in s['dialogue_parts']), text)
+        self.assertFalse(any(s.get('dialogue_continuations') for s in u['shots']))
+        u['shots'][1]['dialogue_continuations'] = [{'record':'L1','segment':0}]
+        with self.assertRaisesRegex(ValueError, '逐镜写实际台词'):
+            dl.validate(u)
+
+    def test_v2_render_quotes_only_the_words_spoken_in_each_shot(self):
+        import director as d
+        u = self.sample('别担心，我会回来。', end=4, units=7)
+        u.update(output_format='reference-v2', id='场景1-分镜1', duration=6,
+                 style='3D国漫', character_ids=['CHAR1'], prop_ids=[], scene_ids=['SC1'],
+                 time='白天', weather='未明示')
+        u['global'] = '@{CHAR1} 站在桌前。'
+        u['audio'][0].update(character_id='CHAR1', voice='说')
+        dl.attach(u, {'L1':[{'text':'别担心，','start':1,'end':2.9},
+                           {'text':'我会回来。','start':3,'end':4}]})
+        for shot in u['shots']:
+            shot.update(focus=['CHAR1'], framing='中景', label='告别', transition='硬切',
+                        scene_id='SC1', text='平视四十五度斜侧固定机位；人物看向桌前。')
+        state={'ledger':{'schema_version':3,'characters':[{'id':'CHAR1','name':'陈默-第二世-林默-基础形象'}],
+                         'props':[], 'scene_assets':[{'id':'SET1','name':'房间'}],
+                         'scenes':[{'id':'SC1','heading':'场景1-日-内-房间','scene_asset_id':'SET1',
+                                    'prop_ids':[],'character_ids':['CHAR1']}]}}
+        rendered=d.render_unit(state,u)
+        shots=[line for line in rendered.splitlines() if line.startswith('·')]
+        self.assertIn('说：“别担心，”', shots[0])
+        self.assertNotIn('我会回来', shots[0])
+        self.assertIn('说：“我会回来。”', shots[1])
+        self.assertNotIn('发声估时', rendered)
+        self.assertNotIn('续声', rendered)
+        self.assertIn('转场：硬切，平视四十五度斜侧固定机位', shots[0])
