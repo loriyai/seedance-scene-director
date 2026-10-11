@@ -14,11 +14,14 @@ from decimal import Decimal
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import dialogue_layout
 HEADER_SHA = "8001822afdf324cbbfa3eb284b2a03ccbde084b2e70fa66763a26b5c738e5962"
 STYLES = {"1": "3D国风动漫,暗黑武侠/超写实仙侠风格", "2": "3D国风动漫，眷思量风格，东方奇幻唯美风格"}
 SPEEDS = {"常速": (4.0, 5.2), "快节奏": (4.5, 5.8), "情绪慢速": (3.3, 4.4)}
 FRAMINGS = {"大远景", "大全景", "远景", "全景", "中景", "中近景", "近景", "特写"}
 CLOSE = {"近景", "特写"}
+OUTPUT_FORMAT = "reference-v1"
 
 
 def require(condition, message):
@@ -374,6 +377,7 @@ def asset_text(state, unit, text):
 
 
 def validate_unit(state, unit, request_span):
+    require(unit.get("output_format") == OUTPUT_FORMAT, "新生成/修改单元须采用reference-v1输出模板；旧交付仅保留读取和渲染")
     a, b = interval(unit["span"], state["length"])
     duration = unit["duration"]
     require(type(duration) is int and state["entry"]["min"] <= duration <= 30, "单元时长不合法")
@@ -398,7 +402,7 @@ def validate_unit(state, unit, request_span):
             require(b == request_span[1], "范围末尾短单元必须结束于选定范围终点")
         else:
             require(b == state["length"], "全剧末尾短单元未到全剧终点")
-    require(all(isinstance(unit.get(k), str) and unit[k].strip() for k in ("time", "weather", "global", "start_state", "end_state")), "缺少时间/天气/全局方案/承接状态")
+    require(all(isinstance(unit.get(k), str) and unit[k].strip() for k in ("time", "weather", "global", "start_state", "end_state")), "缺少时间/天气/后台人物站位/承接状态")
     scenes = {s["id"]: s for s in state["ledger"]["scenes"]}
     chars = {c["id"]: c for c in state["ledger"]["characters"]}
     props = {p["id"]: p for p in state["ledger"]["props"]}
@@ -421,7 +425,7 @@ def validate_unit(state, unit, request_span):
         require(type(start) is int and type(end) is int and start == cursor and 1 <= end - start <= 5, "镜头时间轴不连续或单镜不在1～5秒")
         framing = shot["framing"]
         require(framing in FRAMINGS, "无法识别景别")
-        require(framing != previous and not (framing in CLOSE and previous in CLOSE), "相邻镜头景别重复或连续近景/特写")
+        require(not (framing in CLOSE and previous in CLOSE), "相邻镜头禁止连续近景/特写")
         if framing in CLOSE:
             require(shot.get("closeup_reason") in ("情绪峰值", "核心道具", "动作高光", "剧情伏笔"), "近景/特写不在白名单")
         if i == 0:
@@ -433,20 +437,41 @@ def validate_unit(state, unit, request_span):
         valid_subjects = set(unit["character_ids"]) | set(unit["prop_ids"])
         require(set(subjects) <= valid_subjects, "镜头主体未列入本单元资产")
         require(set(subjects) <= set(scenes[shot["scene_id"]]["character_ids"] + scenes[shot["scene_id"]]["prop_ids"]), "镜头使用了其他场景的资产")
+        require("focus" in shot or not subjects, "有人物或主要道具的镜头须明确观看焦点focus")
+        if "focus" in shot:
+            focus = shot["focus"]
+            require(isinstance(focus, list) and len(focus) == len(set(focus))
+                    and set(focus) <= set(subjects), "观看焦点须为本镜参与资产的无重复子集")
+            require(bool(focus) or not subjects, "有人物或主要道具的镜头须明确观看焦点")
+        if "purpose" in shot:
+            require(isinstance(shot["purpose"], str) and shot["purpose"].strip(), "后台镜头意图不能为空")
+        for field in ("label", "transition"):
+            value = shot.get(field)
+            require(isinstance(value, str) and value.strip() and not any(c in value for c in "\r\n[]"),
+                    f"镜头{field}须为非空单行，不能含换行或方括号")
+            _, referenced = asset_text(state, unit, value)
+            require(referenced <= set(scenes[shot["scene_id"]]["character_ids"] + scenes[shot["scene_id"]]["prop_ids"] + scene_asset_ids(state, [shot["scene_id"]])),
+                    f"镜头{field}引用了其他场景的资产")
         text = shot["text"]
         require(isinstance(text, str) and text.strip() and "\n" not in text and "：“" not in text, "镜头正文须为非空单段，台词仅填入dialogue_parts由程序渲染")
-        require(framing in text, "正文缺少已声明景别")
         _, referenced = asset_text(state, unit, text)
-        require(set(subjects) <= referenced, "正文主体须使用@台账完整名称或@{资产ID}引用")
+        require(set(subjects) <= referenced | set(shot.get("focus", [])), "正文参与者须使用@台账完整名称或@{资产ID}引用；主焦点由景别字段引用")
         require(referenced <= set(scenes[shot["scene_id"]]["character_ids"] + scenes[shot["scene_id"]]["prop_ids"] + scene_asset_ids(state, [shot["scene_id"]])),
                 "镜头正文引用了其他场景的资产")
         if not subjects:
             evidence = shot.get("environment_evidence", "")
             require(evidence and evidence in excerpt(state, a, b), "无人物/核心道具镜头须有本范围原文明示环境证据")
         require(shot.get("angle") in ("正面", "斜侧", "侧拍", "背拍", "俯拍", "仰拍", "第一人称", "客观"), "机位分类不合法")
-        if i:
-            require(isinstance(shot.get("connector"), str) and shot["connector"].strip(), "缺少自然连接词")
-            asset_text(state, unit, shot["connector"])
+        if "connector" in shot:
+            require(isinstance(shot["connector"], str), "连接词须为字符串")
+            if shot["connector"].strip():
+                asset_text(state, unit, shot["connector"])
+        for field in ("sound_foreground", "sound_environment"):
+            if field in shot:
+                require(isinstance(shot[field], str) and not any(c in shot[field] for c in "\r\n"), "镜头音效须为单行字符串，可留空")
+                _, referenced = asset_text(state, unit, shot[field])
+                require(referenced <= set(scenes[shot["scene_id"]]["character_ids"] + scenes[shot["scene_id"]]["prop_ids"] + scene_asset_ids(state, [shot["scene_id"]])),
+                        "镜头音效引用了其他场景的资产")
         used_chars.update(set(subjects) & set(chars))
         used_props.update(set(subjects) & set(props))
         cursor, previous = end, framing
@@ -476,6 +501,9 @@ def validate_unit(state, unit, request_span):
                 evidence = event.get("overlap_evidence", "")
                 require(evidence and evidence in Path(state["files"]["script"]["path"]).read_text(encoding="utf-8-sig"), "声音重叠缺少原剧情明确依据")
         require(event["speed"] in SPEEDS and type(event["units"]) is int and event["units"] > 0, "语速档位或可发音单位非法")
+        require(event.get("timing_basis", "text_estimate") in ("text_estimate", "recording"), "声音估时依据不合法")
+        if event.get("timing_basis") == "recording":
+            require(isinstance(event.get("recording_evidence"), str) and event["recording_evidence"].strip(), "实配音时码须注明录音测量依据")
         rate = event["units"] * 1000 / (t1 - t0 - pause)
         low, high = SPEEDS[event["speed"]]
         if not low <= rate <= high:
@@ -499,6 +527,8 @@ def validate_unit(state, unit, request_span):
     if not any(e.get("overlap_evidence") for e in events):
         collapsed = [rid for i, rid in enumerate(order) if i == 0 or rid != order[i - 1]]
         require(collapsed == list(expected), "镜头台词片段顺序与标准剧本不一致")
+    if unit.get("dialogue_layout") == dialogue_layout.POLICY:
+        dialogue_layout.validate(unit)
     return warnings
 
 
@@ -509,6 +539,11 @@ def validate(state, request, partial=False):
     require(isinstance(request.get("request_id"), str) and request["request_id"].strip(), "缺少幂等request_id")
     units = request["units"]
     require(isinstance(units, list) and units, "请求没有分镜单元")
+    for unit in units:
+        require(unit.get("output_format") == OUTPUT_FORMAT, "新生成/修改单元须采用reference-v1输出模板；旧交付仅保留读取和渲染")
+        if unit.get("audio"):
+            require(unit.get("dialogue_layout") == dialogue_layout.POLICY,
+                    "新生成/修改的有声单元须采用semantic-v1台词布局；旧交付仅保留读取和渲染")
     warnings = []
     if request["mode"] == "append":
         a, b = interval(request["span"], state["length"])
@@ -549,18 +584,18 @@ def validate(state, request, partial=False):
         for left, right in zip(sequence, sequence[1:]):
             if left["span"][1] == right["span"][0] and left["main_scene"] == right["main_scene"]:
                 f1, f2 = left["shots"][-1]["framing"], right["shots"][0]["framing"]
-                require(f1 != f2 and not (f1 in CLOSE and f2 in CLOSE), "相邻单元边界景别重复或连续近景/特写")
+                require(not (f1 in CLOSE and f2 in CLOSE), "相邻单元边界禁止连续近景/特写")
     by_id = {u["id"]: u for u in prospective if "id" in u}
     for unit in prospective:
         previous = by_id.get(unit.get("predecessor"))
         if previous and previous["main_scene"] == unit["main_scene"]:
             f1, f2 = previous["shots"][-1]["framing"], unit["shots"][0]["framing"]
-            require(f1 != f2 and not (f1 in CLOSE and f2 in CLOSE), "修改破坏了跨批次相邻单元的景别衔接")
+            require(not (f1 in CLOSE and f2 in CLOSE), "修改造成跨批次相邻单元连续近景/特写")
     if request["mode"] == "append" and state["units"]:
         previous = next((u for u in reversed(state["units"]) if u["span"][1] == units[0]["span"][0]), None)
         if previous and previous["main_scene"] == units[0]["main_scene"]:
             f1, f2 = previous["shots"][-1]["framing"], units[0]["shots"][0]["framing"]
-            require(f1 != f2 and not (f1 in CLOSE and f2 in CLOSE), "续接批次边界景别不合规")
+            require(not (f1 in CLOSE and f2 in CLOSE), "续接批次边界禁止连续近景/特写")
     return warnings
 
 
@@ -570,19 +605,48 @@ def render_unit(state, unit, reference_text=None):
     scenes = {s["id"]: s["heading"] for s in state["ledger"]["scenes"]}
     catalog = reference_catalog(state)
     header = fixed_header()
+    reference_format = unit.get("output_format") == OUTPUT_FORMAT
+    people = ("，".join(convert("@" + chars[c] + " ") for c in unit["character_ids"]) + "；") if reference_format else "".join(chars[c] + convert("@" + chars[c] + " ") + "；" for c in unit["character_ids"])
     lines = [f'{unit["id"]}（时长：{unit["duration"]}秒）', convert("@黑幕"), unit["style"] + ";" + header[0], header[1],
-             "人物：" + ("".join(chars[c] + convert("@" + chars[c] + " ") + "；" for c in unit["character_ids"]) or "无；"),
-             "场景：" + "".join(scenes[s] + convert("@" + catalog[scene_asset_ids(state, [s])[0]] + " ") + "；" for s in unit["scene_ids"]) + f'时间：{unit["time"]}；天气：{unit["weather"]}；',
-             convert(asset_text(state, unit, unit["global"])[0])]
+             "人物：" + (people if unit["character_ids"] else "无；"),
+             "场景：" + "".join(scenes[s] + convert("@" + catalog[scene_asset_ids(state, [s])[0]] + " ") + "；" for s in unit["scene_ids"]) + f'时间：{unit["time"]}；天气：{unit["weather"]}；']
+    if not reference_format:
+        lines.append(convert(asset_text(state, unit, unit["global"])[0]))
     for i, shot in enumerate(unit["shots"]):
-        if i:
+        if not reference_format and i and shot.get("connector", "").strip():
             lines.append(convert(asset_text(state, unit, shot["connector"])[0]))
         parts = []
         for part in shot.get("dialogue_parts", []):
             event = next(e for e in unit["audio"] if e["record"] == part["record"])
-            parts.append(convert("@" + chars[event["character_id"]] + " ") + event["voice"] + '：“' + part["text"] + '”')
+            timing = dialogue_layout.timing(part, shot, event.get("timing_basis") == "recording") if unit.get("dialogue_layout") == dialogue_layout.POLICY else ""
+            parts.append(convert("@" + chars[event["character_id"]] + " ") + event["voice"] + timing + '：“' + part["text"] + '”')
+        for link in shot.get("dialogue_continuations", []):
+            event = next(e for e in unit["audio"] if e["record"] == link["record"])
+            chunks = [p for s in unit["shots"] for p in s.get("dialogue_parts", []) if p["record"] == link["record"]]
+            chunk = chunks[link["segment"]]
+            parts.append(convert("@" + chars[event["character_id"]] + " ") +
+                         f'同句续声至{dialogue_layout.clock(chunk["end"])}秒。')
         speech = (" " + " ".join(parts)) if parts else ""
-        lines.append(f'[{shot["start"]}秒-{shot["end"]}秒] {convert(asset_text(state, unit, shot["text"])[0])}{speech}')
+        body = convert(asset_text(state, unit, shot["text"])[0])
+        if reference_format:
+            connector = shot.get("connector", "").strip()
+            if connector:
+                body += " " + convert(asset_text(state, unit, connector)[0])
+            body += speech
+            if body[-1:] not in ("。", "！", "？", "!", "?", "；", ";"):
+                body += "。"
+            focus = shot.get("focus", [])
+            focal_names = [catalog[aid] for aid in focus] or [catalog[scene_asset_ids(state, [shot["scene_id"]])[0]]]
+            focal = "、".join(convert("@" + name + " ") for name in focal_names)
+            sounds = [convert(asset_text(state, unit, shot[field].strip().rstrip("。"))[0])
+                      for field in ("sound_foreground", "sound_environment")
+                      if shot.get(field, "").strip().rstrip("。") not in ("", "无")]
+            sound = "+".join(sounds) or "无"
+            label = convert(asset_text(state, unit, shot["label"])[0])
+            transition = convert(asset_text(state, unit, shot["transition"])[0])
+            lines.append(f'·{shot["start"]:02d}秒-{shot["end"]:02d}秒[镜头{i + 1}-{label}]：（景别：{focal}的{shot["framing"]}；转场：{transition}）{body}音效：{sound}。')
+        else:
+            lines.append(f'[{shot["start"]}秒-{shot["end"]}秒] {body}{speech}')
     return "\n".join(lines)
 
 
