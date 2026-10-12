@@ -1,6 +1,6 @@
 # Seedance 场景分镜导演
 
-当前版本：**v0.05**
+当前版本：**v0.07**
 
 将完整中文剧本整理成标准剧本并提取资产，再根据用户指定的剧本范围，按场景生成适用于 Seedance 2.5 的分镜提示词。
 
@@ -10,13 +10,13 @@
 
 需要支持本地Skill的Codex环境，以及Python 3.10或更高版本。核心脚本使用标准库；收到完整剧本时会后台检查当前Python的PyYAML，缺失则直接安装并验证，已有版本不重复安装或升级。小云雀画布操作另需Node.js 16+、npm和官方CLI；首次使用时按需配置并完成浏览器授权。
 
-将本仓库克隆到 Skills 目录：
+本试验版基于 v0.05 提交 `8ed5867` 制作。安装时明确选择 `v0.07` 标签：
 
 ```bash
-git clone https://github.com/loriyai/seedance-scene-director.git ~/.codex/skills/seedance-scene-director
+git clone --branch v0.07 --single-branch https://github.com/loriyai/seedance-scene-director.git ~/.codex/skills/seedance-scene-director
 ```
 
-也可以下载仓库 ZIP，解压后将根目录文件夹命名为 `seedance-scene-director`，放入 Skills 目录。使用自定义 `CODEX_HOME` 时，放入对应的 `skills/seedance-scene-director` 目录。
+也可下载 [v0.07 源码 ZIP](https://github.com/loriyai/seedance-scene-director/archive/refs/tags/v0.07.zip)，解压后将根目录重命名为 `seedance-scene-director`；本地试验包 `seedance-scene-director-v0.07.zip` 已使用该目录名。已有同名安装时，先在 Skills 目录外备份旧文件夹，再完整替换。使用自定义 `CODEX_HOME` 时，安装到对应的 `skills/seedance-scene-director` 目录。切换版本时检查 `VERSION`，每次只安装一个版本。
 
 ## 使用
 
@@ -44,6 +44,7 @@ git clone https://github.com/loriyai/seedance-scene-director.git ~/.codex/skills
 - 26～30秒为优选范围，不是硬下限；自然动作/语义完成时可用4～25秒，后台记录依据，不补动作填时长。
 - 29～30 秒默认建议 11 镜，26～28 秒默认建议 9～10 镜；为自然表达可调整至 8～13 镜。不足 26 秒的单元按内容安排镜数。
 - 单镜头为 1～5 秒整数，各镜头时长之和严格等于单元总时长。
+- 按当前情境中的动作作用安排节奏：机械过渡优先短镜、合并或省略非关键中段；情节关键动作保留关键行为与结果；情绪氛围动作保留原文变化与必要停顿，不默认慢演。动作匹配在进行中切出、后镜接续，整组只完成一次；画面压缩不改写标准剧本。
 - 台词、说话人及发声类型以标准剧本为准。短句完整放一镜；长句按标点和语义分到各镜，每镜写实际台词部分。估时仅存后台，不按时间比例切字，不用抽象续声说明。
 - 景别、主焦点、机位与运镜按本镜剧情看点选择，不设固定景别权重或默认正面/45°机位。新提交逐镜填写后台purpose说明依据；近景/特写数量、相邻与首镜面部限制改为审查提醒，检查重复画面和连续正面脸部镜头（含中近景），不机械凑比例或换角度。
 - 新生成或指定修改使用reference-v3：场景行只列布景资产名、时间与天气，不输出完整heading；其后独立写人物站位。每镜以括号包住主焦点景别与转场，括号外依次填写机位与运镜、构图、景深、光照。旧reference-v1/v2及更早交付保留原版渲染。
