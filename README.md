@@ -1,6 +1,8 @@
 # Seedance 场景分镜导演
 
-当前版本：**v0.05**
+当前版本：**v0.06**
+
+v0.06 在 v0.05 基础上，将普通动作压缩策略恢复为 v0.04 的优先1～2秒动作链或动作匹配蒙太奇；其余功能与规则沿用 v0.05。
 
 将完整中文剧本整理成标准剧本并提取资产，再根据用户指定的剧本范围，按场景生成适用于 Seedance 2.5 的分镜提示词。
 
@@ -10,13 +12,13 @@
 
 需要支持本地Skill的Codex环境，以及Python 3.10或更高版本。核心脚本使用标准库；收到完整剧本时会后台检查当前Python的PyYAML，缺失则直接安装并验证，已有版本不重复安装或升级。小云雀画布操作另需Node.js 16+、npm和官方CLI；首次使用时按需配置并完成浏览器授权。
 
-将本仓库克隆到 Skills 目录：
+本试验版基于 v0.05 提交 `8ed5867` 制作。安装时明确选择 `v0.06` 标签：
 
 ```bash
-git clone https://github.com/loriyai/seedance-scene-director.git ~/.codex/skills/seedance-scene-director
+git clone --branch v0.06 --single-branch https://github.com/loriyai/seedance-scene-director.git ~/.codex/skills/seedance-scene-director
 ```
 
-也可以下载仓库 ZIP，解压后将根目录文件夹命名为 `seedance-scene-director`，放入 Skills 目录。使用自定义 `CODEX_HOME` 时，放入对应的 `skills/seedance-scene-director` 目录。
+也可下载 [v0.06 源码 ZIP](https://github.com/loriyai/seedance-scene-director/archive/refs/tags/v0.06.zip)，解压后将根目录重命名为 `seedance-scene-director`；本地试验包 `seedance-scene-director-v0.06.zip` 已使用该目录名。已有同名安装时，先在 Skills 目录外备份旧文件夹，再完整替换。使用自定义 `CODEX_HOME` 时，安装到对应的 `skills/seedance-scene-director` 目录。切换版本时检查 `VERSION`，每次只安装一个版本。
 
 ## 使用
 
