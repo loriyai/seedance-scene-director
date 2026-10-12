@@ -4,7 +4,7 @@
 
 ```text
 python scripts/asset_ledger.py init <standard-script.txt> <task-work-dir> --output <asset-ledger.json>
-python scripts/asset_ledger.py build-scenes <identity-reviewed-ledger.json> --output <sets-draft.json>
+python scripts/asset_ledger.py build-scenes <identity-and-time-reviewed-ledger.json> --source <task-work-dir>/source.json --output <sets-draft.json>
 python scripts/asset_ledger.py normalize <new-unbound-ledger.json> --output <normalized-ledger.json> --report <naming-audit.json>
 python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/source.json <asset-ledger.json> --output <asset-catalog.txt>
 ```
@@ -61,7 +61,7 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
 
 `time_basis.kind` 只能是 `原文明示` 或 `格式默认`。前者的 `source_paragraphs` 必须列出该场原文明示时间的段落；后者须为空数组。标题中默认写 `日` 不代表原文明确是白天。脚本生成的待核值不能直接通过 `render`。
 
-每条 `visual_facts` 或 `personality_facts` 采用以下结构。`text` 是简短事实，`evidence` 是原文中的连续原句或词组；证据跨段时，可引用各段共有的短词组，或拆成多条事实。`source_paragraphs` 使用 `prepare` 生成的原文段落编号。`scene_ids` 只列证据所在场景，不表示此特征在未明示的后续场景仍持续。
+每条 `visual_facts` 或 `personality_facts` 采用以下结构。`text` 是简短事实，`evidence` 是原文中的连续原句或词组；证据跨段时，可引用各段共有的短词组，或拆成多条事实。`source_paragraphs` 使用 `prepare` 生成的原文段落编号，不能重复或引用关联场景之外的段落。`scene_ids` 只列证据所在场景，程序分别验证每场所引连续段落包含该证据，不跨场景或跨段落缺口拼接证据；此字段不表示该特征在未明示的后续场景仍持续。
 
 ```json
 {
@@ -83,7 +83,7 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
 
 `render` 检查：原文摘要、场景与段落范围、ID 引用、每场人物source_entry（缺省name）与人物行完整条目逐项、逐字、按顺序匹配、场景标题及地点名称与剧本一致、道具source_name和别名在关联正文中出现、全目录制作名称唯一及安全、形象启用区间、资产事实的场景出现关系、证据在原文段落中出现。`pending_reviews` 或 `inactive_assets.characters` 未处理完时不能渲染。它无法判断摘要是否正确表达证据，也无法证明“性格”是否真的被原文明确写出；这些仍需人工逐条核对。
 
-生成的 TXT 只保留三个标题及其列表：`角色列表`、`场景列表`、`主要道具列表`。角色以完整人物资产 `name` 为标签，列核心可见特征，其下另起一行 `出现的场景：场景1，场景3。`。该行由scenes[].character_ids反查角色ID，场景号取number，排序去重，不同形象分别统计；仅发声的OS/画外音角色也计入。场景按scene_assets的name逐项列固定元素与真实布景版本，其下另起“使用的场次：场景1，场景3。”，按scene_asset_id反查并排序；不逐场重复列布景，不混入临时日夜、天气及光照；主要道具列核心可见特征。没有明示信息时写“未明示”，不从 `基础形象` 或格式默认时间补造。合理服装制作推定另起“制作设计：”行，不与原文特征混写。TXT不展示后台ID、出处段落、证据原句、别名表、其他逐场索引或性格栏；完整信息仍由 JSON 保存。
+生成的 TXT 只保留三个标题及其列表：`角色列表`、`场景列表`、`主要道具列表`。角色以完整人物资产 `name` 为标签，列核心可见特征，其下另起一行 `出现的场景：场景1，场景3。`。该行由scenes[].character_ids反查角色ID，场景号取number，排序去重，不同形象分别统计；仅发声的OS/画外音角色也计入。场景按scene_assets的name逐项列固定元素、真实布景版本及审阅确认的时间版本，其下另起“使用的场次：场景1，场景3。”，按scene_asset_id反查并排序；不逐场重复列布景，不混入临时日夜、天气及光照；主要道具列核心可见特征。没有明示信息时写“未明示”，不从 `基础形象`、跳时标签或格式默认时间补造。合理服装制作推定另起“制作设计：”行，不与原文特征混写。TXT不展示后台ID、出处段落、证据原句、别名表、其他逐场索引或性格栏；完整信息仍由 JSON 保存。
 
 ## 改稿迁移
 
@@ -109,17 +109,76 @@ python scripts/asset_migrate.py <old-ledger.json> <old-source.json> <new-script.
 
 未改场景的原文段落序列完全一致时，证据编号按场景起点偏移直接迁移；只对改动场景重新搜索证据。迁移报告列出 `unchanged_source_scenes` 数量，方便判断复用范围。
 
-旧人物source_entry（缺省name）没有在新剧本人物行出现时，完整记录先放入 `inactive_assets.characters`，同时加入 `pending_reviews`；这表示“可能改名、换形象或退场”，并不立即废弃人物 ID。若实际改名或原有形象条目更名，在映射中用 `characters` 指定旧 ID 对应的新人物行完整条目后重新迁移；若出现新形象，则分配新的 `CHAR` ID，不将旧形象 ID 改名挪用。若确认退场，人工把 ID 放入 `retired_ids`，移除暂存记录，并核对其旧事实是否需要保留为历史记录。处理所有待核项后才清空 `pending_reviews` 并渲染。旧版 `schema_version: 1` 可迁移，但每场 `time_basis` 都须复核。
+旧人物source_entry（缺省name）没有在新剧本人物行出现时，完整记录先放入 `inactive_assets.characters`，同时加入 `pending_reviews`；这表示“可能改名、换形象或退场”，并不立即废弃人物 ID。若实际改名或原有形象条目更名，在映射中用 `characters` 指定旧 ID 对应的新人物行完整条目后重新迁移；迁移更新source_entry及已登记的source_speaker，保留独立制作name与原ID。若出现新形象，则分配新的 `CHAR` ID，不将旧形象 ID 改名挪用。若确认退场，人工把 ID 放入 `retired_ids`，移除暂存记录，并核对其旧事实是否需要保留为历史记录。处理所有待核项后才清空 `pending_reviews` 并渲染。旧版 `schema_version: 1` 可迁移，但每场 `time_basis` 都须复核。
 
 ## 物理地点与布景版本
 
 scenes保留全部剧情场次及heading，不删场、不合并叙事；scene_assets存储真正要创建节点的布景资产。先结合原文的所属主体、建筑、楼层、具体空间核实LOC身份。别名和同名不等于同一物理空间；确认同一实体才合并LOC并重指场次，废弃LOC ID写入retired_ids。填写identity_status="confirmed"和非空identity_basis说明核实依据；无法确认保持pending，最终render及bind阻止通过。不同地点的泛称相同时，用有原文依据的所属主体或空间限定区分布景name，禁止编造地点。
 
-build-scenes是确定性索引脚本：只按已确认LOC ID建立每个地点唯一的base SET，填写各场scene_asset_id；不按名称字符串自动合并、不提取或杜撰事实。已有SET ID与decor关联保持，新增ID高于现用及废弃SET；输入错误不静默覆盖。输出为新文件，再补充原文事实并完整render校验。身份待核、重复基础布景、无效关联均阻止后续阶段。
+build-scenes是确定性索引脚本：按已确认LOC ID建立每个地点唯一的base SET，再依据人工审阅登记的时间层及原样基准建立或复用SET，填写各场scene_asset_id；不按名称字符串自动合并、不扫描全文猜测跳时、不提取或杜撰视觉事实。无时间层元数据的schema 3仍按既有base/decor规则处理；已有SET ID及有效关联保留，新增ID高于现用及废弃SET。旧SET关联与新时间层不一致时报告映射/绑定迁移需求，不静默覆盖。输出为新文件，再补充原文事实并完整render校验。身份待核、重复基础布景、无效关联均阻止后续阶段。
 
-日夜、天气、光照、取景方向、场次号与排序仅属于SC或分镜，不能作为增加SET的理由。真实布景变化才允许少量版本：variant="decor"，parent_id指向同LOC基础SET，name为“地点-有依据的布景状态”，visual_facts须有原文证据并关联确实使用该版本的SC。同一视觉状态复用SET，不逐场建立新版本；基础布景只承载共用固定元素。程序验证结构和证据出处，语义上是否真实改变布景仍须人工核实。
+日夜、天气、光照、取景方向、场次号与排序仅属于SC或分镜，不能作为增加SET的理由。明示真实布景变化可建立少量版本：variant="decor"，parent_id指向同LOC基础SET，name为“地点-有依据的布景状态”，visual_facts须有原文证据并关联确实使用该版本的SC。明示大跨度跳时另用temporal版本，规则见下节。同一视觉状态及同一时间层复用对应SET，不逐场建立新版本；基础布景与LOC事实只承载所有版本共用的固定元素，decor/temporal分类描述继承这些共性，再追加本版本事实。temporal的parent_id可指向同LOC的base、decor或temporal；这是版本承接关系，不表示前一版婚堂、废墟或其他非共性状态延续。已移除物件或已改变状态必须从共用字段移出，分别登记于实际适用的版本，避免被继承至无此元素的版本。现有schema不含结构化删除/覆盖字段，程序不猜测自由中文描述中的删除语义；共用性及移除关系须人工核对。程序验证结构、同LOC及无循环parent链和证据出处，语义上是否真实改变布景仍须人工核实。
 
-旧schema 2可读取或按旧版改稿迁移，不能直接传输画布。升级须先离线给出旧SC→LOC/SET及节点的保留/修改/合并/删除方案，保留旧文件和映射快照，由用户抉择后再建立schema 3新绑定。不得自动把所有旧SC改为SET、静默合并图片或删除节点。schema 3改稿迁移保持SET ID和可定位证据；原文变动、版本关联不唯一或版本未使用进入pending_reviews，处理后才能生成最终台账。
+旧schema 2可读取或按旧版改稿迁移，不能直接传输画布。升级须先离线给出旧SC→LOC/SET及节点的保留/修改/合并/删除方案，保留旧文件和映射快照，由用户抉择后再建立schema 3新绑定。不得自动把所有旧SC改为SET、静默合并图片或删除节点。schema 3改稿迁移保持SET ID、时间层、原样基准及可定位证据；原文变动、时间层起始场/基准场对应不明确、版本关联不唯一或版本未使用进入pending_reviews，保存旧记录以供审核，不静默丢弃temporal_layers。处理后才能生成最终台账。
+
+## 时间层与原样复用
+
+“较大的时间跨度”按剧本叙述、前后场与实际时间变化审阅，不设置3年等统一硬门槛。叙述明确“3年后”“十年后”可据上下文登记；角色说“十年前我来过这里”而镜头仍在当前时间，不因此登记新层。`time_basis`仍只负责标题日夜，不能替代这里的时间层。
+
+在顶层可选`temporal_layers`登记确认的跳时：
+
+```json
+{
+  "temporal_layers": [
+    {
+      "id": "TL0001",
+      "label": "十年后",
+      "start_scene_id": "SC0002",
+      "evidence": "十年后，他回到陈家老宅",
+      "source_paragraphs": [12],
+      "review_basis": "叙述在此切入十年后的当前剧情，前后场确认是大跨度跳时"
+    }
+  ]
+}
+```
+
+`id`是台账内唯一时间层标记，不能只按相同label盲合；`label`取连续证据中的时间跨度原词，并通过图片文件名检查；`start_scene_id`为实际启用该层的首场，该场须登记相同`temporal_layer_id`。evidence/source_paragraphs必须在该起始场原文范围中连续且逐字出现，review_basis记录语义审阅依据。起始场可属于另一地点，后续场通过明确的层ID承接这一来源，不能假装后续每场再次明示跳时。
+
+各SC登记`temporal_layer_id`，例如`"temporal_layer_id": "TL0001"`。首次跳时前省略表示原始层；首个登记跳时及之后的每场须显式选择审阅确认的实际层。回忆/闪回原始层写`null`，回忆某个已登记层写其ID，不按全局最新跳时强制套层。同LOC在同层的正常连续出场复用SET；明确decor变化仍保留相应视觉版本。
+
+同LOC在较早时间层已有出场、进入新的确认时间层且没有明示原样时，build-scenes生成：
+
+```json
+{
+  "id": "SET0002",
+  "name": "陈家老宅-十年后",
+  "location_id": "LOC0001",
+  "variant": "temporal",
+  "parent_id": "SET0001",
+  "temporal_layer_id": "TL0001",
+  "visual_facts": []
+}
+```
+
+SET通过temporal_layer_id关联时间来源、parent_id关联之前同LOC使用的布景；适用场次由SC.scene_asset_id反查，SC的source_range保留原文范围。同一层后续出场默认复用该版本，新的大跨度层可再建立版本。某地点首次出现时即使剧情已是“十年后”，也只建立base，不额外创建未用的时间版本；新base可记录该首次出现的temporal_layer_id。temporal的visual_facts可以为空：时间跨度不证明结构、陈设、老化或翻新变化，不能写成自动破败或装修。
+
+原文明示仍是原样时，在该层该LOC的首次出场登记明确基准：
+
+```json
+{
+  "id": "SC0004",
+  "temporal_layer_id": "TL0002",
+  "set_reuse": {
+    "same_as_scene_id": "SC0002",
+    "evidence": "屋里仍和上次回来时一模一样",
+    "source_paragraphs": [25]
+  }
+}
+```
+
+基准场须为较早、已核实同LOC的场，证据须来自本次出场的连续原文段落。same_as_scene_id明确是与原始布景相同，还是与上次temporal/decor版相同；仅凭“原样”无法确定对象时审阅上下文，仍有真实歧义才询问用户。build-scenes复用基准场实际SET并传播到该层同地点后续出场，不另造temporal。已有层不能在后面随意补set_reuse以追改先前关联。
+
+含时间层或原样复用元数据时，build-scenes必须传`--source <source.json>`，先校验摘要、场次、连续证据和层引用；render再次验证。相同label若实际属于不同层，导致完整制作名重名时脚本拒绝最终台账。先核实是否同一层；确属不同层时，由用户选择有依据且唯一的区分名，手工登记对应SET，再校验；不静默复用、添加SC后缀或发明年份阈值。旧项目应离线制作映射和绑定迁移方案，不因添加时间层静默改写现有scene_asset_id、资产名、节点或图片。
 
 ## 命名预检与形象启用
 

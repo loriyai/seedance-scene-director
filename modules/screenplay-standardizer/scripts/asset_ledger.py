@@ -96,6 +96,9 @@ def parse_script(path: Path) -> list[dict]:
 def validate_image_name(name: str) -> None:
     if re.search(r'[<>:"/\\|?*\x00-\x1f]', name) or name.endswith((" ", ".")):
         raise ValueError(f"场景名称含文件名不支持的字符或结尾：{name}")
+    stem = name.split(".", 1)[0].rstrip(" ").upper()
+    if stem in {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} or re.fullmatch(r"(?:COM|LPT)[1-9¹²³]", stem):
+        raise ValueError(f"资产名称占用 Windows 保留设备名，不能用作图片文件名：{name}")
 
 
 def reference_preflight(data):
@@ -238,23 +241,37 @@ def fact_list(records: list[dict], paragraphs: list[str], scenes_by_id: dict, la
         if not isinstance(refs, list) or not refs or any(
             not isinstance(ref, int) or isinstance(ref, bool) or ref < 1 or ref > len(paragraphs)
             for ref in refs
-        ):
+        ) or len(refs) != len(set(refs)):
             raise ValueError(f"{label} 原文段落编号无效")
         if not isinstance(scene_ids, list) or not scene_ids or len(scene_ids) != len(set(scene_ids)):
             raise ValueError(f"{label} 事实缺少有效的 scene_ids")
         if required_scene and scene_ids != [required_scene]:
             raise ValueError(f"{label} 逐场事实只能关联所在场景")
+        evidence = "".join(fact["evidence"].split())
+        covered_refs = set()
         for scene_id in scene_ids:
             scene = scenes_by_id.get(scene_id)
             if not scene:
                 raise ValueError(f"{label} 引用了不存在的场景 {scene_id}")
             start, end = scene["source_range"]
-            if not any(start <= ref <= end for ref in refs):
+            local_refs = sorted(ref for ref in refs if start <= ref <= end)
+            if not local_refs:
                 raise ValueError(f"{label} 在场景 {scene_id} 中没有原文证据")
-        evidence = "".join(fact["evidence"].split())
-        original = "".join("".join(paragraphs[ref - 1] for ref in refs).split())
-        if evidence not in original:
-            raise ValueError(f"{label} 的证据未出现在所引原文段落中：{fact['evidence']}")
+            covered_refs.update(local_refs)
+            # Only adjacent paragraphs in this scene may form one continuous
+            # citation. Evidence from another scene or a gap cannot fill it in.
+            originals, group, previous = [], [], None
+            for ref in local_refs:
+                if previous is not None and ref != previous + 1:
+                    originals.append("".join("".join(group).split()))
+                    group = []
+                group.append(paragraphs[ref - 1])
+                previous = ref
+            originals.append("".join("".join(group).split()))
+            if not any(evidence in original for original in originals):
+                raise ValueError(f"{label} 的证据未出现在场景 {scene_id} 所引连续原文段落中：{fact['evidence']}")
+        if covered_refs != set(refs):
+            raise ValueError(f"{label} 引用了事实关联场景以外的原文段落")
 
 
 def validate(script: list[dict], paragraphs: list[str], data: dict) -> None:
@@ -414,6 +431,91 @@ def validate(script: list[dict], paragraphs: list[str], data: dict) -> None:
     reference_preflight(data)
 
 
+def temporal_context(data, paragraphs=None):
+    """Validate reviewed chronology metadata; never infer a jump from prose."""
+    layers = data.get("temporal_layers", [])
+    if not isinstance(layers, list):
+        raise ValueError("temporal_layers 必须是数组")
+    scenes = {s["id"]: s for s in data["scenes"]}
+    marked = bool(layers or any("temporal_layer_id" in s or "set_reuse" in s for s in scenes.values())
+                  or any(a.get("variant") == "temporal" or "temporal_layer_id" in a for a in data.get("scene_assets", [])))
+    if marked and paragraphs is None:
+        raise ValueError("时间层及原样复用须提供 --source，以校验原文证据；不从全文自动识别跳时")
+    if marked and data.get("source_digest") != digest(paragraphs):
+        raise ValueError("时间层台账与 --source 原文摘要不匹配")
+
+    def evidence_in(record, scene, label):
+        evidence, refs = record.get("evidence"), record.get("source_paragraphs")
+        if not isinstance(evidence, str) or not evidence.strip() or not isinstance(refs, list) or not refs:
+            raise ValueError(f"{label} 须登记连续原文证据及段落")
+        start, end = scene["source_range"]
+        if any(type(r) is not int or r < start or r > end or r > len(paragraphs) for r in refs) or refs != list(range(min(refs), max(refs) + 1)):
+            raise ValueError(f"{label} 证据段落须在依据场内连续、无重复且按顺序登记")
+        original = "".join("".join(paragraphs[r - 1] for r in refs).split())
+        if "".join(evidence.split()) not in original:
+            raise ValueError(f"{label} 证据未出现在所引连续原文段落")
+
+    by_id = {}
+    for layer in layers:
+        if not isinstance(layer, dict) or any(not isinstance(layer.get(k), str) or not layer[k].strip()
+            for k in ("id", "label", "start_scene_id", "review_basis")):
+            raise ValueError("时间层须登记 id、label、起始场及原文审阅的跳时依据 review_basis")
+        if layer["id"] in by_id:
+            raise ValueError(f"重复时间层：{layer['id']}")
+        validate_image_name(layer["label"])
+        start = scenes.get(layer["start_scene_id"])
+        if not start or start.get("temporal_layer_id") != layer["id"]:
+            raise ValueError(f"时间层 {layer['id']} 的起始场须明确关联该层")
+        evidence_in(layer, start, f"时间层 {layer['id']}")
+        if "".join(layer["label"].split()) not in "".join(layer["evidence"].split()):
+            raise ValueError(f"时间层 {layer['id']} label 须取证据中的时间跨度原词")
+        by_id[layer["id"]] = layer
+    first_jump = min((scenes[layer["start_scene_id"]]["number"] for layer in layers), default=None)
+    for scene in scenes.values():
+        lid = scene.get("temporal_layer_id")
+        if first_jump is not None and scene["number"] >= first_jump and "temporal_layer_id" not in scene:
+            raise ValueError(f"场次 {scene['id']} 须明确登记实际时间层；回忆原始层用 temporal_layer_id=null")
+        if "temporal_layer_id" in scene and lid is not None and lid not in by_id:
+            raise ValueError(f"场次 {scene['id']} 引用了未审阅确认的时间层")
+        if lid and scene["number"] < scenes[by_id[lid]["start_scene_id"]]["number"]:
+            raise ValueError(f"场次 {scene['id']} 早于其时间层首次启用场")
+        reuse = scene.get("set_reuse")
+        if reuse is not None:
+            target = scenes.get(reuse.get("same_as_scene_id")) if isinstance(reuse, dict) else None
+            if not lid or not target or target["number"] >= scene["number"] or target["location_id"] != scene["location_id"]:
+                raise ValueError(f"场次 {scene['id']} 原样复用须明确指向较早的同 LOC 基准场")
+            evidence_in(reuse, scene, f"场次 {scene['id']} 原样复用")
+    return by_id
+
+
+def validate_set_parents(assets):
+    for item in assets.values():
+        seen, current = set(), item
+        while current.get("parent_id") is not None:
+            if current["id"] in seen:
+                raise ValueError(f"布景 {item['id']} 的 parent_id 存在循环")
+            seen.add(current["id"])
+            parent = assets.get(current["parent_id"])
+            if parent is None or parent["location_id"] != item["location_id"]:
+                raise ValueError(f"布景 {item['id']} 的 parent_id 不存在或属于其他 LOC")
+            current = parent
+
+
+def validate_temporal_origins(data):
+    scenes = sorted(data["scenes"], key=lambda s: s["number"])
+    for asset in data["scene_assets"]:
+        if asset.get("variant") == "temporal":
+            own = [s for s in scenes if s.get("scene_asset_id") == asset["id"] and
+                   s.get("temporal_layer_id") == asset.get("temporal_layer_id")]
+            if not own or not any(s.get("scene_asset_id") == asset.get("parent_id") and
+                                 s["number"] < own[0]["number"] for s in scenes):
+                raise ValueError(f"时间布景 {asset['id']} 须在所属层实际使用，parent 须为此前使用的同 LOC 布景；请审核迁移")
+        elif asset.get("variant") == "base" and "temporal_layer_id" in asset:
+            first = next(s for s in scenes if s["location_id"] == asset["location_id"])
+            if asset["temporal_layer_id"] != first.get("temporal_layer_id"):
+                raise ValueError(f"基础布景 {asset['id']} 的时间层须对应该 LOC 首次出场")
+
+
 def validate_scene_assets(data, paragraphs, scenes, locations):
     """SC identifies an occurrence; SET identifies a reusable visual set."""
     assets = {item["id"]: item for item in data["scene_assets"]}
@@ -442,8 +544,14 @@ def validate_scene_assets(data, paragraphs, scenes, locations):
                 raise ValueError(f"布景版本 {item['id']} 必须关联同地点的基础布景")
             if not item.get("visual_facts"):
                 raise ValueError(f"布景版本 {item['id']} 缺少真实布景变化的原文证据")
+        elif variant == "temporal":
+            parent = assets.get(item.get("parent_id"))
+            if not parent or parent.get("location_id") != location["id"] or parent["id"] == item["id"]:
+                raise ValueError(f"时间布景 {item['id']} 必须关联同 LOC 的较早布景 parent_id")
+            if not item.get("temporal_layer_id"):
+                raise ValueError(f"时间布景 {item['id']} 缺少已审阅时间层")
         else:
-            raise ValueError(f"布景资产 {item['id']} variant 须为 base 或 decor")
+            raise ValueError(f"布景资产 {item['id']} variant 须为 base、decor 或 temporal")
         facts = item.get("visual_facts")
         if not isinstance(facts, list):
             raise ValueError(f"布景资产 {item['id']} 缺少 visual_facts")
@@ -451,7 +559,7 @@ def validate_scene_assets(data, paragraphs, scenes, locations):
         for fact in facts:
             for sid in fact["scene_ids"]:
                 scene = scenes[sid]
-                if scene["location_id"] != location["id"] or (variant == "decor" and scene.get("scene_asset_id") != item["id"]):
+                if scene["location_id"] != location["id"] or (variant != "base" and scene.get("scene_asset_id") != item["id"]):
                     raise ValueError(f"布景资产 {item['id']} 的证据关联了其他地点或版本")
     for scene in scenes.values():
         asset = assets.get(scene.get("scene_asset_id"))
@@ -461,15 +569,21 @@ def validate_scene_assets(data, paragraphs, scenes, locations):
     if set(bases) != used_locations or set(locations) != used_locations:
         raise ValueError("每个现用地点须恰有一个基础布景；未用地点请归档而非创建节点")
     used_assets = {scene["scene_asset_id"] for scene in scenes.values()}
-    if any(item["variant"] == "decor" and item["id"] not in used_assets for item in assets.values()):
+    if any(item["variant"] != "base" and item["id"] not in used_assets for item in assets.values()):
         raise ValueError("未使用的布景版本须先核实去向，不创建多余节点")
+    validate_set_parents(assets)
+    # The same deterministic policy checks existing links without rewriting them.
+    planned = build_scene_assets(data, paragraphs)
+    if len(planned["scene_assets"]) != len(data["scene_assets"]):
+        raise ValueError("台账缺少按已审阅时间层建立的布景；请离线 build-scenes 并审核迁移")
 
 
-def build_scene_assets(data):
+def build_scene_assets(data, paragraphs=None):
     """Group only by explicitly confirmed LOC IDs, never by heading/name/daylight."""
     if data.get("schema_version") != 3:
         raise ValueError("旧台账须先制定保留/修改/合并/删除方案并审核升级，不自动转换")
     result = copy.deepcopy(data)
+    layers = temporal_context(result, paragraphs)
     locations = {item["id"]: item for item in result["locations"]}
     used_locations = {scene["location_id"] for scene in result["scenes"]}
     if set(locations) != used_locations:
@@ -487,6 +601,7 @@ def build_scene_assets(data):
             if lid in bases:
                 raise ValueError(f"地点 {lid} 有重复基础布景；请先审核合并")
             bases[lid] = item["id"]
+    new_bases = set()
     for lid, location in locations.items():
         if lid not in bases:
             number += 1
@@ -494,13 +609,84 @@ def build_scene_assets(data):
             bases[lid] = aid
             assets.append({"id": aid, "name": location["name"], "location_id": lid,
                            "variant": "base", "parent_id": None, "visual_facts": []})
+            new_bases.add(aid)
     by_id = {item["id"]: item for item in assets}
-    for scene in result["scenes"]:
+    validate_set_parents(by_id)
+    if not layers:
+        # Preserve legacy schema-3 base/decor associations and explicit changes.
+        for scene in result["scenes"]:
+            aid = scene.get("scene_asset_id")
+            if aid is None:
+                scene["scene_asset_id"] = bases[scene["location_id"]]
+            elif aid not in by_id or by_id[aid]["location_id"] != scene["location_id"]:
+                raise ValueError(f"场次 {scene['id']} 已有布景关联无效；请审核，不自动覆盖")
+        reference_preflight(result)
+        return result
+    temporal = {}
+    for item in assets:
+        if item.get("variant") == "temporal":
+            key = (item["location_id"], item.get("temporal_layer_id"))
+            if key[1] not in layers or key in temporal:
+                raise ValueError(f"布景 {item['id']} 的时间层未核实或同 LOC 同层有重复时间版本")
+            temporal[key] = item["id"]
+    layer_sets, layer_origins, previous, first_layers = {}, {}, {}, {}
+    scenes = {s["id"]: s for s in result["scenes"]}
+    for scene in sorted(result["scenes"], key=lambda s: s["number"]):
         aid = scene.get("scene_asset_id")
-        if aid is None:
-            scene["scene_asset_id"] = bases[scene["location_id"]]
-        elif aid not in by_id or by_id[aid]["location_id"] != scene["location_id"]:
+        lid, layer_id = scene["location_id"], scene.get("temporal_layer_id")
+        key = (lid, layer_id)
+        if aid is not None and (aid not in by_id or by_id[aid]["location_id"] != lid):
             raise ValueError(f"场次 {scene['id']} 已有布景关联无效；请审核，不自动覆盖")
+        if lid not in first_layers:
+            first_layers[lid] = layer_id
+            if bases[lid] in new_bases and layer_id is not None:
+                by_id[bases[lid]]["temporal_layer_id"] = layer_id
+        reuse = scene.get("set_reuse")
+        if reuse:
+            if key in layer_sets:
+                raise ValueError(f"场次 {scene['id']} 原样复用须登记于该时间层同 LOC 首次出场，避免追改已有层")
+            desired = scenes[reuse["same_as_scene_id"]].get("scene_asset_id")
+            if desired not in by_id:
+                raise ValueError(f"场次 {scene['id']} 原样基准场尚无有效布景关联")
+        elif key in layer_sets:
+            desired = layer_sets[key]
+        elif first_layers[lid] == layer_id:
+            desired = bases[lid]
+        elif layer_id is None:
+            raise ValueError(f"场次 {scene['id']} 回到原始时间层但缺少此前确认的布景；请核实回忆时间层")
+        else:
+            desired = temporal.get(key)
+            if desired is None:
+                if aid is not None:
+                    raise ValueError(f"场次 {scene['id']} 已有 SET 与新时间层不一致；须先审核映射/绑定迁移，不自动覆盖")
+                number += 1
+                desired = f"SET{number:04d}"
+                item = {"id": desired, "name": locations[lid]["name"] + "-" + layers[layer_id]["label"],
+                        "location_id": lid, "variant": "temporal", "parent_id": previous[lid],
+                        "temporal_layer_id": layer_id, "visual_facts": []}
+                assets.append(item)
+                by_id[desired] = item
+                temporal[key] = desired
+        if aid is not None and aid != desired:
+            # Existing decor states remain explicit choices within one layer.
+            explicit_state = (key in layer_sets and (by_id[aid].get("variant") == "decor" or aid == layer_origins[key])) or (
+                first_layers[lid] == layer_id and (by_id[aid].get("variant") == "decor" or aid == bases[lid]))
+            if reuse or not explicit_state:
+                raise ValueError(f"场次 {scene['id']} 已有 SET 与已审阅时间层/原样基准不一致；须审核迁移，不自动覆盖")
+            desired = aid
+        if by_id[desired].get("variant") == "temporal" and by_id[desired].get("temporal_layer_id") != layer_id:
+            # An explicit unchanged-state citation can reuse an earlier layer.
+            if not reuse and key not in layer_sets:
+                raise ValueError(f"场次 {scene['id']} 时间布景层关联不一致")
+        scene["scene_asset_id"] = desired
+        layer_origins.setdefault(key, desired)
+        layer_sets[key] = desired
+        previous[lid] = desired
+    for item in assets:
+        if "temporal_layer_id" in item and item["temporal_layer_id"] not in layers:
+            raise ValueError(f"布景 {item['id']} 引用不存在的时间层")
+    validate_temporal_origins(result)
+    reference_preflight(result)
     return result
 
 
@@ -562,6 +748,15 @@ def visual_text(facts: list[dict]) -> list[str]:
     return list(dict.fromkeys(fact["text"].strip().rstrip("。") for fact in facts))
 
 
+def set_visual_facts(item, locations, assets):
+    """Temporal parent links record lineage, not continued decor conditions."""
+    common = locations[item["location_id"]]["visual_facts"]
+    if item["variant"] != "base":
+        base = next(a for a in assets.values() if a["location_id"] == item["location_id"] and a["variant"] == "base")
+        common = common + base["visual_facts"]
+    return common + item["visual_facts"]
+
+
 def render(script_path: Path, source_path: Path, ledger_path: Path, output: Path) -> None:
     script = parse_script(script_path)
     paragraphs = source_paragraphs(source_path)
@@ -570,6 +765,7 @@ def render(script_path: Path, source_path: Path, ledger_path: Path, output: Path
     characters = {item["id"]: item for item in data["characters"]}
     locations = {item["id"]: item for item in data["locations"]}
     props = {item["id"]: item for item in data["props"]}
+    scene_assets = {item["id"]: item for item in data.get("scene_assets", [])}
     lines = ["角色列表"]
     for item in data["characters"]:
         features = "、".join(visual_text(item["visual_facts"])) or "外观未明示"
@@ -583,7 +779,7 @@ def render(script_path: Path, source_path: Path, ledger_path: Path, output: Path
     for scene in (data["scene_assets"] if data["schema_version"] == 3 else data["scenes"]):
         loc = locations[scene["location_id"]]
         if data["schema_version"] == 3:
-            elements = visual_text(loc["visual_facts"]) + visual_text(scene["visual_facts"])
+            elements = visual_text(set_visual_facts(scene, locations, scene_assets))
             lines.append(f"- {scene['name']}｜关键元素：{'、'.join(dict.fromkeys(elements)) or '未明示'}。")
             numbers = sorted(s["number"] for s in data["scenes"] if s["scene_asset_id"] == scene["id"])
             lines.append("  使用的场次：" + ("，".join(f"场景{n}" for n in numbers) or "无（基础布景供版本继承）") + "。")
@@ -620,8 +816,9 @@ def main() -> None:
     init.add_argument("script", type=Path)
     init.add_argument("workdir", type=Path)
     init.add_argument("--output", type=Path, required=True)
-    build = commands.add_parser("build-scenes", help="按已核实的地点ID建立可复用布景，不按场次/日夜拆分")
+    build = commands.add_parser("build-scenes", help="按已核实LOC及人工审阅时间层建立布景，不扫描全文猜跳时")
     build.add_argument("ledger", type=Path)
+    build.add_argument("--source", type=Path, help="时间层/原样复用元数据存在时必需，提供 prepare 生成的 source.json")
     build.add_argument("--output", type=Path, required=True)
     normalize = commands.add_parser('normalize', help='新未绑定台账的群像地点命名、同名道具视觉复用及全局引用预检')
     normalize.add_argument('ledger', type=Path)
@@ -647,7 +844,8 @@ def main() -> None:
         elif args.command == "build-scenes":
             if args.output.exists():
                 raise ValueError("输出已存在；请另选文件，避免覆盖人工修改")
-            data = build_scene_assets(json.loads(args.ledger.read_text(encoding="utf-8-sig")))
+            data = build_scene_assets(json.loads(args.ledger.read_text(encoding="utf-8-sig")),
+                                      source_paragraphs(args.source) if args.source else None)
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             print(f"已建立 {len(data['scene_assets'])} 个布景资产索引：{args.output}")

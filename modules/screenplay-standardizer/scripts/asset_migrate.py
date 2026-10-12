@@ -26,7 +26,7 @@ def next_id(prefix, used):
 
 def scene_text(scene, paragraphs):
     start, end = scene["source_range"]
-    return compact("".join(paragraphs[start - 1:end]))
+    return tuple(paragraphs[start - 1:end])
 
 
 def normalize_mapping(raw, old_scenes, new_signatures, old_paragraphs):
@@ -136,7 +136,7 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
     new_paragraphs = source_paragraphs(new_workdir / "source.json")
     bases = parse_script(new_script_path)
     ranges = scene_ranges(new_workdir, len(bases), len(new_paragraphs))
-    new_signatures = [compact("".join(new_paragraphs[start - 1:end])) for start, end in ranges]
+    new_signatures = [tuple(new_paragraphs[start - 1:end]) for start, end in ranges]
     old_scenes = old["scenes"]
     old_by_id = {scene["id"]: scene for scene in old_scenes}
     lineage, pending = normalize_mapping(requested, old_scenes, new_signatures, old_paragraphs)
@@ -179,12 +179,12 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
         if char_id not in char_by_id or not isinstance(name, str) or not name.strip():
             raise ValueError(f"人物改名映射无效：{char_id}")
         item = char_by_id[char_id]
-        if 'source_entry' in item:
-            item['source_entry'] = name
-        if item["name"] != name:
-            if item["name"] not in item["aliases"]:
-                item["aliases"].append(item["name"])
-            item["name"] = name
+        source_speaker, _ = split_cast_entry(name)
+        item['source_entry'] = name
+        if 'source_speaker' in item:
+            item['source_speaker'] = source_speaker
+        # The mapping renames the source entry, not its independent production
+        # asset name. Existing image/node names retain their identity.
 
     scenes = []
     for base, source_range in zip(bases, ranges):
@@ -249,7 +249,8 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
         if not lineage[old_scene["id"]]:
             pending.append({"kind": "旧场景删除待核", "scene_id": old_scene["id"], "heading": old_scene["heading"],
                             "character_ids": old_scene["character_ids"], "prop_ids": old_scene["prop_ids"],
-                            "visual_facts": old_scene["visual_facts"]})
+                            "visual_facts": old_scene["visual_facts"],
+                            **({"old_scene_record": copy.deepcopy(old_scene)} if "temporal_layer_id" in old_scene or "set_reuse" in old_scene else {})})
         for fact in old_scene["visual_facts"]:
             revised = migrate_fact(fact, old_by_id, lineage, new_by_number, old_paragraphs, new_paragraphs, new_index)
             if revised and len(revised["scene_ids"]) == 1:
@@ -349,6 +350,54 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
             elif any(s.get('prop_occurrences') for s in prior):
                 pending.append({'kind': '道具实体出现关系待核', 'scene_id': scene['id'],
                                 'old_occurrences': [s.get('prop_occurrences', []) for s in prior]})
+        if old.get("temporal_layers") or any("temporal_layer_id" in s or "set_reuse" in s for s in old_scenes):
+            # Preserve chronology records even when their anchors are ambiguous;
+            # pending_reviews prevents stale evidence from becoming deliverable.
+            result["temporal_layers"] = copy.deepcopy(old.get("temporal_layers", []))
+
+            def move_temporal_evidence(record, old_sid, label):
+                revised = copy.deepcopy(record)
+                numbers = lineage.get(old_sid, [])
+                located = relocate_refs(record.get("source_paragraphs", []), [old_sid], old_by_id, lineage,
+                                        new_by_number, old_paragraphs, new_paragraphs, new_index)
+                if len(numbers) != 1 or not located or any(n != numbers[0] for n, _ in located):
+                    pending.append({"kind": label + "证据或场次对应待核", "old_scene_id": old_sid, "record": record})
+                    return revised, None
+                target = new_by_number[numbers[0]]
+                refs = [ref for _, ref in located]
+                evidence = "".join(record.get("evidence", "").split())
+                valid = refs == list(range(min(refs), max(refs) + 1)) and evidence and evidence in "".join(
+                    "".join(new_paragraphs[r - 1] for r in refs).split())
+                if not valid:
+                    pending.append({"kind": label + "连续原文证据待核", "old_scene_id": old_sid, "record": record})
+                    return revised, None
+                revised["source_paragraphs"] = refs
+                if scene_text(old_by_id[old_sid], old_paragraphs) != scene_text(target, new_paragraphs):
+                    pending.append({"kind": label + "上下文审阅待核", "old_scene_id": old_sid, "new_scene_id": target["id"]})
+                return revised, target
+
+            for index, layer in enumerate(result["temporal_layers"]):
+                revised, target = move_temporal_evidence(layer, layer["start_scene_id"], "时间层")
+                if target:
+                    revised["start_scene_id"] = target["id"]
+                result["temporal_layers"][index] = revised
+            for scene in scenes:
+                ids = incoming[scene["number"]]
+                if len(ids) != 1 or len(lineage[ids[0]]) != 1:
+                    pending.append({"kind": "场次实际时间层及原样基准待核", "scene_id": scene["id"], "old_scene_ids": ids,
+                                    "old_scene_records": [copy.deepcopy(old_by_id[sid]) for sid in ids]})
+                    continue
+                prior = old_by_id[ids[0]]
+                if "temporal_layer_id" in prior:
+                    scene["temporal_layer_id"] = prior["temporal_layer_id"]
+                if prior.get("set_reuse"):
+                    reuse, target = move_temporal_evidence(prior["set_reuse"], prior["id"], "原样复用")
+                    baseline = lineage.get(reuse["same_as_scene_id"], [])
+                    if len(baseline) == 1:
+                        reuse["same_as_scene_id"] = new_by_number[baseline[0]]["id"]
+                    else:
+                        pending.append({"kind": "原样基准场对应待核", "scene_id": scene["id"], "record": prior["set_reuse"]})
+                    scene["set_reuse"] = reuse
         for item in result["scene_assets"]:
             facts = []
             for fact in item["visual_facts"]:
@@ -361,7 +410,7 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
                 else:
                     pending.append({"kind": "布景版本证据待核", "asset_id": item["id"], "fact": fact})
             item["visual_facts"] = facts
-            if item["variant"] == "decor" and not any(s["scene_asset_id"] == item["id"] for s in scenes):
+            if item["variant"] != "base" and not any(s["scene_asset_id"] == item["id"] for s in scenes):
                 pending.append({"kind": "未用布景版本去向待核", "asset_id": item["id"]})
     report = {"status": "迁移草稿", "scene_lineage": lineage, "primary_ids": primary,
               "retired_scene_ids": sorted(set(old_by_id) - set(primary.values())),

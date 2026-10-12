@@ -7,9 +7,15 @@ const os = require("os");
 const path = require("path");
 
 const REQUIRED_COMMANDS = [
-  "status", "login", "logout", "query-result",
-  "generate-image", "generate-video", "video-super-resolution",
-  "erase-video-subtitle", "get-credit-balance", "model list", "model describe",
+  "status", "login",
+];
+const REQUIRED_CANVAS_NATIVE_COMMANDS = [
+  "model list", "model describe", "canvas get", "canvas allocate", "canvas upload",
+];
+const REQUIRED_CANVAS_COMMANDS = [
+  "get_snapshot", "get_permissions", "create_biz_node", "update_node_data", "delete_nodes", "delete_edges",
+  "xyq.generation.update_prompt", "xyq.role.updateDescription",
+  "xyq.scene.updateDescription", "xyq.role.updateAppearance",
 ];
 
 function npmCommand() {
@@ -81,7 +87,7 @@ function ensureCLI({ canvas = false } = {}) {
     }
     const commands = REQUIRED_COMMANDS.map((command) => command.split(" "));
     if (canvas) {
-      for (const command of ["create", "get", "allocate", "upload", "apply"]) commands.push(["canvas", command]);
+      commands.push(...REQUIRED_CANVAS_NATIVE_COMMANDS.map((command) => command.split(" ")));
     }
     for (const command of commands) {
       try {
@@ -100,7 +106,7 @@ function ensureCLI({ canvas = false } = {}) {
       try {
         if (!fs.existsSync(entry)) throw new Error("缺少 npm 入口");
         const catalog = JSON.parse(run(process.execPath, [entry, "canvas", "command", "list"], "检查 Canvas 运行时", true));
-        if (!Array.isArray(catalog.commands) || !["get_snapshot", "create_biz_node"].every(
+        if (!Array.isArray(catalog.commands) || !REQUIRED_CANVAS_COMMANDS.every(
           (name) => catalog.commands.some((command) => command.name === name),
         )) throw new Error("Canvas 命令目录不完整");
       } catch (err) {

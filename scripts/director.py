@@ -21,7 +21,104 @@ STYLES = {"1": "3D国风动漫,暗黑武侠/超写实仙侠风格", "2": "3D国�
 SPEEDS = {"常速": (4.0, 5.2), "快节奏": (4.5, 5.8), "情绪慢速": (3.3, 4.4)}
 FRAMINGS = {"大远景", "大全景", "远景", "全景", "中景", "中近景", "近景", "特写"}
 CLOSE = {"近景", "特写"}
-OUTPUT_FORMAT = "reference-v2"
+OUTPUT_FORMAT = "reference-v3"
+PHOTOGRAPHY_FIELDS = ("camera", "composition", "depth_of_field", "lighting")
+FACE_FRAMINGS = CLOSE | {"中近景"}
+
+
+def face_focus(shot, character_ids):
+    """Recognize explicit face emphasis only; this is not image/semantic analysis."""
+    focus = shot.get("focus", [])
+    if not isinstance(focus, list) or len(focus) != 1 or focus[0] not in character_ids:
+        return None
+    if shot.get("face_closeup") is True:
+        return focus[0]
+    value = shot.get("composition", "")
+    composition = compact(value) if isinstance(value, str) else ""
+    # Generic smiling/looking in action text does not establish a face composition.
+    exclusions = ("不拍脸", "不拍面部", "脸部不入画", "面部不入画", "脸不入画", "只拍手", "仅拍手", "只拍道具")
+    if any(term in composition for term in exclusions):
+        return None
+    explicit = ("面部占", "脸部占", "正脸占", "脸庞占", "面孔占", "面部居", "脸部居", "正脸居",
+                "脸庞居", "面孔居", "面部位于", "脸部位于", "正脸位于", "面部处于", "脸部处于",
+                "聚焦面部", "聚焦脸部", "以面部为", "以脸部为", "拍摄面部", "拍摄脸部")
+    labels = {"脸部反应", "面部反应", "表情反应", "正脸反应", "面部特写", "脸部特写", "正脸特写", "脸部近景", "面部近景"}
+    label = shot.get("label", "")
+    return focus[0] if any(term in composition for term in explicit) or (isinstance(label, str) and compact(label) in labels) else None
+
+
+def photography_warnings(state, entries, boundary_only=False):
+    """Review explicit planning patterns; warnings never reject motivated shots."""
+    characters = {c["id"] for c in state["ledger"]["characters"]}
+    warnings = []
+
+    def emit(kind, window, note):
+        if boundary_only and len({item[0] for item in window}) == 1:
+            return
+        warnings.append({"kind": kind, "shots": [{"unit": key, "shot": number} for key, number, _ in window],
+                         "review": note})
+
+    def signature(shot):
+        # Older receipts without focus/camera are not guessed or migrated.
+        if not isinstance(shot.get("focus"), list) or not isinstance(shot.get("camera"), str) or not shot["camera"].strip():
+            return None
+        return (shot.get("framing"), tuple(sorted(shot["focus"])), shot.get("angle"), compact(shot["camera"]))
+
+    for index, (_, number, shot) in enumerate(entries):
+        face = face_focus(shot, characters)
+        frontal = face if shot.get("angle") == "正面" and shot.get("framing") in FACE_FRAMINGS else None
+        if number == 1 and face and shot.get("framing") in CLOSE and not boundary_only:
+            emit("首镜面部近景需审查", entries[index:index + 1],
+                 "确认面部反应是开场的必要看点；需要交代人物关系或空间时评估更完整的构图。首镜面部近景允许保留。")
+        if index:
+            previous = entries[index - 1][2]
+            other_face = face_focus(previous, characters)
+            if (frontal and shot.get("framing") in CLOSE and other_face
+                    and previous.get("angle") == "正面" and previous.get("framing") in CLOSE):
+                emit("连续正面面部近景需审查", entries[index - 1:index + 1],
+                     "连续两镜为明确的正面面部近景/特写；检查每镜新增表演信息、焦点及空间关系。合法正反打与关键反应可以保留。只识别明确面部信号，不保证发现全部怼脸画面。")
+        if index < 2:
+            continue
+        window = entries[index - 2:index + 1]
+        signatures = [signature(item[2]) for item in window]
+        if signatures[0] is not None and len(set(signatures)) == 1:
+            emit("连续三镜摄影重复需审查", window,
+                 "景别、focus、angle和camera相同；检查本镜是否新增信息、情绪或观看重点，无新增内容时合并或重新规划。有目的的重复允许保留。")
+        faces = [face_focus(item[2], characters) if item[2].get("angle") == "正面"
+                 and item[2].get("framing") in FACE_FRAMINGS else None for item in window]
+        if faces[0] is not None and len(set(faces)) == 1:
+            emit("同人物连续正面面部镜需审查", window,
+                 "同人物连续三镜正面面部中近景/近景/特写；评估关系、动作或空间的其他看点，不用换个景别标签维持同一怼脸画面。只识别明确面部信号，仍须人工审查。")
+    return warnings
+
+
+def boundary_photography_warnings(state, units):
+    """Review source-adjacent rendition links without changing stored receipts."""
+    by_id = {u["id"]: index for index, u in enumerate(units) if "id" in u}
+    predecessors = {}
+    for index, unit in enumerate(units):
+        previous = by_id.get(unit.get("predecessor"))
+        if previous is None or previous >= index or units[previous]["span"][1] != unit["span"][0]:
+            previous = next((i for i in range(index - 1, -1, -1)
+                             if units[i]["span"][1] == unit["span"][0]), None)
+        predecessors[index] = previous
+    warnings = []
+    for index, unit in enumerate(units):
+        previous = predecessors[index]
+        if previous is None:
+            continue
+        prefix = []
+        # Two preceding shots suffice for every two/three-shot review window.
+        while previous is not None and len(prefix) < 2:
+            prior = units[previous]
+            items = [(prior.get("id", f"待提交单元{previous + 1}"), number + 1, shot)
+                     for number, shot in enumerate(prior["shots"])]
+            prefix = items[-(2 - len(prefix)):] + prefix
+            previous = predecessors[previous]
+        key = unit.get("id", f"待提交单元{index + 1}")
+        current = [(key, number + 1, shot) for number, shot in enumerate(unit["shots"][:2])]
+        warnings.extend(photography_warnings(state, prefix + current, boundary_only=True))
+    return warnings
 
 
 def require(condition, message):
@@ -63,6 +160,34 @@ def write_json(path, value):
 
 def compact(text):
     return "".join(c for c in text if c.isalnum())
+
+
+def anchor_signature(text, start=0, end=None):
+    """Protect numeric meaning while retaining existing compact coordinates."""
+    end = len(text) if end is None else end
+    # Inspect whole intersecting numbers so a bare 5 cannot match 1.5 or -5.
+    numeric_matches = [m for m in re.finditer(r"[+\-−±]?\d+(?:[.．:：/／]\d+)*(?:[%％‰°])?", text)
+                       if m.start() < end and m.end() > start]
+    numbers = [m.group().translate(str.maketrans("．：／％−", ".:/%-")) for m in numeric_matches]
+    operators = [(len(compact(text[start:i])), c.translate(str.maketrans("−／％", "-/%")))
+                 for i, c in enumerate(text) if start <= i < end and c in "+-−±×÷=<>≤≥≠≈*/／%％‰°"
+                 and not any(m.start() <= i < m.end() for m in numeric_matches)]
+    return numbers, operators
+
+
+def anchor_occurrences(text, quote):
+    positions = [i for i, c in enumerate(text) if c.isalnum()]
+    fragment = compact(quote)
+    expected = anchor_signature(quote)
+    for index in occurrences(compact(text), fragment):
+        left, right = positions[index], positions[index + len(fragment) - 1] + 1
+        # Include adjacent non-body symbols for signs and trailing percentages.
+        while left and not text[left - 1].isalnum():
+            left -= 1
+        while right < len(text) and not text[right].isalnum():
+            right += 1
+        if anchor_signature(text, left, right) == expected:
+            yield index
 
 
 def interval(value, maximum):
@@ -117,8 +242,12 @@ def build_records(script_text, ledger):
                 require("：" in line, f"标准剧本第{line_no}行无法识别")
                 label, text = line.split("：", 1)
                 speaker = re.sub(r"[（(][^（）()]*[）)]$", "", label).strip()
-                voice = ("内心想法" if "os" in label.lower() or "内心" in label else
-                         "画外音" if "画外音" in label else "旁白" if "旁白" in label else "说")
+                modifier = re.search(r"[（(]([^（）()]*)[）)]$", label)
+                cue = modifier.group(1).strip() if modifier else ""
+                inner = (re.search(r"(?<![A-Za-z])os(?![A-Za-z])", cue, re.IGNORECASE)
+                         or cue == "内心" or any(word in cue for word in ("内心想法", "内心独白", "心理独白")))
+                voice = ("内心想法" if inner else "画外音" if "画外音" in cue or speaker == "画外音" else
+                         "旁白" if "旁白" in cue or speaker == "旁白" else "说")
                 kind = "dialogue"
             size = len(compact(text))
             require(size > 0, f"第{line_no}行没有可定位正文，请复核标准剧本")
@@ -218,16 +347,15 @@ def anchors(state, quote):
     results = {}
     # Both surfaces map every matching character back to canonical body offsets.
     for with_labels in (False, True):
-        chars, positions = [], []
+        surface, positions = [], []
         for r in state["records"]:
             if with_labels:
                 label = compact(r["label"])
-                chars.extend(label)
+                surface.extend([r["label"], "："])
                 positions.extend([r["start"]] * len(label))
-            body = compact(r["text"])
-            chars.extend(body)
+            surface.extend([r["text"], "\n"])
             positions.extend(range(r["start"], r["end"]))
-        for i in occurrences("".join(chars), fragment):
+        for i in anchor_occurrences("".join(surface), quote):
             a, b = positions[i], positions[i + len(fragment) - 1] + 1
             results[(a, b)] = {"span": [a, b], "approximate": False}
     if results:
@@ -253,9 +381,9 @@ def anchors(state, quote):
             mapping[entry["paragraph"]] = [r for r in destinations if r]
     for paragraph in source["paragraphs"]:
         text = compact(paragraph["text"])
-        original.extend(text)
+        original.extend([paragraph["text"], "\n"])
         char_paragraph.extend([paragraph["id"]] * len(text))
-    for i in occurrences("".join(original), fragment):
+    for i in anchor_occurrences("".join(original), quote):
         ids = set(char_paragraph[i:i + len(fragment)])
         destinations = [r for n in ids for r in mapping.get(n, [])]
         if destinations:
@@ -379,7 +507,7 @@ def asset_text(state, unit, text):
 
 
 def validate_unit(state, unit, request_span):
-    require(unit.get("output_format") == OUTPUT_FORMAT, "新生成/修改单元须采用reference-v2输出模板；旧交付仅保留读取和渲染")
+    require(unit.get("output_format") == OUTPUT_FORMAT, "新生成/修改单元须采用reference-v3输出模板；旧交付仅保留读取和渲染")
     a, b = interval(unit["span"], state["length"])
     duration = unit["duration"]
     require(type(duration) is int and state["entry"]["min"] <= duration <= 30, "单元时长不合法")
@@ -424,17 +552,12 @@ def validate_unit(state, unit, request_span):
         require(8 <= len(shots) <= 13, "26～30秒单元镜数必须在8～13镜")
     if duration >= 29 and len(shots) != 11 or 26 <= duration <= 28 and len(shots) not in (9, 10):
         require(isinstance(unit.get("count_reason"), str) and unit["count_reason"].strip(), "偏离默认镜数须在后台记录自然表达依据")
-    cursor, previous, closeups, used_chars, used_props = 0, None, 0, set(), set()
+    cursor, closeups, used_chars, used_props = 0, 0, set(), set()
     for i, shot in enumerate(shots):
         start, end = shot["start"], shot["end"]
         require(type(start) is int and type(end) is int and start == cursor and 1 <= end - start <= 5, "镜头时间轴不连续或单镜不在1～5秒")
         framing = shot["framing"]
         require(framing in FRAMINGS, "无法识别景别")
-        require(not (framing in CLOSE and previous in CLOSE), "相邻镜头禁止连续近景/特写")
-        if framing in CLOSE:
-            require(shot.get("closeup_reason") in ("情绪峰值", "核心道具", "动作高光", "剧情伏笔"), "近景/特写不在白名单")
-        if i == 0:
-            require(not shot.get("face_closeup", False), "单元首镜禁止脸部特写")
         closeups += framing == "特写"
         require(shot["scene_id"] in covered_scenes, "镜头场景不在来源内")
         subjects = shot["subjects"]
@@ -448,8 +571,11 @@ def validate_unit(state, unit, request_span):
             require(isinstance(focus, list) and len(focus) == len(set(focus))
                     and set(focus) <= set(subjects), "观看焦点须为本镜参与资产的无重复子集")
             require(bool(focus) or not subjects, "有人物或主要道具的镜头须明确观看焦点")
-        if "purpose" in shot:
-            require(isinstance(shot["purpose"], str) and shot["purpose"].strip(), "后台镜头意图不能为空")
+        purpose = shot.get("purpose")
+        require(isinstance(purpose, str) and purpose.strip() and not any(c in purpose for c in "\r\n"),
+                "reference-v3每镜purpose须为非空单行，说明新增信息/情绪与摄影选择依据")
+        require(compact(purpose) and compact(purpose) not in ("同前", "同上", "无", "电影感", "推进剧情", "体现情绪", "展示人物"),
+                "镜头purpose不能使用空泛占位值；须具体说明观看重点与摄影选择依据")
         for field in ("label", "transition"):
             value = shot.get(field)
             require(isinstance(value, str) and value.strip() and not any(c in value for c in "\r\n[]"),
@@ -457,13 +583,24 @@ def validate_unit(state, unit, request_span):
             _, referenced = asset_text(state, unit, value)
             require(referenced <= set(scenes[shot["scene_id"]]["character_ids"] + scenes[shot["scene_id"]]["prop_ids"] + scene_asset_ids(state, [shot["scene_id"]])),
                     f"镜头{field}引用了其他场景的资产")
+        photography_references = set()
+        for field in PHOTOGRAPHY_FIELDS:
+            value = shot.get(field)
+            require(isinstance(value, str) and value.strip() and not any(c in value for c in "\r\n")
+                    and "：“" not in value, f"镜头{field}须为非空单行摄影描述，台词仅填入dialogue_parts")
+            require(compact(value) and compact(value) not in ("同前", "同上", "无", "电影感"),
+                    f"镜头{field}不能使用无信息占位值；须具体说明本镜摄影状态")
+            _, referenced = asset_text(state, unit, value)
+            require(referenced <= set(scenes[shot["scene_id"]]["character_ids"] + scenes[shot["scene_id"]]["prop_ids"] + scene_asset_ids(state, [shot["scene_id"]])),
+                    f"镜头{field}引用了其他场景的资产")
+            photography_references.update(referenced)
         text = shot["text"]
-        require(isinstance(text, str) and text.strip() and "\n" not in text and "：“" not in text, "镜头正文须为非空单段，台词仅填入dialogue_parts由程序渲染")
+        require(isinstance(text, str) and text.strip() and not any(c in text for c in "\r\n") and "：“" not in text, "镜头正文须为非空单段，台词仅填入dialogue_parts由程序渲染")
         for value in (text, shot.get("connector", "")):
             require(not isinstance(value, str) or not re.search(r"发声估时|实配音\s*\d|同句续声|继续说完同一|承接.{0,12}(?:誓言|台词).{0,8}(?:部分|末尾)", value),
                     "镜头正文不得泄漏估时或用抽象续声代替实际台词")
         _, referenced = asset_text(state, unit, text)
-        require(set(subjects) <= referenced | set(shot.get("focus", [])), "正文参与者须使用@台账完整名称或@{资产ID}引用；主焦点由景别字段引用")
+        require(set(subjects) <= referenced | photography_references | set(shot.get("focus", [])), "正文参与者须使用@台账完整名称或@{资产ID}引用；主焦点由景别字段引用")
         require(referenced <= set(scenes[shot["scene_id"]]["character_ids"] + scenes[shot["scene_id"]]["prop_ids"] + scene_asset_ids(state, [shot["scene_id"]])),
                 "镜头正文引用了其他场景的资产")
         if not subjects:
@@ -473,7 +610,9 @@ def validate_unit(state, unit, request_span):
         if "connector" in shot:
             require(isinstance(shot["connector"], str), "连接词须为字符串")
             if shot["connector"].strip():
-                asset_text(state, unit, shot["connector"])
+                _, referenced = asset_text(state, unit, shot["connector"])
+                require(referenced <= set(scenes[shot["scene_id"]]["character_ids"] + scenes[shot["scene_id"]]["prop_ids"] + scene_asset_ids(state, [shot["scene_id"]])),
+                        "镜头连接词引用了其他场景的资产")
         for field in ("sound_foreground", "sound_environment"):
             if field in shot:
                 require(isinstance(shot[field], str) and not any(c in shot[field] for c in "\r\n"), "镜头音效须为单行字符串，可留空")
@@ -482,9 +621,11 @@ def validate_unit(state, unit, request_span):
                         "镜头音效引用了其他场景的资产")
         used_chars.update(set(subjects) & set(chars))
         used_props.update(set(subjects) & set(props))
-        cursor, previous = end, framing
+        cursor = end
     require(cursor == duration, "各镜头时长总和不等于单元时长")
-    require(closeups <= 2, "单元特写超过2镜")
+    if closeups > 2:
+        warnings.append({"kind": "单元特写较集中需审查", "closeup_count": closeups,
+                         "review": "超过两镜特写仅触发审查，不是数量配额；检查每镜必要信息、焦点变化及空间关系。"})
     events = unit["audio"]
     require(isinstance(events, list), "audio须为数组")
     expected = {r["id"]: r for r in selected if r["kind"] == "dialogue"}
@@ -515,8 +656,20 @@ def validate_unit(state, unit, request_span):
             require(isinstance(event.get("recording_evidence"), str) and event["recording_evidence"].strip(), "实配音时码须注明录音测量依据")
         rate = event["units"] * 1000 / (t1 - t0 - pause)
         low, high = SPEEDS[event["speed"]]
-        if not low <= rate <= high:
-            warnings.append({"record": record["id"], "kind": "估计净语速超档", "rate": round(rate, 3)})
+        timing = {}
+        if event.get("timing_basis", "text_estimate") == "text_estimate":
+            source_pause = dialogue_layout.pause_seconds(event["text"])
+            fast = dialogue_layout.estimate(event["text"], event["units"], high)
+            slow = dialogue_layout.estimate(event["text"], event["units"], low)
+            minimum = round(fast - source_pause + pause / 1000, 3)
+            maximum = round(slow - source_pause + pause / 1000, 3)
+            in_band = minimum - .001 <= (t1 - t0) / 1000 <= maximum + .001
+            timing = {"text_estimate": {"min_seconds": minimum, "max_seconds": maximum,
+                      "source_pause_seconds": source_pause, "registered_pause_seconds": pause / 1000}}
+        else:
+            in_band = low <= rate <= high
+        if not in_band:
+            warnings.append({"record": record["id"], "kind": "估计净语速超档", "rate": round(rate, 3), **timing})
         voice_ids.add(cid)
     require(used_record_ids == list(expected), "台词事件顺序与标准剧本不同")
     require(set(unit["character_ids"]) == used_chars | voice_ids, "人物名单存在未出镜/未发声角色，或遗漏主体")
@@ -538,6 +691,8 @@ def validate_unit(state, unit, request_span):
         require(collapsed == list(expected), "镜头台词片段顺序与标准剧本不一致")
     if unit.get("dialogue_layout") == dialogue_layout.POLICY:
         dialogue_layout.validate(unit)
+    key = unit.get("id", "当前单元")
+    warnings.extend(photography_warnings(state, [(key, i + 1, shot) for i, shot in enumerate(shots)]))
     return warnings
 
 
@@ -549,7 +704,7 @@ def validate(state, request, partial=False):
     units = request["units"]
     require(isinstance(units, list) and units, "请求没有分镜单元")
     for unit in units:
-        require(unit.get("output_format") == OUTPUT_FORMAT, "新生成/修改单元须采用reference-v2输出模板；旧交付仅保留读取和渲染")
+        require(unit.get("output_format") == OUTPUT_FORMAT, "新生成/修改单元须采用reference-v3输出模板；旧交付仅保留读取和渲染")
         if unit.get("audio"):
             require(unit.get("dialogue_layout") == dialogue_layout.POLICY,
                     "新生成/修改的有声单元须采用semantic-v2台词布局；旧交付仅保留读取和渲染")
@@ -579,32 +734,16 @@ def validate(state, request, partial=False):
             boundary = next(r["span"] for r in state["ranges"] if r["batch_id"] == old["batch_id"])
             warnings.extend(validate_unit(state, unit, boundary))
         replacements = {u["id"]: u for u in units}
-        prospective = [dict(u, **replacements[u["id"]]) if u["id"] in replacements else u for u in state["units"]]
+        prospective = [dict(u, **{**replacements[u["id"]], "batch_id": u.get("batch_id"),
+                                  "predecessor": u.get("predecessor")})
+                       if u["id"] in replacements else u for u in state["units"]]
     total = sum(len(u["shots"]) for u in prospective)
     special = sum(s["framing"] == "特写" for u in prospective for s in u["shots"])
-    require(special * 100 <= total * 15, "当前剧本有效镜头的累计特写比例超过15%")
-    # Check only source-adjacent units. Intentional repeat batches are separate renditions.
-    sequences = {}
-    for unit in prospective:
-        key = unit.get("batch_id", "__current_append__")
-        sequences.setdefault(key, []).append(unit)
-    for sequence in sequences.values():
-        sequence.sort(key=lambda u: u["span"][0])
-        for left, right in zip(sequence, sequence[1:]):
-            if left["span"][1] == right["span"][0] and left["main_scene"] == right["main_scene"]:
-                f1, f2 = left["shots"][-1]["framing"], right["shots"][0]["framing"]
-                require(not (f1 in CLOSE and f2 in CLOSE), "相邻单元边界禁止连续近景/特写")
-    by_id = {u["id"]: u for u in prospective if "id" in u}
-    for unit in prospective:
-        previous = by_id.get(unit.get("predecessor"))
-        if previous and previous["main_scene"] == unit["main_scene"]:
-            f1, f2 = previous["shots"][-1]["framing"], unit["shots"][0]["framing"]
-            require(not (f1 in CLOSE and f2 in CLOSE), "修改造成跨批次相邻单元连续近景/特写")
-    if request["mode"] == "append" and state["units"]:
-        previous = next((u for u in reversed(state["units"]) if u["span"][1] == units[0]["span"][0]), None)
-        if previous and previous["main_scene"] == units[0]["main_scene"]:
-            f1, f2 = previous["shots"][-1]["framing"], units[0]["shots"][0]["framing"]
-            require(not (f1 in CLOSE and f2 in CLOSE), "续接批次边界禁止连续近景/特写")
+    if special * 100 > total * 15:
+        warnings.append({"kind": "累计特写比例较高需审查", "closeup_count": special,
+                         "total_shots": total, "percent": round(special * 100 / total, 3), "review_reference_percent": 15,
+                         "review": "15%仅为诊断参考，不限制提交；低于参考线也不代表摄影质量合格，仍审查看点、空间与面部重复。"})
+    warnings.extend(boundary_photography_warnings(state, prospective))
     return warnings
 
 
@@ -616,12 +755,16 @@ def render_unit(state, unit, reference_text=None):
     relevant.update(pid for scene in state["ledger"]["scenes"] if scene["id"] in unit["scene_ids"] for pid in scene["prop_ids"])
     catalog = reference_catalog(state, relevant)
     header = fixed_header()
-    current_format = unit.get("output_format") == OUTPUT_FORMAT
-    reference_format = unit.get("output_format") in ("reference-v1", OUTPUT_FORMAT)
+    structured_format = unit.get("output_format") == OUTPUT_FORMAT
+    current_format = unit.get("output_format") in ("reference-v2", OUTPUT_FORMAT)
+    reference_format = unit.get("output_format") in ("reference-v1", "reference-v2", OUTPUT_FORMAT)
     people = ("，".join(convert("@" + chars[c] + " ") for c in unit["character_ids"]) + "；") if reference_format else "".join(chars[c] + convert("@" + chars[c] + " ") + "；" for c in unit["character_ids"])
+    scene_text = "".join(("" if structured_format else scenes[s])
+                         + convert("@" + catalog[scene_asset_ids(state, [s])[0]] + " ") + "；"
+                         for s in unit["scene_ids"])
     lines = [f'{unit["id"]}（时长：{unit["duration"]}秒）', convert("@黑幕"), unit["style"] + ";" + header[0], header[1],
              "人物：" + (people if unit["character_ids"] else "无；"),
-             "场景：" + "".join(scenes[s] + convert("@" + catalog[scene_asset_ids(state, [s])[0]] + " ") + "；" for s in unit["scene_ids"]) + f'时间：{unit["time"]}；天气：{unit["weather"]}；']
+             "场景：" + scene_text + f'时间：{unit["time"]}；天气：{unit["weather"]}；']
     if current_format:
         positions = unit["global"].removeprefix("人物站位：").strip()
         lines.append("人物站位：" + convert(asset_text(state, unit, positions)[0]))
@@ -659,15 +802,36 @@ def render_unit(state, unit, reference_text=None):
             sound = "+".join(sounds) or "无"
             label = convert(asset_text(state, unit, shot["label"])[0])
             transition = convert(asset_text(state, unit, shot["transition"])[0])
-            framing_text = f'景别：{focal}的{shot["framing"]}；转场：{transition}'
-            framing_text = framing_text + '，' if current_format else '（' + framing_text + '）'
+            if structured_format:
+                framing_text = f'（{focal}的{shot["framing"]}；转场：{transition}）'
+                photography = [convert(asset_text(state, unit, shot[field].strip().rstrip("，；。"))[0])
+                               for field in PHOTOGRAPHY_FIELDS]
+                body = "，".join(photography) + "；" + body
+            else:
+                framing_text = f'景别：{focal}的{shot["framing"]}；转场：{transition}'
+                framing_text = framing_text + '，' if current_format else '（' + framing_text + '）'
             lines.append(f'·{shot["start"]:02d}秒-{shot["end"]:02d}秒[镜头{i + 1}-{label}]：{framing_text}{body}音效：{sound}。')
         else:
             lines.append(f'[{shot["start"]}秒-{shot["end"]}秒] {body}{speech}')
     return "\n".join(lines)
 
 
-def render_receipt(state, receipt):
+def validate_output_path(state, project, output):
+    output = Path(output).resolve()
+    project = Path(project).resolve()
+    protected = [Path(x["path"]).resolve() for x in state["files"].values()]
+    protected.extend((project / n).resolve() for n in ("session.json", "video-style.txt"))
+    directories = [ROOT.resolve(), (project / "canvas").resolve(), (project / "scenes").resolve()]
+    if "source" in state["files"]:
+        directories.append((Path(state["files"]["source"]["path"]).resolve().parent / "scenes").resolve())
+    require(output not in protected and not any(output == folder or folder in output.parents for folder in directories),
+            "交付路径不能覆盖来源、逐场稿、运行状态或Skill文件")
+    return output
+
+
+def render_receipt(state, receipt, project=None):
+    if project is not None:
+        validate_output_path(state, project, receipt["output"])
     atomic_text(receipt["output"], "\n\n".join(render_unit(state, u) for u in receipt["units"]) + "\n")
 
 
@@ -696,9 +860,11 @@ def commit(args, state):
     old_receipt = next((r for r in state["receipts"] if r["request_id"] == request.get("request_id")), None)
     if old_receipt:
         require(old_receipt["request_hash"] == request_hash, "request_id已用于不同请求；请使用新ID")
-        render_receipt(state, old_receipt)
+        render_receipt(state, old_receipt, args.project)
         return {"status": "already_committed", "output": old_receipt["output"], "ids": [u["id"] for u in old_receipt["units"]],
                 "canvas_sync": sync_canvas_replacements(args.project, old_receipt), **receipt_summary(old_receipt)}
+    output = validate_output_path(state, args.project, args.output)
+    require(not output.exists(), "交付文件已存在；请使用新文件名以保留旧版本")
     warnings = validate(state, request)
     style = (args.project / "video-style.txt").read_text(encoding="utf-8-sig").strip()
     units = copy.deepcopy(request["units"])
@@ -708,7 +874,7 @@ def commit(args, state):
         if request["mode"] == "append":
             main = unit["main_scene"]
             number = state["next_numbers"].get(main, 1)
-            prior = next((u for u in reversed(state["units"]) if u["span"][1] == unit["span"][0] and u["main_scene"] == main), None)
+            prior = next((u for u in reversed(state["units"]) if u["span"][1] == unit["span"][0]), None)
             unit.update(id=f'场景{scenes[main]["number"]}-分镜{number}', version=1,
                         batch_id=request["request_id"], previous_versions=[], predecessor=prior["id"] if prior else None)
             state["next_numbers"][main] = number + 1
@@ -721,16 +887,12 @@ def commit(args, state):
     if request["mode"] == "append":
         state["ranges"].append({"span": request["span"], "batch_id": request["request_id"],
                                 "confirmed": bool(request.get("range_confirmation"))})
-    output = args.output.resolve()
-    protected = [Path(x["path"]).resolve() for x in state["files"].values()] + [(args.project / n).resolve() for n in ("session.json", "video-style.txt")]
-    require(output not in protected and ROOT not in output.parents, "交付路径不能覆盖来源、运行状态或Skill文件")
-    require(not output.exists(), "交付文件已存在；请使用新文件名以保留旧版本")
     receipt = {"request_id": request["request_id"], "request_hash": request_hash, "mode": request["mode"], "output": str(output), "units": copy.deepcopy(units)}
     state["receipts"].append(receipt)
     state["phase"] = "nodes_choice"
     save(args.project, state)
     # State is authoritative. A failed filesystem delivery can be recovered with render.
-    render_receipt(state, receipt)
+    render_receipt(state, receipt, args.project)
     return {"status": "committed", "output": str(output), "ids": [u["id"] for u in units], "warnings": warnings,
             "canvas_sync": sync_canvas_replacements(args.project, receipt), **receipt_summary(receipt)}
 
@@ -797,7 +959,7 @@ def main():
             else:
                 receipt = next((r for r in state["receipts"] if r["request_id"] == args.request_id), None)
                 require(receipt is not None, "找不到该提交记录")
-                render_receipt(state, receipt)
+                render_receipt(state, receipt, args.project)
                 result = {"status": "rendered", "output": receipt["output"], **receipt_summary(receipt)}
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError, StopIteration) as exc:

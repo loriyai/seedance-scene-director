@@ -103,7 +103,7 @@ class SkillChecks(unittest.TestCase):
             'records': [{'id': 'L000001', 'scene': 'SC0001', 'start': 0, 'end': 8,
                          'kind': 'action', 'text': '陈默将笔放在桌上'}]}
         self.unit = {'id': '场景1-分镜1', 'version': 1, 'span': [0, 8], 'duration': 4,
-            'output_format': 'reference-v2',
+            'output_format': 'reference-v3',
             'scene_ids': ['SC0001'], 'main_scene': 'SC0001', 'character_ids': ['CHAR0001'],
             'prop_ids': ['PROP0001'], 'time': '白天', 'weather': '未明示', 'style': '3D国风动漫',
             'global': '@{CHAR0001} 站在桌前。', 'start_state': '站立', 'end_state': '放笔',
@@ -111,6 +111,9 @@ class SkillChecks(unittest.TestCase):
             'shots': [{'start': 0, 'end': 4, 'framing': '中景', 'scene_id': 'SC0001',
                       'subjects': ['CHAR0001', 'PROP0001'], 'angle': '正面',
                       'focus': ['CHAR0001'], 'label': '放笔', 'transition': '硬切',
+                      'purpose': '看清放笔动作与人物桌面的关系，以中景固定机位保留接触过程。',
+                      'camera': '正面平视固定机位', 'composition': '人物居左，桌面在右侧',
+                      'depth_of_field': '中等景深，人物与桌面清晰', 'lighting': '室内既有柔光，桌下保留暗部',
                       'text': '将@{PROP0001} 放在桌上。', 'dialogue_parts': []}]}
 
     def validate(self, data=None):
@@ -141,10 +144,8 @@ class SkillChecks(unittest.TestCase):
             item.update(identity_status='confirmed', identity_basis='虚构样本：三处不同空间')
         for scene in draft['scenes']:
             scene['time_basis'] = {'kind': '原文明示', 'source_paragraphs': [scene['source_range'][0]]}
-        result = ledger.build_scene_assets(draft)
-        self.assertEqual(len(result['scene_assets']), 3)
         with self.assertRaisesRegex(ValueError, '重复'):
-            self.validate(result)  # Require source-backed distinguishing names.
+            ledger.build_scene_assets(draft)  # Distinct locations still need unique source-backed names.
 
     def test_real_decor_version_evidence_and_mapping(self):
         self.add_decor()
@@ -193,7 +194,8 @@ class SkillChecks(unittest.TestCase):
         cloud = d.render_unit(self.state, self.unit, convert)
         self.assertEqual(plain.splitlines()[1], '@黑幕')
         self.assertEqual(cloud.splitlines()[1], '<BLACK>')
-        self.assertIn('场景1-日-内-陈默卧室@陈默卧室 ；', plain)
+        self.assertIn('场景：@陈默卧室 ；时间：白天；天气：未明示；', plain)
+        self.assertNotIn('场景1-日-内-陈默卧室', plain)
         self.assertIn('@陈默-基础形象 说：“' + original + '”', plain)
         self.assertIn('<CHAR> 说：“' + original + '”', cloud)
         self.assertEqual(cloud.splitlines()[2:4], plain.splitlines()[2:4])
@@ -295,8 +297,10 @@ class SkillChecks(unittest.TestCase):
         self.assertEqual(lines[4], '人物：@陈默-基础形象 ；')
         self.assertEqual(len(lines), 9)
         self.assertEqual(lines[6], '人物站位：@陈默-基础形象 站在桌前。')
-        self.assertIn('·00秒-02秒[镜头1-放笔]：景别：@陈默-基础形象 的中景；转场：硬切，', lines[7])
-        self.assertIn('·02秒-04秒[镜头2-落点]：景别：@笔 的中景；转场：动作匹配剪辑，', lines[8])
+        self.assertEqual(lines[5], '场景：@陈默卧室 ；时间：白天；天气：未明示；')
+        self.assertIn('·00秒-02秒[镜头1-放笔]：（@陈默-基础形象 的中景；转场：硬切）正面平视固定机位，人物居左，桌面在右侧，中等景深，人物与桌面清晰，室内既有柔光，桌下保留暗部；', lines[7])
+        self.assertIn('·02秒-04秒[镜头2-落点]：（@笔 的中景；转场：动作匹配剪辑）', lines[8])
+        self.assertNotIn('景别：', rendered)
         self.assertIn('承接放笔动作。音效：落桌轻响+室内底噪。', lines[8])
         self.assertTrue(lines[7].endswith('音效：无。'))
 
@@ -318,7 +322,7 @@ class SkillChecks(unittest.TestCase):
         self.assertEqual(d.validate_unit(self.state, self.unit, self.unit['span']), [])
         rendered = d.render_unit(self.state, self.unit)
         self.assertIn('人物：无；', rendered)
-        self.assertIn('景别：@陈默卧室 的远景；转场：硬切，', rendered)
+        self.assertIn('（@陈默卧室 的远景；转场：硬切）', rendered)
         shot.pop('environment_evidence')
         with self.assertRaisesRegex(ValueError, '环境证据'):
             d.validate_unit(self.state, self.unit, self.unit['span'])
@@ -336,7 +340,8 @@ class SkillChecks(unittest.TestCase):
                     shot.update(start=cursor, end=cursor + length, label=f'动作{i + 1}')
                     unit['shots'].append(shot)
                     cursor += length
-                self.assertEqual(d.validate_unit(self.state, unit, unit['span']), [])
+                warnings = d.validate_unit(self.state, unit, unit['span'])
+                self.assertTrue(all(w['kind'] == '连续三镜摄影重复需审查' for w in warnings))
                 rendered = d.render_unit(self.state, unit)
                 self.assertEqual(sum(line.startswith('·') for line in rendered.splitlines()), len(lengths))
                 self.assertIn(f'秒-{sum(lengths):02d}秒[镜头{len(lengths)}-动作{len(lengths)}]', rendered.splitlines()[-1])
@@ -344,21 +349,21 @@ class SkillChecks(unittest.TestCase):
                     self.assertNotIn('-30秒[', rendered)
 
     def test_reference_template_missing_new_fields_are_rejected(self):
-        for field in ('label', 'transition', 'focus'):
+        for field in ('label', 'transition', 'focus', *d.PHOTOGRAPHY_FIELDS):
             with self.subTest(field=field):
                 unit = copy.deepcopy(self.unit)
                 unit['shots'][0].pop(field)
                 with self.assertRaisesRegex(ValueError, field):
                     d.validate_unit(self.state, unit, unit['span'])
         state = dict(self.state, style_hash='style')
-        for version in (None, 'legacy'):
+        for version in (None, 'legacy', 'reference-v1', 'reference-v2'):
             with self.subTest(version=version):
                 unit = copy.deepcopy(self.unit)
                 if version is None:
                     unit.pop('output_format')
                 else:
                     unit['output_format'] = version
-                with self.assertRaisesRegex(ValueError, 'reference-v2'):
+                with self.assertRaisesRegex(ValueError, 'reference-v3'):
                     d.validate(state, {'mode': 'append', 'request_id': 'new', 'span': [0, 8], 'units': [unit]})
 
     def test_sound_fields_validate_references_and_convert_separately(self):
@@ -442,7 +447,7 @@ class SkillChecks(unittest.TestCase):
     def test_unrelated_legacy_duplicate_does_not_block_local_unit(self):
         self.data['props'].extend([{'id': 'PROP0003', 'name': '黄绫'}, {'id': 'PROP0004', 'name': '黄绫'}])
         d.validate_unit(self.state, self.unit, self.unit['span'])
-        self.assertIn('景别：', d.render_unit(self.state, self.unit))
+        self.assertIn('（@陈默-基础形象 的中景；转场：', d.render_unit(self.state, self.unit))
         with self.assertRaisesRegex(ValueError, '重名'):
             d.reference_catalog(self.state)
 
@@ -461,16 +466,55 @@ class SkillChecks(unittest.TestCase):
 
     def test_reference_v1_receipt_keeps_parentheses_and_no_position_line(self):
         self.unit['output_format'] = 'reference-v1'
+        for field in d.PHOTOGRAPHY_FIELDS:
+            self.unit['shots'][0].pop(field)
         rendered = d.render_unit(self.state, self.unit)
         self.assertIn('：（景别：', rendered)
         self.assertNotIn('人物站位：', rendered)
 
-    def test_v2_commit_and_idempotent_render_use_the_same_template(self):
+    def test_reference_v2_receipt_keeps_exact_old_layout_without_photography_fields(self):
+        unit = copy.deepcopy(self.unit)
+        unit['output_format'] = 'reference-v2'
+        for field in d.PHOTOGRAPHY_FIELDS:
+            unit['shots'][0].pop(field)
+        header = d.fixed_header()
+        expected = '\n'.join([
+            '场景1-分镜1（时长：4秒）', '@黑幕', '3D国风动漫;' + header[0], header[1],
+            '人物：@陈默-基础形象 ；',
+            '场景：场景1-日-内-陈默卧室@陈默卧室 ；时间：白天；天气：未明示；',
+            '人物站位：@陈默-基础形象 站在桌前。',
+            '·00秒-04秒[镜头1-放笔]：景别：@陈默-基础形象 的中景；转场：硬切，将@笔 放在桌上。音效：无。'])
+        self.assertEqual(d.render_unit(self.state, unit).encode('utf-8'), expected.encode('utf-8'))
+        request = {'mode': 'append', 'request_id': 'old-v2', 'units': [unit]}
+        request_path, output = self.work / 'old-v2-request.json', self.work / 'old-v2.txt'
+        d.write_json(request_path, request)
+        receipt = {'request_id': 'old-v2', 'request_hash': d.sha(d.packed(request)),
+                   'mode': 'append', 'output': str(output), 'units': [unit]}
+        state = dict(self.state, receipts=[receipt])
+        with patch.object(d, 'validate') as validate:
+            result = d.commit(d.argparse.Namespace(request=request_path, project=self.work), state)
+        validate.assert_not_called()
+        self.assertEqual(result['status'], 'already_committed')
+        self.assertEqual(output.read_bytes(), (expected + '\n').encode('utf-8'))
+
+    def test_v3_photography_fields_render_in_order_and_convert_canvas_references(self):
+        shot = self.unit['shots'][0]
+        shot.update(camera='正面平视缓慢推向@{CHAR0001}', composition='@{PROP0001} 在画右桌面',
+                    depth_of_field='浅景深，@{CHAR0001} 与@{PROP0001} 清晰', lighting='原有柔光照亮@{CHAR0001}')
+        convert = c.reference_renderer({'陈默-基础形象': '<ACTOR>', '笔': '<PROP>', '陈默卧室': '<SET>'})
+        rendered = d.render_unit(self.state, self.unit, convert)
+        shot_line = rendered.splitlines()[-1]
+        self.assertIn('场景：<SET> ；时间：白天；天气：未明示；', rendered)
+        self.assertIn('：（<ACTOR> 的中景；转场：硬切）正面平视缓慢推向<ACTOR> ，<PROP> 在画右桌面，浅景深，<ACTOR> 与<PROP> 清晰，原有柔光照亮<ACTOR> ；将<PROP> 放在桌上。', shot_line)
+        self.assertNotIn('景别：', rendered)
+        self.assertNotIn('场景1-日-内-', rendered)
+
+    def test_v3_commit_and_idempotent_render_use_the_same_template(self):
         state = copy.deepcopy(self.state)
         state.update(revision=0, style_hash=d.sha('3D国风动漫'), units=[], ranges=[], receipts=[], next_numbers={})
         d.atomic_text(self.work / 'video-style.txt', '3D国风动漫\n')
         request_path, output = self.work / 'new-request.json', self.work / 'new-output.txt'
-        d.write_json(request_path, {'mode': 'append', 'request_id': 'v2-regression', 'span': [0, 8], 'units': [self.unit]})
+        d.write_json(request_path, {'mode': 'append', 'request_id': 'v3-regression', 'span': [0, 8], 'units': [self.unit]})
         args = d.argparse.Namespace(project=self.work, request=request_path, output=output)
         result = d.commit(args, state)
         self.assertEqual(result['status'], 'committed')
@@ -478,7 +522,8 @@ class SkillChecks(unittest.TestCase):
         self.assertEqual(result['canvas_sync']['status'], 'not_bound')
         first = output.read_bytes()
         self.assertIn('人物站位：', first.decode('utf-8'))
-        self.assertNotIn('（景别：', first.decode('utf-8'))
+        self.assertIn('（@陈默-基础形象 的中景；转场：硬切）', first.decode('utf-8'))
+        self.assertNotIn('景别：', first.decode('utf-8'))
         self.assertEqual(d.commit(args, state)['status'], 'already_committed')
         self.assertEqual(output.read_bytes(), first)
 
@@ -569,15 +614,14 @@ class SkillChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '资产引用'):
             d.validate_unit(self.state, self.unit, self.unit['span'])
 
-    def test_consecutive_close_shots_still_rejected(self):
+    def test_consecutive_close_shots_are_allowed(self):
         self.paired_shots()
         for shot in self.unit['shots']:
             shot.update(framing='近景', closeup_reason='动作高光')
             shot['text'] = shot['text'].replace('中景', '近景')
-        with self.assertRaisesRegex(ValueError, '连续近景'):
-            d.validate_unit(self.state, self.unit, self.unit['span'])
+        self.assertEqual(d.validate_unit(self.state, self.unit, self.unit['span']), [])
 
-    def test_same_framing_across_units_allowed_but_close_pair_rejected(self):
+    def test_same_framing_across_units_and_close_pair_allowed_with_review(self):
         first = copy.deepcopy(self.unit)
         first.update(duration=26, count_reason='虚构回归样本：八镜均为中景关系切换', batch_id='batch')
         first.pop('short_reason')
@@ -597,12 +641,17 @@ class SkillChecks(unittest.TestCase):
         record.update(id='L000002', start=8, end=16)
         state['records'].append(record)
         request = {'mode': 'replace', 'request_id': 'camera-boundary', 'units': [copy.deepcopy(first)]}
-        self.assertEqual(d.validate(state, request), [])
+        warnings = d.validate(state, request)
+        self.assertTrue(any(w['kind'] == '连续三镜摄影重复需审查' for w in warnings))
         for shot in (request['units'][0]['shots'][-1], state['units'][1]['shots'][0]):
             shot.update(framing='近景', closeup_reason='动作高光')
             shot['text'] = shot['text'].replace('中景', '近景')
-        with self.assertRaisesRegex(ValueError, '边界禁止连续近景'):
-            d.validate(state, request)
+        d.validate(state, request)
+
+
+def load_tests(loader, tests, pattern):
+    tests.addTests(loader.discover(str(Path(__file__).parent), pattern='test_audit_*.py'))
+    return tests
 
 
 if __name__ == '__main__':

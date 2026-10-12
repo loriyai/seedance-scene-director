@@ -13,7 +13,7 @@ from asset_ledger import digest, scene_ranges, source_paragraphs, split_cast_ent
 
 SCENE_FILE = re.compile(r"scene_(\d+)_(\d+)-(\d+)\.txt$")
 TRANSITION = re.compile(r"^(?:遮挡转场|转场)\s*")
-REVIEW_VERSION = 3
+REVIEW_VERSION = 4
 
 
 def compact(value):
@@ -111,8 +111,17 @@ def cue_hint(paragraphs, start, paragraph, names):
         for name in ordered:
             if value.startswith(name):
                 suffix = value[len(name):].strip()
-                if (not suffix or suffix.lower() in ("os", "画外音") or suffix.startswith(("：", ":", "「"))
-                        or re.search(r"说|问|喊|叫|答|开口", suffix.split("「", 1)[0])):
+                if value.count("「") > 1:
+                    return None
+                if not suffix or suffix.lower() in ("os", "画外音") or suffix.startswith(("：", ":", "「")):
+                    return name
+                # A later clause's speech verb does not make the first action
+                # subject its speaker. Complex/multiple-speaker cues stay manual.
+                if any(other != name and other in suffix for other in names):
+                    return None
+                if re.match(r"^(?:(?:低声|轻声|高声|大声|小声|笑着|哭着|冷冷地|缓缓地|哽咽着)\s*)*"
+                            r"(?:说道|问道|喊道|叫道|答道|回答|开口(?:说道|道)?|说|问|喊|叫|答)"
+                            r"(?=[：:「“\"『\s]|$)", suffix):
                     return name
     return None
 

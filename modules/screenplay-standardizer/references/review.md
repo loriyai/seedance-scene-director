@@ -1,6 +1,6 @@
 # 逐场复核与人工确认
 
-先运行 `screenplay_review.py`。报告的 `paragraph_map` 对每个原文段落列出对应的逐场稿行号；纯角色名、独立 OS/画外音、空段等注明具体原因。`coverage_missing` 与 `coverage_extra` 必须处理。`speaker_items` 同时包含原文引号和无引号成稿台词，列出原文片段、成稿行、说话人提示及待核原因。没有明确提示时不得仅凭动作主语或“看向某人”自动认定说话人。
+先运行 `screenplay_review.py`。报告的 `paragraph_map` 对每个原文段落列出对应的逐场稿行号；纯角色名、独立 OS/画外音、空段等注明具体原因。`coverage_missing` 与 `coverage_extra` 必须处理。`speaker_items` 同时包含原文引号和无引号成稿台词，列出原文片段、成稿行、说话人提示及待核原因。自动提示只接受明确角色标签或姓名紧接明确发声谓语的简单句；多角色、多个引号或复杂从句无法唯一归属时进入人工确认。没有明确提示时不得仅凭动作主语或“看向某人”自动认定说话人。
 
 ```text
 python scripts/screenplay_review.py <workdir> --report <review.json> [--decisions <decisions.json>] [--previous-report <old-review.json>]
@@ -25,4 +25,4 @@ python scripts/screenplay_io.py assemble <workdir> --review-report <review.json>
 
 原文中确属非剧情正文、但脚本未能自动识别的纯格式提示，可以在 `decisions.json` 的 `paragraphs` 对象中按该段 `decision_key` 写入报告中的 `decision_template`，并加具体 `reason`。不得用它跳过动作、台词或情节内容。该决定同样在原文和上下文改变后失效。
 
-同一份决定文件也可包含上面的说话人确认和 `paragraphs`。改稿重跑时传入旧报告 `--previous-report`：原文场景内容、逐场稿内容及该场相关决定未变化的场景可直接复用检查结果，即使前面的段落增删导致编号平移。其余场景重新检查。`assemble` 强制核对当前原文和逐场稿摘要；旧报告不能用于变化后的文件。
+同一份决定文件也可包含上面的说话人确认和 `paragraphs`。改稿重跑时传入旧报告 `--previous-report`：只有复核算法版本一致，且原文场景内容、逐场稿内容及该场相关决定未变化的场景可直接复用检查结果，即使前面的段落增删导致编号平移。算法版本升级或其他场景变化时重新检查。`assemble` 强制核对当前原文和逐场稿摘要；旧报告不能用于变化后的文件。

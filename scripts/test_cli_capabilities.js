@@ -1,0 +1,72 @@
+#!/usr/bin/env node
+// Exercise capability discovery with a fake CLI; never install or contact a service.
+const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+
+const source = fs.readFileSync(path.join(__dirname, "ensure-cli.js"), "utf8");
+const requiredSemantic = [
+  "get_snapshot", "get_permissions", "create_biz_node", "update_node_data", "delete_nodes", "delete_edges",
+  "xyq.generation.update_prompt", "xyq.role.updateDescription",
+  "xyq.scene.updateDescription", "xyq.role.updateAppearance",
+];
+const cliDir = path.resolve("cli-capability-fixture");
+const cliPath = path.join(cliDir, `pippit-tool-cli${process.platform === "win32" ? ".exe" : ""}`);
+const entry = path.resolve(path.dirname(cliPath), "../scripts/run.js");
+
+function fixture(catalogNames) {
+  const calls = [];
+  const messages = [];
+  const fakeFs = {
+    existsSync: (value) => value === cliPath || value === entry || value.endsWith(path.join("npm", "bin", "npm-cli.js")),
+    statSync: () => ({ isFile: () => true }),
+    realpathSync: (value) => value,
+    mkdirSync: () => {},
+    mkdtempSync: (value) => value + "mock",
+    rmSync: () => {},
+  };
+  const fakeExec = (command, args) => {
+    calls.push({ command, args });
+    if (args.includes("install")) {
+      const error = new Error("mock refuses all installation");
+      error.status = 1;
+      throw error;
+    }
+    if (args.length === 1 && args[0] === "--version") return Buffer.from("1.0.38");
+    if (args.includes("--help")) return Buffer.from("supported");
+    if (args.slice(-3).join(" ") === "canvas command list") {
+      return Buffer.from(JSON.stringify({ commands: catalogNames.map((name) => ({ name })) }));
+    }
+    throw new Error("unexpected mock command: " + args.join(" "));
+  };
+  const module = { exports: {} };
+  const context = {
+    module,
+    require: (name) => name === "child_process" ? { execFileSync: fakeExec }
+      : name === "fs" ? fakeFs : name === "os" ? { homedir: () => cliDir } : require(name),
+    process: { platform: process.platform, arch: process.arch, versions: process.versions,
+      execPath: process.execPath, env: { PATH: cliDir } },
+    console: { error: (value) => messages.push(value), log: () => {} },
+    Buffer,
+  };
+  vm.runInNewContext(source, context, { filename: "ensure-cli.js" });
+  return { ensureCLI: module.exports.ensureCLI, calls, messages };
+}
+
+const normal = fixture(requiredSemantic);
+assert.strictEqual(normal.ensureCLI({ canvas: true }).cli_path, cliPath);
+const probes = normal.calls.filter((call) => call.args.includes("--help")).map((call) => call.args.slice(0, -1).join(" "));
+assert.deepStrictEqual(probes, ["status", "login", "model list", "model describe", "canvas get", "canvas allocate", "canvas upload"]);
+assert(!normal.calls.some((call) => call.args.includes("install")));
+
+for (const missing of requiredSemantic) {
+  const test = fixture(requiredSemantic.filter((name) => name !== missing));
+  assert.throws(() => test.ensureCLI({ canvas: true }));
+  assert(test.messages.some((message) => message.includes("canvas command runtime")));
+}
+
+const base = fixture([]);
+assert.strictEqual(base.ensureCLI().cli_path, cliPath);
+assert.deepStrictEqual(base.calls.filter((call) => call.args.includes("--help")).map((call) => call.args.slice(0, -1).join(" ")), ["status", "login"]);
+console.log("CLI capability regression checks passed (11 cases, offline mock).");

@@ -19,6 +19,27 @@ SCENE_FILE = re.compile(r"scene_(\d+)_(\d+)-(\d+)\.txt$")
 DIALOGUE = re.compile(r"[^：:\s△]{1,30}(?:\([^()]+\)|（[^（）]+）)?：\S.*$")
 
 
+def paragraph_text(paragraph: ET.Element) -> str:
+    """Assign each text/tab/break to its nearest paragraph, including textboxes."""
+    parts = []
+
+    def visit(element):
+        for item in element:
+            if item.tag == f"{W}p":
+                continue  # A nested paragraph is visited separately in document order.
+            if item.tag == f"{W}t":
+                parts.append(item.text or "")
+            elif item.tag == f"{W}tab":
+                parts.append("\t")
+            elif item.tag in {f"{W}br", f"{W}cr"}:
+                parts.append("\n")
+            else:
+                visit(item)
+
+    visit(paragraph)
+    return "".join(parts)
+
+
 def read_source(path: Path) -> list[str]:
     if path.suffix.lower() == ".txt":
         return path.read_text(encoding="utf-8-sig").splitlines()
@@ -31,15 +52,7 @@ def read_source(path: Path) -> list[str]:
         raise ValueError("DOCX 中没有正文")
     paragraphs = []
     for paragraph in body.iter(f"{W}p"):
-        parts = []
-        for item in paragraph.iter():
-            if item.tag == f"{W}t":
-                parts.append(item.text or "")
-            elif item.tag == f"{W}tab":
-                parts.append("\t")
-            elif item.tag in {f"{W}br", f"{W}cr"}:
-                parts.append("\n")
-        paragraphs.append("".join(parts))
+        paragraphs.append(paragraph_text(paragraph))
     return paragraphs
 
 

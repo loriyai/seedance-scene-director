@@ -2,12 +2,12 @@
   "component": "screenplay-standardizer",
   "bundle_format": 1,
   "files": {
-    "INSTRUCTIONS.md": "633f903546a67321ce58e1d0f71d143a3c075a534c8ae6ef6d92c91cec0ae2b1",
-    "references/asset-ledger.md": "cba70516f3bf909717f5d309406885d8ae53c03509cfca823c6f8692d6b2f3b1",
-    "references/review.md": "60ee9ff347e6487a5f9ff14bdd10fa6cf3c264c626d52db357f9008248e66d82",
-    "scripts/asset_ledger.py": "942948a2150f385d9ba710ccb2bf6be7af3a664283671473bae02010af554342",
-    "scripts/asset_migrate.py": "492eea77405347b0377fdb667f5b92da69c16050f570ee6d0c2509181bdc8de2",
-    "scripts/screenplay_io.py": "d1d8545f3c009fe5d7be587ff295ecef8af36339dfcdc555cfd304d4c06701d7",
-    "scripts/screenplay_review.py": "779debca62fc7427c1569b4e8c33bfebd8bc030a0f6b818fd83f8684639c5f86"
+    "INSTRUCTIONS.md": "030bad689ab843c79b3bbb154799796cf8bd586756e9b0c3193cb9c92c4dbb7a",
+    "references/asset-ledger.md": "b237c412334c874ec482dd2dd7903124bb6ffcc75739d0b3bf91ca0b6a23628e",
+    "references/review.md": "27585650763536af7a49274d64adde8de49b522ef5e1fcbebc0fb02ad9f3118a",
+    "scripts/asset_ledger.py": "43da27eed8434262c117bb4582a0b45785ec91ba7d0970e4d8325216b1d176b7",
+    "scripts/asset_migrate.py": "85dd299b860a843f548ac5dd5c4722e5a0f7c646aa916f0e67f6c90e119e0914",
+    "scripts/screenplay_io.py": "3130cb328c10c74e0a0fb944dbb02b55e49bbf9425bc8ceb8b0160700b267d33",
+    "scripts/screenplay_review.py": "dcaf7651c2d6544d1fb6b2fa2c40ad6a7938975c82070d62042e8c58cf7edb78"
   }
 }

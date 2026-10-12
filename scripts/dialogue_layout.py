@@ -15,8 +15,9 @@ def compact(text):
 
 def pause_seconds(text):
     """Repeated punctuation is a single semantic pause."""
-    return round(sum(.14 if m[0] in '，、,' else .26 if m[0] in '…—～~' else .34
-                     for m in re.findall(r'[，、,]+|[。？！?!；;]+|[…—～~]+', text)), 3)
+    return round(sum(.34 if any(c in '。？！?!；;' for c in cluster)
+                     else .26 if any(c in '…—～~' for c in cluster) else .14
+                     for cluster in re.findall(r'[，、,。？！?!；;…—～~：:]+', text)), 3)
 
 def estimate(text, units, rate=4.8):
     require(type(units) is int and units > 0 and rate > 0, '发音单位和语速须有效')
@@ -81,8 +82,13 @@ def validate(unit):
             require(compact(text), '禁止把纯标点分配成独立台词')
             if len(parts) > 1:
                 require(not (len(compact(text)) == 1 and compact(text) in TAILS), '禁止孤立句尾语气词')
+                basis = part.get('breath_basis')
+                if basis is not None:
+                    require(isinstance(basis, str) and basis.strip() and not any(c in basis for c in '\r\n')
+                            and re.search(r'[\u4e00-\u9fff]', basis), '人工自然气口依据须为非空单行中文说明')
                 if index < len(parts)-1:
-                    require(text.rstrip()[-1] in PUNCTUATION, '台词切点必须位于原文完整分句或自然气口，不能从词句中间切字')
+                    require(text.rstrip()[-1] in PUNCTUATION or local and basis,
+                            '台词切点必须位于原文完整分句或自然气口，不能从词句中间切字；无标点气口须填breath_basis')
                 require(text.lstrip()[0] not in PUNCTUATION, '禁止将标点留给下一台词片段')
             shot = unit['shots'][i]
             require(shot['start'] <= t0 < shot['end'], '完整台词必须写在实际开始发声的镜头')

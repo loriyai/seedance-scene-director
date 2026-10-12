@@ -229,32 +229,26 @@ def bind_image(project, cli, state, doc, item, uploaded):
 def refresh_references(project, cli, session, changed):
     c = api()
     state = c.read_state(project)
-    queued = set(state.get("pending_image_references", [])) | set(changed)
+    c.queue_image_references(session, state, changed)
+    queued = set(state.get("pending_image_references", []))
     if not queued:
         return {"status": "unchanged"}
-    state["pending_image_references"] = sorted(queued)
     c.save(project, state)
     units = []
     for unit in session["units"]:
         if unit["id"] not in state["mappings"]:
             continue
-        mentioned = set(unit["character_ids"] + d.scene_asset_ids(session, unit["scene_ids"]) + unit["prop_ids"])
-        for field in [unit["global"], *[shot["text"] for shot in unit["shots"]], *[shot.get("connector", "") for shot in unit["shots"]]]:
-            mentioned.update(d.asset_text(session, unit, field)[1])
+        mentioned = c.unit_asset_ids(session, unit)
         if mentioned & queued:
             units.append(unit["id"])
     if not units:
-        state["pending_image_references"] = []
+        c.consume_image_references(session, state, set(), [])
         c.save(project, state)
         return {"status": "unchanged"}
     try:
         result = c.sync(project, cli, "videos", ids=units, bind_references=True, existing_only=True, references_only=True)
     except (ValueError, OSError) as exc:
         return {"status": "pending", "units": units, "message": c.safe_message(exc)}
-    if result["status"] == "synced":
-        state = c.read_state(project)
-        state["pending_image_references"] = []
-        c.save(project, state)
     return result
 
 
@@ -287,7 +281,7 @@ def images(project, cli, folder, decisions=None, preview=False):
                 for entry in state["journal"]):
             previous = {"file_hash": item["file_hash"], "pippit_asset_id": pid}
             mapping["image"] = previous
-            state["pending_image_references"] = sorted(set(state.get("pending_image_references", [])) | {key})
+            c.queue_image_references(session, state, [key])
             c.save(project, state)
         if pid and previous.get("file_hash") == item["file_hash"] and previous.get("pippit_asset_id") == pid:
             unchanged.append(key)
@@ -325,7 +319,7 @@ def images(project, cli, folder, decisions=None, preview=False):
             c.fail("LOCAL_IMAGE_CHANGED", "上传期间本地图片发生变化；请重新核对后绑定。", key=key)
         bind_image(project, cli, state, fresh, item, uploaded)
         state["mappings"][key]["image"] = {"file_hash": item["file_hash"], "pippit_asset_id": uploaded["pippit_asset_id"]}
-        state["pending_image_references"] = sorted(set(state.get("pending_image_references", [])) | {key})
+        c.queue_image_references(session, state, [key])
         c.save(project, state)
         imported.append(key)
     references = refresh_references(project, cli, session, imported)

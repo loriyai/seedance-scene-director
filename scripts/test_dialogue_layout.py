@@ -112,7 +112,7 @@ class DialogueLayoutChecks(unittest.TestCase):
     def test_new_requests_cannot_reuse_legacy_word_splitter(self):
         import director as d
         unit=self.sample()
-        unit['output_format']='reference-v2'
+        unit['output_format']='reference-v3'
         with self.assertRaisesRegex(ValueError,'semantic-v2'):
             d.validate({'style_hash':'style'}, {'mode':'replace','request_id':'test','units':[unit]})
 
@@ -129,6 +129,17 @@ class DialogueLayoutChecks(unittest.TestCase):
         self.assertEqual(''.join(p['text'] for s in u['shots'] for p in s['dialogue_parts']), text)
         self.assertFalse(any(s.get('dialogue_continuations') for s in u['shots']))
         u['shots'][1]['dialogue_continuations'] = [{'record':'L1','segment':0}]
+        with self.assertRaisesRegex(ValueError, '逐镜写实际台词'):
+            dl.validate(u)
+
+    def test_v3_inherits_semantic_v2_chunks_and_rejects_legacy_continuations(self):
+        u = self.sample('别担心，我会回来。', end=4, units=7)
+        u['output_format'] = 'reference-v3'
+        dl.attach(u, {'L1': [{'text': '别担心，', 'start': 1, 'end': 2.9},
+                            {'text': '我会回来。', 'start': 3, 'end': 4}]})
+        self.assertEqual(u['dialogue_layout'], 'semantic-v2')
+        self.assertEqual(''.join(p['text'] for s in u['shots'] for p in s['dialogue_parts']), u['audio'][0]['text'])
+        u['shots'][1]['dialogue_continuations'] = [{'record': 'L1', 'segment': 0}]
         with self.assertRaisesRegex(ValueError, '逐镜写实际台词'):
             dl.validate(u)
 
