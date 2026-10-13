@@ -16,6 +16,7 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import dialogue_layout
+import continuity
 HEADER_SHA = "8001822afdf324cbbfa3eb284b2a03ccbde084b2e70fa66763a26b5c738e5962"
 STYLES = {"1": "3D国风动漫,暗黑武侠/超写实仙侠风格", "2": "3D国风动漫，眷思量风格，东方奇幻唯美风格"}
 SPEEDS = {"常速": (4.0, 5.2), "快节奏": (4.5, 5.8), "情绪慢速": (3.3, 4.4)}
@@ -523,7 +524,7 @@ def asset_text(state, unit, text):
     return "".join(output), used
 
 
-def validate_unit(state, unit, request_span):
+def validate_unit(state, unit, request_span, *, require_continuity=False):
     require(unit.get("output_format") == OUTPUT_FORMAT, "新生成/修改单元须采用reference-v3输出模板；旧交付仅保留读取和渲染")
     a, b = interval(unit["span"], state["length"])
     duration = unit["duration"]
@@ -710,6 +711,9 @@ def validate_unit(state, unit, request_span):
         dialogue_layout.validate(unit)
     key = unit.get("id", "当前单元")
     warnings.extend(photography_warnings(state, [(key, i + 1, shot) for i, shot in enumerate(shots)]))
+    continuity_result = continuity.validate_unit(state, unit, required=require_continuity)
+    if continuity_result is not None:
+        warnings.extend(continuity_result["warnings"])
     return warnings
 
 
@@ -734,10 +738,11 @@ def validate(state, request, partial=False):
         cursor = a
         for unit in units:
             require(unit["span"][0] == cursor and unit["span"][1] <= b, "单元来源范围不连续、重复或越界")
-            warnings.extend(validate_unit(state, unit, [a, b]))
+            warnings.extend(validate_unit(state, unit, [a, b], require_continuity=True))
             cursor = unit["span"][1]
         require(cursor == b or partial, "本批单元未完整覆盖选定范围")
         prospective = state["units"] + units
+        touched = set(range(len(state["units"]), len(prospective)))
     else:
         require(not partial, "局部替换必须完整检查所有提交单元")
         ids = [u.get("id") for u in units]
@@ -749,11 +754,13 @@ def validate(state, request, partial=False):
             require(unit["span"] == old["span"] and unit["main_scene"] == old["main_scene"], "局部修改不能改变来源范围或主场景")
             # range_end refers to the original batch boundary, never an arbitrary replacement boundary.
             boundary = next(r["span"] for r in state["ranges"] if r["batch_id"] == old["batch_id"])
-            warnings.extend(validate_unit(state, unit, boundary))
+            warnings.extend(validate_unit(state, unit, boundary, require_continuity=True))
         replacements = {u["id"]: u for u in units}
         prospective = [dict(u, **{**replacements[u["id"]], "batch_id": u.get("batch_id"),
                                   "predecessor": u.get("predecessor")})
                        if u["id"] in replacements else u for u in state["units"]]
+        touched = {i for i, u in enumerate(prospective) if u["id"] in replacements}
+    warnings.extend(continuity.validate_chain(state, prospective, touched))
     total = sum(len(u["shots"]) for u in prospective)
     special = sum(s["framing"] == "特写" for u in prospective for s in u["shots"])
     if special * 100 > total * 15:

@@ -92,6 +92,7 @@ replace请求：mode=`replace`，新的request_id，units列出要替换的原ID
 | output_format | 新生成或指定修改必填`reference-v3`；旧reference-v1、reference-v2及更早receipt保留原版渲染，不重写未选单元 |
 | global | 必填单行中文起始人物站位，仅含必要的左右、前后、朝向及坐席关系；无人物时填“人物站位：无。”；资产名称使用显式@引用；不填光照、色彩、层次、景深、构图、地点氛围、持续环境或声源/口型规则。reference-v3在场景行后渲染独立“人物站位：”行；仅画外发声者不强迫入画，位移写对应镜头text；旧记录保留原版读取 |
 | start_state / end_state | 后台中文承接状态，含已有站位、朝向、持物、伤势、动作进度、发声接续 |
+| continuity | 新append/指定replace必填最小状态记录，见[连续性后台接口](continuity-state.md)；区分实体身份、在场状态、实体关系和逐镜可见性。只存后台，不迁移旧receipt或未选单元，不代替start_state/end_state的语义复核 |
 | shots / audio | 见下表 |
 | dialogue_layout | 新生成/修改的有声单元必填`semantic-v2`；旧交付保留读取和渲染，不要求重做未选中的单元 |
 
@@ -100,6 +101,7 @@ replace请求：mode=`replace`，新的request_id，units列出要替换的原ID
 | 字段 | 内容 |
 |---|---|
 | start / end | 相邻整数秒，单镜1～5秒，全单元从0连续至duration |
+| continuity | 新提交每镜必填状态变化与可见范围，结构及继承/边界检查见[连续性后台接口](continuity-state.md)；没有变化用空变化列表，持续在场者可在画外或被遮挡。实际可见参与者仍须落实到subjects、构图及正文 |
 | scene_id | 当前实际场景SC ID，属于scene_ids |
 | framing | 大远景、大全景、远景、全景、中景、中近景、近景、特写之一 |
 | angle | 正面、斜侧、侧拍、背拍、俯拍、仰拍、第一人称、客观之一 |

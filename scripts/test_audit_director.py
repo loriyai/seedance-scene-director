@@ -11,6 +11,29 @@ import director as d
 import dialogue_layout as dl
 
 
+def static_fixture_continuity(unit):
+    """Register presence for fictional fixtures testing unrelated behavior.
+
+    This test-only helper does not infer production continuity from subjects.
+    Fixtures deliberately track no position, pose, or contact facts; tests for
+    actual changes and identity transitions supply explicit contracts elsewhere.
+    """
+    asset_ids = sorted(set(unit.get('character_ids', []) + unit.get('prop_ids', [])))
+    snapshot = {asset_id: {'present': True, 'asset_id': asset_id, 'facts': {}}
+                for asset_id in asset_ids}
+    unit['continuity'] = {
+        'version': 1, 'boundary': {'kind': 'continuous'},
+        'entities': {asset_id: {'asset_ids': [asset_id]} for asset_id in asset_ids},
+        'initial': copy.deepcopy(snapshot), 'final': copy.deepcopy(snapshot)}
+    for shot in unit['shots']:
+        shot['continuity'] = {'changes': [], 'visibility': {
+            asset_id: {'mode': 'visible' if asset_id in shot['subjects'] else 'offscreen',
+                       'basis': '虚构测试实体位于本镜取景内' if asset_id in shot['subjects']
+                                else '虚构测试实体仍在场，位于本镜取景范围外'}
+            for asset_id in asset_ids}}
+    return unit
+
+
 class AuditDirectorChecks(unittest.TestCase):
     def setUp(self):
         base = os.environ.get('SEEDANCE_AUDIT_TEST_DIR')
@@ -49,7 +72,7 @@ class AuditDirectorChecks(unittest.TestCase):
 
     def unit(self, span, scene='SC0001', framings=None):
         framings = framings or ['中景'] * 4
-        return {'span': span, 'output_format': 'reference-v3', 'duration': 4,
+        unit = {'span': span, 'output_format': 'reference-v3', 'duration': 4,
             'main_scene': scene, 'scene_ids': [scene], 'character_ids': ['CHAR0001'], 'prop_ids': [],
             'time': '白天', 'weather': '未明示', 'global': '@{CHAR0001} 位于画面左侧。',
             'start_state': '站立', 'end_state': '站立', 'short_reason': 'natural_beat', 'short_basis': '完整动作落点',
@@ -60,6 +83,7 @@ class AuditDirectorChecks(unittest.TestCase):
                 'depth_of_field': '中等景深，人物清晰', 'lighting': '既有室内柔光保持不变',
                 'transition': '硬切', 'text': '@{CHAR0001} 完成原动作。', 'closeup_reason': '动作高光', 'dialogue_parts': []}
                 for i, framing in enumerate(framings)]}
+        return static_fixture_continuity(unit)
 
     def request(self, first=None, second=None):
         return {'mode': 'append', 'request_id': 'audit', 'span': [0, 18],
@@ -176,7 +200,9 @@ class AuditDirectorChecks(unittest.TestCase):
         self.commit(self.request(), self.project / 'outputs' / 'new.txt')
         for unit in self.state['units']:
             unit['output_format'] = 'reference-v2'
+            unit.pop('continuity')
             for shot in unit['shots']:
+                shot.pop('continuity')
                 shot.pop('purpose')
                 for field in d.PHOTOGRAPHY_FIELDS:
                     shot.pop(field)
@@ -184,7 +210,8 @@ class AuditDirectorChecks(unittest.TestCase):
         selected = self.unit([0, 9])
         selected['id'] = old[0]['id']
         request = {'mode': 'replace', 'request_id': 'v3-selected', 'units': [selected]}
-        self.assertEqual(d.validate(self.state, request), [])
+        self.assertEqual([warning['kind'] for warning in d.validate(self.state, request)],
+                         ['旧单元连续性边界需人工核对'])
         self.assertEqual(self.state['units'], old)
         result = self.commit(request, self.project / 'outputs' / 'selected-v3.txt')
         self.assertEqual(result['status'], 'committed')
@@ -230,14 +257,20 @@ class AuditDirectorChecks(unittest.TestCase):
         first.update(id='场景1-分镜1', batch_id='old-a', version=1, predecessor=None)
         second = self.unit([9, 18], 'SC0002')
         second.update(id='场景2-分镜1', batch_id='old-b', version=1, predecessor=None)
+        for legacy in (first, second):
+            legacy.pop('continuity')
+            for shot in legacy['shots']:
+                shot.pop('continuity')
         self.state['units'] = [first, second]
         self.state['ranges'] = [{'span': [0, 9], 'batch_id': 'old-a'}, {'span': [9, 18], 'batch_id': 'old-b'}]
         replacement = self.unit([9, 18], 'SC0002', ['近景'] + ['中景'] * 3)
         replacement['id'] = second['id']
         request = {'mode': 'replace', 'request_id': 'replace', 'units': [replacement]}
-        self.assertEqual(d.validate(self.state, request), [])
+        self.assertEqual([warning['kind'] for warning in d.validate(self.state, request)],
+                         ['旧单元连续性边界需人工核对'])
         replacement.update(batch_id='wrong', predecessor=replacement['id'])
-        self.assertEqual(d.validate(self.state, request), [])
+        self.assertEqual([warning['kind'] for warning in d.validate(self.state, request)],
+                         ['旧单元连续性边界需人工核对'])
 
     def test_output_protection_covers_scenes_canvas_and_bound_drafts(self):
         paths = [self.project / 'scenes' / 'new.txt', self.project / 'canvas' / 'new.json',

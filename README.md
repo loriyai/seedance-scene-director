@@ -1,10 +1,10 @@
 # Seedance 场景分镜导演
 
-当前版本：**v0.09**；更新日期：**2026-10-13**。
+当前版本：**v0.10**；更新日期：**2026-10-13**。
 
-v0.09 在 v0.08 基础上将表演分级、表情弧线、反应过程、台词韵律及镜头方案词库接入阶段4规划、实际TXT渲染和逐单元复核。保留原文保真、动态时长镜数、固定抬头和旧交付格式；摄影与表演按实际内容复核。
+v0.10 增加通用分镜连续性流程：先区分场景既有状态与状态变化，再安排叙事节拍、表演时长和摄影。新增后台实体状态、逐镜可见性及跨单元一致性校验，检查人物与物件的持续存在、形象和关系变化，并为时间跳跃等重置保留原文依据。
 
-同时修复带括号提示的显式对白标签识别，保留原有提示与声源核验；复核版本升级为 review_version 5，避免新复核复用旧算法缓存，已绑定项目与旧分镜保持原版。
+新提交的分镜须提供连续性记录；旧项目未修改的分镜与既有交付保持兼容。校验检查结构化声明的一致性，叙事、表演与成片效果仍需语义或视觉复核。保留固定抬头、时长规则、输出格式和节点菜单。240 项 Python 检查、11 项离线 CLI 检查及古装场景试用通过；离线测试不代表云端生成验证。
 
 将完整中文剧本整理成标准剧本，筛选可复用资产并完成美术设计，输出适用于Gpt-image-2的资产图片提示词，再根据用户指定的剧本范围按场景生成适用于 Seedance 2.5 的分镜提示词。
 
@@ -14,13 +14,13 @@ v0.09 在 v0.08 基础上将表演分级、表情弧线、反应过程、台词�
 
 需要支持本地Skill的Codex环境，以及Python 3.10或更高版本。核心脚本使用标准库；收到完整剧本时会后台检查当前Python的PyYAML，缺失则直接安装并验证，已有版本不重复安装或升级。小云雀画布操作另需Node.js 16+、npm和官方CLI；首次使用时按需配置并完成浏览器授权。
 
-安装指定版本 `v0.09`：
+安装指定版本 `v0.10`：
 
 ```bash
-git clone --branch v0.09 --single-branch https://github.com/loriyai/seedance-scene-director.git ~/.codex/skills/seedance-scene-director
+git clone --branch v0.10 --single-branch https://github.com/loriyai/seedance-scene-director.git ~/.codex/skills/seedance-scene-director
 ```
 
-也可下载 [v0.09 源码 ZIP](https://github.com/loriyai/seedance-scene-director/archive/refs/tags/v0.09.zip)，解压后将根目录重命名为 `seedance-scene-director`；本地安装包 `seedance-scene-director-v0.09.zip` 已使用该目录名。已有同名安装时，先在 Skills 目录外备份旧文件夹，再完整替换。使用自定义 `CODEX_HOME` 时，安装到对应的 `skills/seedance-scene-director` 目录。切换版本时检查 `VERSION`，每次只安装一个版本。
+也可下载 [v0.10 源码 ZIP](https://github.com/loriyai/seedance-scene-director/archive/refs/tags/v0.10.zip)，解压后将根目录重命名为 `seedance-scene-director`。已有同名安装时，先在 Skills 目录外备份旧文件夹，再完整替换。使用自定义 `CODEX_HOME` 时，安装到对应的 `skills/seedance-scene-director` 目录。切换版本时检查 `VERSION`，每次只安装一个版本。
 
 ## 使用
 

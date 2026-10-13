@@ -172,6 +172,9 @@ class PerformanceDirectionChecks(unittest.TestCase):
 
     def test_legacy_renders_ignore_new_cues_and_new_validation_rejects_old_format(self):
         unit = self.sample()
+        unit.pop('continuity')
+        for shot in unit['shots']:
+            shot.pop('continuity')
         for version in ('reference-v1', 'reference-v2'):
             with self.subTest(version=version):
                 unit['output_format'] = version

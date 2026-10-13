@@ -26,6 +26,7 @@ class CameraPolicyChecks(unittest.TestCase):
         for shot in unit['shots']:
             shot.update(subjects=['CHAR0001', 'PROP0001'], focus=['PROP0001'],
                         text='@{CHAR0001} 递出@{PROP0001}。')
+        fixtures.static_fixture_continuity(unit)
 
     def face_shots(self, unit, framing='近景'):
         for shot in unit['shots']:
@@ -121,6 +122,7 @@ class CameraPolicyChecks(unittest.TestCase):
         unit['character_ids'].append('CHAR0002')
         for shot in unit['shots'][1::2]:
             shot.update(subjects=['CHAR0002'], focus=['CHAR0002'], text='@{CHAR0002} 完成原动作。')
+        fixtures.static_fixture_continuity(unit)
         warnings = d.validate_unit(self.state, unit, [0, 9])
         self.assertTrue(any(w['kind'] == '连续正面面部近景需审查' for w in warnings))
         self.assertFalse(any(w['kind'] == '同人物连续正面面部镜需审查' for w in warnings))
@@ -154,8 +156,10 @@ class CameraPolicyChecks(unittest.TestCase):
     def test_old_v2_receipt_without_purpose_or_photography_fields_still_renders(self):
         unit = self.unit()
         unit['output_format'] = 'reference-v2'
+        unit.pop('continuity')
         unit.update(id='场景1-分镜1', style='3D国漫')
         for shot in unit['shots']:
+            shot.pop('continuity')
             shot.pop('purpose')
             for field in d.PHOTOGRAPHY_FIELDS:
                 shot.pop(field)

@@ -17,6 +17,7 @@ import canvas as c
 import canvas_media as media
 import ensure_dependencies as dependencies
 from test_dialogue_layout import DialogueLayoutChecks
+from test_audit_director import static_fixture_continuity
 
 _, ledger, _ = d.dependency()
 import asset_migrate
@@ -516,6 +517,7 @@ class SkillChecks(unittest.TestCase):
         state.update(revision=0, style_hash=d.sha('3D国风动漫'), units=[], ranges=[], receipts=[], next_numbers={})
         d.atomic_text(self.work / 'video-style.txt', '3D国风动漫\n')
         request_path, output = self.work / 'new-request.json', self.work / 'new-output.txt'
+        static_fixture_continuity(self.unit)
         d.write_json(request_path, {'mode': 'append', 'request_id': 'v3-regression', 'span': [0, 8], 'units': [self.unit]})
         args = d.argparse.Namespace(project=self.work, request=request_path, output=output)
         result = d.commit(args, state)
@@ -592,7 +594,7 @@ class SkillChecks(unittest.TestCase):
         unselected_snapshot, numbers = copy.deepcopy(unselected), copy.deepcopy(state['next_numbers'])
         request_path, output = self.work / 'replacement.json', self.work / 'replacement.txt'
         d.write_json(request_path, {'mode': 'replace', 'request_id': 'selected-replace',
-                                    'units': [copy.deepcopy(self.unit)]})
+                                    'units': [static_fixture_continuity(copy.deepcopy(self.unit))]})
         result = d.commit(d.argparse.Namespace(project=self.work, request=request_path, output=output), state)
         self.assertEqual(result['ids'], ['场景1-分镜1'])
         self.assertEqual(state['units'][0]['version'], 2)
@@ -809,6 +811,7 @@ class SkillChecks(unittest.TestCase):
             shot.update(start=cursor, end=cursor + length)
             first['shots'].append(shot)
             cursor += length
+        static_fixture_continuity(first)
         second = copy.deepcopy(first)
         second.update(id='场景1-分镜2', span=[8, 16])
         state = copy.deepcopy(self.state)
