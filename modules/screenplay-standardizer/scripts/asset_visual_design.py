@@ -1,0 +1,287 @@
+"""Validate reviewed asset designs and compile reusable GPT-image-2 prompts.
+
+This module never infers appearance, counts words, generates images, or changes
+asset identity. Source facts and author supplied production designs stay apart.
+"""
+
+import copy
+import hashlib
+import json
+import re
+
+
+PROP_POLICY = "visible-reuse-v1"
+DESIGN_VERSION = "gpt-image-2-v1"
+ASSET_CATEGORIES = ("characters", "scene_assets", "props")
+FURNITURE = re.compile(r"(?:桌|床|椅|柜|沙发|茶几|凳)(?:子|铺)?$")
+DAILY_ITEMS = {"锅", "碗", "瓢", "盆", "锅碗瓢盆", "筷子", "餐具", "水杯", "杯子", "手机", "雨伞", "香烟", "茶杯", "盘子", "勺子"}
+CHARACTER_LAYOUT = (
+    "16:9横版角色参考图，纯白背景。最左侧超大正面面部特写占满画面1/3宽度并贯穿画面高度，平视前方，"
+    "完整展示头部和清晰五官；右侧2/3依次并排正面全身、90度侧面全身、背面全身，"
+    "三个全身视图等高，头顶和脚底对齐，头顶到脚底完整入镜，不裁切、不重叠。"
+    "特写和三个全身视图属于同一角色、同一状态，脸部身份、体型、发型、服装和配色一致。"
+)
+
+
+def nonempty(value, label):
+    if not isinstance(value, str) or not value.strip() or "\n" in value or "\r" in value:
+        raise ValueError(f"{label}须为非空单行文字")
+    return value.strip()
+
+
+def fingerprint(value):
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def asset_facts(data, category, item):
+    facts = item.get("visual_facts", [])
+    if category == "scene_assets":
+        location = next(loc for loc in data["locations"] if loc["id"] == item["location_id"])
+        facts = location["visual_facts"] + facts
+        if item["variant"] != "base":
+            base = next(asset for asset in data["scene_assets"]
+                        if asset["location_id"] == item["location_id"] and asset["variant"] == "base")
+            facts = location["visual_facts"] + base["visual_facts"] + item["visual_facts"]
+    return facts
+
+
+def source_constraints(data, category, item):
+    # Existing production_design is a legacy proposal, never a source fact.
+    return list(dict.fromkeys(fact["text"].strip() for fact in asset_facts(data, category, item)))
+
+
+def source_context_digest(data, category, item):
+    linked = []
+    for scene in data["scenes"]:
+        appears = (item["id"] in scene["character_ids"] if category == "characters" else
+                   item["id"] in scene["prop_ids"] if category == "props" else
+                   scene.get("scene_asset_id") == item["id"])
+        if appears:
+            linked.append({field: copy.deepcopy(scene.get(field)) for field in
+                           ("id", "number", "heading", "source_range", "location_id", "scene_asset_id",
+                            "character_ids", "prop_ids", "temporal_layer_id")})
+    record = {"source_digest": data.get("source_digest"),
+              "category": category, "name": item["name"], "facts": asset_facts(data, category, item),
+              "scene_mapping": linked, "source_entry": item.get("source_entry"),
+              "source_name": item.get("source_name"), "appearance": item.get("appearance"),
+              "visible_uses": item.get("visible_uses"), "variant": item.get("variant"),
+              "parent_id": item.get("parent_id"), "location_id": item.get("location_id")}
+    return fingerprint(record)
+
+
+def validate_prop_policy(data, paragraphs, fact_validator):
+    policy = data.get("asset_policy")
+    if policy is None:
+        return  # Existing ledgers keep their policy until explicitly reviewed.
+    if policy != PROP_POLICY:
+        raise ValueError(f"不支持的道具提取政策：{policy}")
+    scenes = {scene["id"]: scene for scene in data["scenes"]}
+    offsets, cursor = [], 0
+    for paragraph in paragraphs:
+        offsets.append(cursor)
+        cursor += len("".join(paragraph.split()))
+    for item in data["props"]:
+        label = item["id"]
+        review = item.get("extraction_review")
+        if not isinstance(review, dict) or review.get("kind") != "special_reusable":
+            raise ValueError(f"{label}须为需复用的特殊主要道具；普通日用品、家具、服装或临时物件不提取")
+        nonempty(review.get("consistency_reason"), f"{label} 前后一致性理由")
+        names = [item.get("source_name", item["name"]), *item.get("aliases", [])]
+        if any(FURNITURE.search(name) for name in names):
+            raise ValueError(f"{label}桌床等固定大件家具归入SET，不单独提取")
+        if any(name in DAILY_ITEMS for name in names):
+            nonempty(review.get("special_features"), f"{label}日用品须说明特殊可辨形制，普通日用品不提取")
+        uses = item.get("visible_uses")
+        if not isinstance(uses, list) or len(uses) < 2:
+            raise ValueError(f"{label}至少需要2次独立可见使用，不以词频或对白提及次数计数")
+        events, spans = set(), []
+        for use in uses:
+            if not isinstance(use, dict):
+                raise ValueError(f"{label}可见使用须为对象")
+            sid, event = use.get("scene_id"), nonempty(use.get("event_id"), f"{label}独立事件标识")
+            scene = scenes.get(sid)
+            if not scene or label not in scene["prop_ids"]:
+                raise ValueError(f"{label}可见使用场次不存在或未关联该道具")
+            key = (sid, event)
+            if key in events:
+                raise ValueError(f"{label}同一独立事件重复计数")
+            events.add(key)
+            refs = use.get("source_paragraphs")
+            if not isinstance(refs, list) or not refs or any(type(ref) is not int for ref in refs):
+                raise ValueError(f"{label}可见使用缺少有效原文段落")
+            if refs != list(range(min(refs), max(refs) + 1)):
+                raise ValueError(f"{label}每次可见使用证据段落须连续、按顺序且不重复")
+            evidence = nonempty(use.get("evidence"), f"{label}可见使用证据")
+            fact_validator([{"text": "可见使用", "evidence": evidence, "source_paragraphs": refs,
+                             "scene_ids": [sid], "attribution": "可见使用审阅"}],
+                           paragraphs, scenes, label, sid)
+            text = "".join("".join(paragraphs[ref - 1] for ref in refs).split())
+            needle = "".join(evidence.split())
+            positions = [match.start() for match in re.finditer(re.escape(needle), text)]
+            if len(positions) != 1:
+                raise ValueError(f"{label}可见使用证据须唯一定位独立事件，请缩小段落或补全原句")
+            start = offsets[refs[0] - 1] + positions[0]
+            span = (start, start + len(needle))
+            if any(span[0] < previous[1] and previous[0] < span[1] for previous in spans):
+                raise ValueError(f"{label}同一原文事件证据重叠，不能重复拆分成2次使用")
+            spans.append(span)
+
+
+def validate_design_record(category, item, design, anchors):
+    label = item["id"]
+    if not isinstance(design, dict) or design.get("attribution") != "制作设计":
+        raise ValueError(f"{label}视觉设计须独立标注制作设计")
+    nonempty(design.get("basis"), f"{label}设计依据")
+    if design.get("reviewed_source_facts") is not True:
+        raise ValueError(f"{label}设计作者须审阅原文明示约束并声明 reviewed_source_facts=true")
+    fields = {
+        "characters": ("identity_anchor_id", "styling"),
+        "scene_assets": ("space", "materials_palette", "furnishings", "lighting"),
+        "props": ("structure", "materials_palette", "scale", "state"),
+    }[category]
+    for field in fields:
+        nonempty(design.get(field), f"{label}.{field}")
+    if category == "characters":
+        if design["identity_anchor_id"] not in anchors:
+            raise ValueError(f"{label}缺少共享人物身份锚点")
+        overrides = design.get("appearance_overrides", {})
+        if not isinstance(overrides, dict) or set(overrides) - {"age", "body", "face", "hair"}:
+            raise ValueError(f"{label}人物版本覆盖只允许age/body/face/hair")
+        for field, value in overrides.items():
+            nonempty(value, f"{label}版本覆盖{field}")
+        differences = design.get("variant_differences", [])
+        if not isinstance(differences, list) or any(not isinstance(value, str) or not value.strip() for value in differences):
+            raise ValueError(f"{label}variant_differences须为非空文字数组")
+        if overrides and not differences:
+            raise ValueError(f"{label}覆盖身份外观时须登记已有版本的明确差异；不能新增角色版本")
+        changes = design.get("override_source_facts", {})
+        if not isinstance(changes, dict):
+            raise ValueError(f"{label}override_source_facts须为字段到原文事实text的对象")
+        for field in ("face", "body"):
+            if field in overrides and changes.get(field) not in [fact["text"] for fact in item.get("visual_facts", [])]:
+                raise ValueError(f"{label}覆盖{field}须指定已验证原文事实作为变化依据，不因换装改脸或改体型")
+
+
+def identity_map(data):
+    values = data.get("identity_anchors", [])
+    if not isinstance(values, list):
+        raise ValueError("identity_anchors须为数组")
+    anchors = {}
+    for item in values:
+        if not isinstance(item, dict):
+            raise ValueError("人物身份锚点须为对象")
+        for field in ("id", "age", "body", "face", "hair"):
+            nonempty(item.get(field), f"人物身份锚点.{field}")
+        if item["id"] in anchors:
+            raise ValueError(f"重复人物身份锚点：{item['id']}")
+        anchors[item["id"]] = item
+    return anchors
+
+
+def validate_shared_identity(data):
+    identities, anchor_owners = {}, {}
+    for item in data["characters"]:
+        appearance = item.get("appearance")
+        if not appearance:
+            continue  # No string splitting to guess the identity of old/simple casts.
+        key = (appearance["identity"], appearance["incarnation"])
+        anchor = item["visual_design"]["identity_anchor_id"]
+        if key in identities and identities[key] != anchor:
+            raise ValueError(f"{item['id']}相同身份与世次的形象须共享identity_anchor_id")
+        if anchor in anchor_owners and anchor_owners[anchor] != key:
+            raise ValueError(f"{item['id']}不同身份或世次的实际身体不能共享identity_anchor_id")
+        identities[key] = anchor
+        anchor_owners[anchor] = key
+
+
+def compile_prompt(data, category, item, design, anchors):
+    style = nonempty(data["visual_style"].get("text"), "视觉风格")
+    facts = source_constraints(data, category, item)
+    hard = ("必须保持的可见特征：" + "；".join(facts) + "。这些特征优先于以下补充描述。") if facts else ""
+    style_end = "" if style.endswith(("。", ".", "！", "!", "？", "?")) else "。"
+    common = f"统一视觉风格：{style}{style_end}{hard}"
+    if category == "characters":
+        anchor = dict(anchors[design["identity_anchor_id"]])
+        anchor.update(design.get("appearance_overrides", {}))
+        description = f"年龄与性别感：{anchor['age']}；体型与轮廓：{anchor['body']}；五官：{anchor['face']}；发型：{anchor['hair']}；服装与配饰：{design['styling']}。"
+        differences = design.get("variant_differences", [])
+        if differences:
+            description += "本版本差异：" + "；".join(differences) + "；除此之外保持共享身份锚点一致。"
+        prompt = common + CHARACTER_LAYOUT + description + "中性自然表情，自然静态站姿，柔和均匀棚拍光，五官清晰，服装剪裁可信，材质层次明确。无剧情动作、额外手持物、其他角色、说明文字、标签、水印或签名；必须保持的可见特征优先。"
+        form = {"model": "gpt-image-2", "aspect_ratio": "16:9", "background": "pure_white",
+                "layout": "left_1/3_large_front_face_right_2/3_front_side90_back_full_body"}
+    elif category == "scene_assets":
+        prompt = common + f"场景资产主视图：{item['name']}。空间与稳定相对位置：{design['space']}；材质与配色：{design['materials_palette']}；固定陈设：{design['furnishings']}；基础受光：{design['lighting']}。"
+        prompt += "单幅清晰广角建立镜头，平视或微俯，前中后层次有秩序，出入口和主要活动区清楚，保留人物行动通道，空间结构自洽。完全无人物、人影或故事动物，无剧情动作、说明文字、水印或签名。"
+        form = {"model": "gpt-image-2", "layout": "single_environment_master_view", "subjects": "no_characters"}
+    else:
+        prompt = common + f"单品道具资产：{item['name']}。形制与关键结构：{design['structure']}；材质与颜色：{design['materials_palette']}；尺寸关系：{design['scale']}；当前状态：{design['state']}。"
+        prompt += "标准产品摄影视角，立体物件微俯3/4视角，扁平物件正俯平铺。单件居中完整入镜，四周留白，比例准确，结构美观清晰，纯净白色背景，柔和均匀棚拍光，轻淡阴影。无人物、手部、其他物品、展示架、剧情环境、额外文字、水印或签名；保留原文明示的物件本体文字或图案。"
+        form = {"model": "gpt-image-2", "layout": "single_complete_product", "background": "pure_white"}
+    return prompt, form
+
+
+def validate_visual_design(data):
+    version = data.get("image_design_version")
+    has_records = any("visual_design" in item or "image_prompt" in item or "image_format" in item
+                      for category in ASSET_CATEGORIES for item in data.get(category, []))
+    if version is None and not has_records:
+        return
+    if version != DESIGN_VERSION or data.get("schema_version") != 3:
+        raise ValueError("视觉设计须显式使用schema 3与gpt-image-2-v1；旧项目不自动迁移")
+    style = data.get("visual_style")
+    if not isinstance(style, dict) or style.get("digest") != fingerprint(style.get("text")):
+        raise ValueError("视觉风格与摘要不匹配，请重新运行design")
+    anchors = identity_map(data)
+    for category in ASSET_CATEGORIES:
+        for item in data[category]:
+            design = item.get("visual_design")
+            validate_design_record(category, item, design, anchors)
+            if item.get("image_design_digest") != fingerprint(design):
+                raise ValueError(f"{item['id']}制作设计或审阅依据已改变，请重新运行design")
+            facts = source_constraints(data, category, item)
+            if design.get("source_fact_digest") != fingerprint(facts):
+                raise ValueError(f"{item['id']}原文外观事实已改变，须审阅设计并重新运行design")
+            if design.get("source_context_digest") != source_context_digest(data, category, item):
+                raise ValueError(f"{item['id']}原文版本、出处或场次映射已改变，须审阅设计并重新运行design")
+            prompt, form = compile_prompt(data, category, item, design, anchors)
+            if item.get("image_prompt") != prompt or item.get("image_format") != form:
+                raise ValueError(f"{item['id']}生图提示词或版式与台账设计不一致，请重新运行design")
+    validate_shared_identity(data)
+
+
+def apply_design(data, payload, style_text):
+    if data.get("schema_version") != 3:
+        raise ValueError("design仅用于已审阅schema 3；旧项目须显式升级，不自动迁移")
+    if not isinstance(payload, dict) or not isinstance(payload.get("designs"), list):
+        raise ValueError("设计JSON须包含designs数组及identity_anchors数组")
+    style_text = style_text.strip()
+    nonempty(style_text, "style-file视觉风格")
+    result = copy.deepcopy(data)
+    result["image_design_version"] = DESIGN_VERSION
+    result["visual_style"] = {"text": style_text, "digest": fingerprint(style_text)}
+    result["identity_anchors"] = copy.deepcopy(payload.get("identity_anchors", []))
+    anchors = identity_map(result)
+    designs = {}
+    for record in payload["designs"]:
+        if not isinstance(record, dict):
+            raise ValueError("每条设计须为对象")
+        aid = nonempty(record.get("asset_id"), "设计asset_id")
+        if aid in designs:
+            raise ValueError(f"重复资产设计：{aid}")
+        designs[aid] = {key: copy.deepcopy(value) for key, value in record.items() if key != "asset_id"}
+    expected = {item["id"] for category in ASSET_CATEGORIES for item in result[category]}
+    if set(designs) != expected:
+        raise ValueError(f"design须覆盖全部现用CHAR/SET/PROP，不创建或删除资产；缺少{sorted(expected - set(designs))}，多余{sorted(set(designs) - expected)}")
+    for category in ASSET_CATEGORIES:
+        for item in result[category]:
+            design = designs[item["id"]]
+            validate_design_record(category, item, design, anchors)
+            design["source_fact_digest"] = fingerprint(source_constraints(result, category, item))
+            design["source_context_digest"] = source_context_digest(result, category, item)
+            item["visual_design"] = design
+            item["image_design_digest"] = fingerprint(design)
+            item["image_prompt"], item["image_format"] = compile_prompt(result, category, item, design, anchors)
+    validate_visual_design(result)
+    return result

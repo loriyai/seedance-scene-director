@@ -158,7 +158,7 @@ class TemporalTests(unittest.TestCase):
         path = directory / "ledger.json"
         path.write_text(json.dumps(built, ensure_ascii=False), encoding="utf-8")
         ledger.render(directory / "standard.txt", directory / "source.json", path, directory / "catalog.txt")
-        line = next(line for line in (directory / "catalog.txt").read_text(encoding="utf-8").splitlines() if line.startswith("- 陈家老宅-十年后"))
+        line = next(line for line in (directory / "catalog.txt").read_text(encoding="utf-8").splitlines() if line.startswith("03 - 陈家老宅-十年后"))
         self.assertIn("石柱", line)
         self.assertNotIn("红绸", line)
         bad = copy.deepcopy(built)

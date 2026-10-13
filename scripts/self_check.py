@@ -87,6 +87,8 @@ class SkillChecks(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             ledger.initialize(self.script, self.work, path)
         draft = d.read_json(path)
+        # This fixture exercises legacy ledgers; new extraction policy has its own tests.
+        draft.pop('asset_policy', None)
         self.draft = copy.deepcopy(draft)
         draft['locations'] = [draft['locations'][0]]
         draft['locations'][0].update(identity_status='confirmed', identity_basis='原文明示陈默所属同一卧室')
@@ -521,11 +523,186 @@ class SkillChecks(unittest.TestCase):
         self.assertEqual(result['total_seconds'], 4)
         self.assertEqual(result['canvas_sync']['status'], 'not_bound')
         first = output.read_bytes()
+        self.assertTrue(first.startswith('01 - 场景1-分镜1（时长：4秒）\n'.encode('utf-8')))
+        self.assertEqual(state['receipts'][0]['display_format'], d.RECEIPT_DISPLAY_FORMAT)
+        saved = d.read_json(self.work / 'session.json')
+        self.assertEqual(saved['receipts'][0]['display_format'], d.RECEIPT_DISPLAY_FORMAT)
+        self.assertEqual(state['units'][0]['id'], '场景1-分镜1')
+        self.assertEqual(first.decode('utf-8'), '01 - ' + d.render_unit(state, state['units'][0]) + '\n')
         self.assertIn('人物站位：', first.decode('utf-8'))
         self.assertIn('（@陈默-基础形象 的中景；转场：硬切）', first.decode('utf-8'))
         self.assertNotIn('景别：', first.decode('utf-8'))
         self.assertEqual(d.commit(args, state)['status'], 'already_committed')
         self.assertEqual(output.read_bytes(), first)
+
+    def test_delivery_numbers_cross_scenes_and_restart_in_each_file_above_99(self):
+        units = []
+        for number in range(1, 102):
+            unit = copy.deepcopy(self.unit)
+            unit['id'] = f'场景{1 if number < 100 else 2}-分镜{number}'
+            units.append(unit)
+        before = copy.deepcopy(units)
+        output = self.work / 'numbered.txt'
+        receipt = {'units': units, 'output': str(output), 'display_format': d.RECEIPT_DISPLAY_FORMAT}
+        d.render_receipt(self.state, receipt, self.work)
+        text = output.read_text(encoding='utf-8')
+        self.assertTrue(text.startswith('01 - 场景1-分镜1（时长：4秒）\n'))
+        self.assertIn('\n\n99 - 场景1-分镜99（时长：4秒）\n', text)
+        self.assertIn('\n\n100 - 场景2-分镜100（时长：4秒）\n', text)
+        self.assertIn('\n\n101 - 场景2-分镜101（时长：4秒）\n', text)
+        self.assertEqual(units, before)
+        other = dict(receipt, units=[units[-1]], output=str(self.work / 'another.txt'))
+        d.render_receipt(self.state, other, self.work)
+        self.assertTrue(Path(other['output']).read_text(encoding='utf-8').startswith('01 - 场景2-分镜101'))
+        cloud = d.render_unit(self.state, units[-1], c.reference_renderer({'陈默卧室': '<SET>'}))
+        self.assertTrue(cloud.startswith('场景2-分镜101（时长：4秒）\n'))
+        self.assertNotIn('101 - 场景2-', cloud)
+
+    def test_existing_v3_receipt_replay_keeps_unnumbered_bytes(self):
+        request = {'mode': 'append', 'request_id': 'old-v3', 'units': [self.unit]}
+        request_path, output = self.work / 'old-v3-request.json', self.work / 'old-v3.txt'
+        d.write_json(request_path, request)
+        receipt = {'request_id': 'old-v3', 'request_hash': d.sha(d.packed(request)),
+                   'mode': 'append', 'output': str(output), 'units': [copy.deepcopy(self.unit)]}
+        before = copy.deepcopy(receipt)
+        state = dict(self.state, receipts=[receipt])
+        expected = (d.render_unit(state, self.unit) + '\n').encode('utf-8')
+        with patch.object(d, 'validate') as validate:
+            result = d.commit(d.argparse.Namespace(request=request_path, project=self.work), state)
+        validate.assert_not_called()
+        self.assertEqual(result['status'], 'already_committed')
+        self.assertEqual(output.read_bytes(), expected)
+        self.assertEqual(receipt, before)
+
+    def test_selected_replace_numbers_new_file_and_preserves_old_receipt_and_id(self):
+        state = copy.deepcopy(self.state)
+        old = copy.deepcopy(self.unit)
+        old.update(batch_id='old-batch', predecessor=None, previous_versions=[])
+        unselected = copy.deepcopy(old)
+        unselected.update(id='场景2-分镜3', span=[8, 16], main_scene='SC0002')
+        old_output = self.work / 'old.txt'
+        old_receipt = {'request_id': 'old-batch', 'mode': 'append', 'output': str(old_output),
+                       'units': [copy.deepcopy(old)]}
+        state.update(revision=0, style_hash=d.sha('3D国风动漫'), units=[old, unselected],
+                     ranges=[{'span': [0, 8], 'batch_id': 'old-batch'}], receipts=[old_receipt],
+                     next_numbers={'SC0001': 2, 'SC0002': 4})
+        d.atomic_text(self.work / 'video-style.txt', '3D国风动漫\n')
+        d.render_receipt(state, old_receipt, self.work)
+        old_bytes, old_snapshot = old_output.read_bytes(), copy.deepcopy(old_receipt)
+        unselected_snapshot, numbers = copy.deepcopy(unselected), copy.deepcopy(state['next_numbers'])
+        request_path, output = self.work / 'replacement.json', self.work / 'replacement.txt'
+        d.write_json(request_path, {'mode': 'replace', 'request_id': 'selected-replace',
+                                    'units': [copy.deepcopy(self.unit)]})
+        result = d.commit(d.argparse.Namespace(project=self.work, request=request_path, output=output), state)
+        self.assertEqual(result['ids'], ['场景1-分镜1'])
+        self.assertEqual(state['units'][0]['version'], 2)
+        self.assertEqual(state['units'][1], unselected_snapshot)
+        self.assertEqual(state['next_numbers'], numbers)
+        self.assertEqual(old_receipt, old_snapshot)
+        self.assertEqual(state['receipts'][-1]['display_format'], d.RECEIPT_DISPLAY_FORMAT)
+        self.assertTrue(output.read_bytes().startswith('01 - 场景1-分镜1（时长：4秒）\n'.encode('utf-8')))
+        d.render_receipt(state, old_receipt, self.work)
+        self.assertEqual(old_output.read_bytes(), old_bytes)
+
+    def test_prebind_style_cli_saves_only_style_without_loading_or_creating_session(self):
+        args = ['director.py', 'style', '--project', str(self.work / 'unbound'), '--choice', '2']
+        with patch.object(sys, 'argv', args), patch.object(sys, 'stdout', io.StringIO()) as output, \
+                patch.object(d, 'load') as load:
+            d.main()
+            result = json.loads(output.getvalue())
+        load.assert_not_called()
+        self.assertEqual(result['status'], 'style_saved')
+        project = self.work / 'unbound'
+        self.assertEqual((project / 'video-style.txt').read_text(encoding='utf-8'), d.STYLES['2'] + '\n')
+        self.assertEqual({path.name for path in project.iterdir()}, {'video-style.txt'})
+
+    def test_style_validation_preserves_previous_file_and_bound_history(self):
+        style_file = self.work / 'video-style.txt'
+        d.atomic_text(style_file, '原有单行风格\n')
+        custom = self.work / 'custom.txt'
+        d.atomic_text(custom, '第一行\n第二行\n')
+        args = d.argparse.Namespace(project=self.work, choice='3', file=custom)
+        with self.assertRaisesRegex(ValueError, '单行'):
+            d.set_style(args)
+        self.assertEqual(style_file.read_text(encoding='utf-8'), '原有单行风格\n')
+        state = dict(revision=2, phase='style', style_hash=None, units=[{'id': '旧单元'}],
+                     receipts=[{'request_id': '旧回执'}], ranges=[{'span': [0, 8]}])
+        original = copy.deepcopy(state)
+        d.set_style(d.argparse.Namespace(project=self.work, choice='1', file=None), state)
+        self.assertEqual(state['style_hash'], d.sha(d.STYLES['1']))
+        self.assertEqual(state['phase'], 'range')
+        self.assertEqual(state['revision'], 3)
+        for field in ('units', 'receipts', 'ranges'):
+            self.assertEqual(state[field], original[field])
+
+    def bind_args_with_passed_review(self):
+        _, _, review = d.dependency()
+        merged = '\n\n'.join(path.read_text(encoding='utf-8').strip()
+                             for _, path in review.scene_files(self.work)) + '\n'
+        self.script.write_text(merged, encoding='utf-8')
+        report = review.make_report(self.work, {})
+        # The legacy fixture source includes heading/cast formatting lines. Use
+        # the documented disposition interface for these lines only; actions
+        # still pass the real source coverage and speaker checks unchanged.
+        dispositions = {}
+        for scene in report['scenes']:
+            for item in scene['paragraph_map']:
+                if 'decision_template' in item and item['source_text'].startswith(('场景', '人物：')):
+                    dispositions[item['decision_key']] = dict(item['decision_template'],
+                        reason='原文的纯场景标题或人物名单，逐字进入成稿标题/人物行，不含剧情正文。')
+        report = review.make_report(self.work, {'paragraphs': dispositions})
+        self.assertEqual(report['status'], 'passed')
+        review_path, ledger_path = self.work / 'review.json', self.work / 'ledger.json'
+        d.write_json(review_path, report)
+        d.write_json(ledger_path, self.data)
+        return d.argparse.Namespace(project=self.work, script=self.script, source=self.source,
+                                   review=review_path, ledger=ledger_path, standardizer=None,
+                                   min_duration=4, durations=None)
+
+    def test_bind_reuses_preselected_style_and_keeps_asset_choice_phase(self):
+        d.set_style(d.argparse.Namespace(project=self.work, choice='2', file=None))
+        result = d.bind(self.bind_args_with_passed_review())
+        state = d.load(self.work)
+        self.assertEqual(result['phase'], 'asset_choice')
+        self.assertEqual(state['style_hash'], d.sha(d.STYLES['2']))
+        self.assertEqual(state['units'], [])
+        self.assertEqual(state['receipts'], [])
+        self.assertEqual(state['revision'], 0)
+
+    def test_bind_without_style_is_compatible_and_invalid_saved_style_creates_no_session(self):
+        args = self.bind_args_with_passed_review()
+        style_file = self.work / 'video-style.txt'
+        d.atomic_text(style_file, '第一行\n第二行\n')
+        with self.assertRaisesRegex(ValueError, '单行'):
+            d.bind(args)
+        self.assertFalse((self.work / 'session.json').exists())
+        style_file.unlink()
+        d.bind(args)
+        self.assertIsNone(d.load(self.work)['style_hash'])
+
+    def test_bind_designed_ledger_requires_matching_saved_style(self):
+        args = self.bind_args_with_passed_review()
+        data = d.read_json(args.ledger)
+        data.update(image_design_version='gpt-image-2-v1', visual_style={'text': '3D 国风动漫'})
+        d.write_json(args.ledger, data)
+        # Designer schema validation is covered separately; this tests the bind boundary.
+        with patch.object(ledger, 'validate') as validate:
+            with self.assertRaisesRegex(ValueError, '先保存'):
+                d.bind(args)
+            self.assertFalse((self.work / 'session.json').exists())
+            d.atomic_text(self.work / 'video-style.txt', '电影写实\n')
+            with self.assertRaisesRegex(ValueError, '不一致'):
+                d.bind(args)
+            self.assertFalse((self.work / 'session.json').exists())
+            d.atomic_text(self.work / 'video-style.txt', '3D  国风动漫\n')
+            with self.assertRaisesRegex(ValueError, '不一致'):
+                d.bind(args)
+            self.assertFalse((self.work / 'session.json').exists())
+            data['visual_style']['text'] = '3D  国风动漫'
+            d.write_json(args.ledger, data)
+            d.bind(args)
+        self.assertEqual(validate.call_count, 4)
+        self.assertEqual(d.load(self.work)['style_hash'], d.sha('3D  国风动漫'))
 
     def test_normalization_reuses_groups_by_confirmed_place_and_props_by_source(self):
         data = {'schema_version': 3, 'characters': [], 'props': [], 'scene_assets': [], 'retired_ids': [],
@@ -651,6 +828,7 @@ class SkillChecks(unittest.TestCase):
 
 def load_tests(loader, tests, pattern):
     tests.addTests(loader.discover(str(Path(__file__).parent), pattern='test_audit_*.py'))
+    tests.addTests(loader.discover(str(Path(__file__).parent), pattern='test_asset_visual_design.py'))
     return tests
 
 

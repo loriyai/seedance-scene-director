@@ -2,11 +2,12 @@
   "component": "screenplay-standardizer",
   "bundle_format": 1,
   "files": {
-    "INSTRUCTIONS.md": "030bad689ab843c79b3bbb154799796cf8bd586756e9b0c3193cb9c92c4dbb7a",
-    "references/asset-ledger.md": "b237c412334c874ec482dd2dd7903124bb6ffcc75739d0b3bf91ca0b6a23628e",
+    "INSTRUCTIONS.md": "6889978f4bc6a142941c3311700da2839447a2d055274f8230a378de02d7811e",
+    "references/asset-ledger.md": "f87deb099b09425375256e94594e292a0f78f365eb2316319f391cd951abaac9",
     "references/review.md": "27585650763536af7a49274d64adde8de49b522ef5e1fcbebc0fb02ad9f3118a",
-    "scripts/asset_ledger.py": "43da27eed8434262c117bb4582a0b45785ec91ba7d0970e4d8325216b1d176b7",
-    "scripts/asset_migrate.py": "85dd299b860a843f548ac5dd5c4722e5a0f7c646aa916f0e67f6c90e119e0914",
+    "scripts/asset_ledger.py": "b1a7666e5de1bb41abd0df33ce49199e067272c792f681b0c71adcad4d4c405b",
+    "scripts/asset_migrate.py": "fd11002ebe2b5101b762cffde27ba3caf84e92d3dc40bf4757bc5d883809f385",
+    "scripts/asset_visual_design.py": "28d74709180f108526124dbb0932c788360684ed46a76605108ca6e3f13a4a11",
     "scripts/screenplay_io.py": "3130cb328c10c74e0a0fb944dbb02b55e49bbf9425bc8ceb8b0160700b267d33",
     "scripts/screenplay_review.py": "dcaf7651c2d6544d1fb6b2fa2c40ad6a7938975c82070d62042e8c58cf7edb78"
   }

@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 from asset_ledger import HEADING, GENERIC_ROLE, digest, parse_script, scene_ranges, source_paragraphs, split_cast_entry
+from asset_visual_design import validate_visual_design
 
 
 PREFIXES = {"scenes": "SC", "characters": "CHAR", "locations": "LOC", "props": "PROP"}
@@ -298,6 +299,26 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
                     else:
                         pending.append({"kind": "资产事实证据或出现关系待核", "asset_id": item["id"], "fact": fact})
                 item[field] = migrated
+            if category == "props" and "visible_uses" in item:
+                uses = []
+                for use in item["visible_uses"]:
+                    fact = {"text": "可见使用", "evidence": use["evidence"],
+                            "source_paragraphs": use["source_paragraphs"],
+                            "scene_ids": [use["scene_id"]], "attribution": "可见使用审阅"}
+                    revised = migrate_fact(fact, old_by_id, lineage, new_by_number,
+                                           old_paragraphs, new_paragraphs, new_index)
+                    if revised and len(revised["scene_ids"]) == 1 and item["id"] in new_by_id[revised["scene_ids"][0]]["prop_ids"]:
+                        moved = copy.deepcopy(use)
+                        moved["scene_id"] = revised["scene_ids"][0]
+                        moved["source_paragraphs"] = revised["source_paragraphs"]
+                        if len(incoming[new_by_id[moved["scene_id"]]["number"]]) > 1:
+                            moved["event_id"] = use["scene_id"] + ":" + use["event_id"]
+                        uses.append(moved)
+                    else:
+                        pending.append({"kind": "道具独立可见使用待核", "asset_id": item["id"], "old_use": copy.deepcopy(use)})
+                item["visible_uses"] = uses
+                if len(uses) < 2 and old.get("asset_policy"):
+                    pending.append({"kind": "主要道具复用门槛待核", "asset_id": item["id"], "remaining_visible_uses": len(uses)})
             if category == 'characters' and item.get('appearance'):
                 old_anchor = item['appearance']['active_from']
                 for field in ('active_from', 'active_until'):
@@ -327,6 +348,9 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
     result = {"schema_version": 2, "source_digest": digest(new_paragraphs), "scenes": scenes,
               "characters": characters, "locations": locations, "props": props,
               "retired_ids": sorted(retired), "inactive_assets": inactive, "pending_reviews": pending}
+    for field in ("asset_policy", "image_design_version", "visual_style", "identity_anchors"):
+        if field in old:
+            result[field] = copy.deepcopy(old[field])
     if old.get("schema_version") == 3:
         result["schema_version"] = 3
         result["scene_assets"] = copy.deepcopy(old["scene_assets"])
@@ -412,6 +436,12 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
             item["visual_facts"] = facts
             if item["variant"] != "base" and not any(s["scene_asset_id"] == item["id"] for s in scenes):
                 pending.append({"kind": "未用布景版本去向待核", "asset_id": item["id"]})
+    if "image_design_version" in old:
+        try:
+            validate_visual_design(result)
+        except (ValueError, KeyError, TypeError, StopIteration) as exc:
+            pending.append({"kind": "资产制作设计待复核", "detail": str(exc),
+                            "action": "保留原设计，审阅新事实与身份后重新运行design；不得直接清空待核项交付"})
     report = {"status": "迁移草稿", "scene_lineage": lineage, "primary_ids": primary,
               "retired_scene_ids": sorted(set(old_by_id) - set(primary.values())),
               "pending_reviews": pending,

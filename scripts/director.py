@@ -22,6 +22,7 @@ SPEEDS = {"常速": (4.0, 5.2), "快节奏": (4.5, 5.8), "情绪慢速": (3.3, 4
 FRAMINGS = {"大远景", "大全景", "远景", "全景", "中景", "中近景", "近景", "特写"}
 CLOSE = {"近景", "特写"}
 OUTPUT_FORMAT = "reference-v3"
+RECEIPT_DISPLAY_FORMAT = "numbered-units-v1"
 PHOTOGRAPHY_FIELDS = ("camera", "composition", "depth_of_field", "lighting")
 FACE_FRAMINGS = CLOSE | {"中近景"}
 
@@ -203,6 +204,7 @@ def dependency(path=None):
     instructions = found / ("INSTRUCTIONS.md" if (found / "INSTRUCTIONS.md").is_file() else "SKILL.md")
     required = {"INSTRUCTIONS.md", "references/asset-ledger.md", "references/review.md",
                 "scripts/asset_ledger.py", "scripts/asset_migrate.py",
+                "scripts/asset_visual_design.py",
                 "scripts/screenplay_io.py", "scripts/screenplay_review.py"}
     require(instructions.is_file() and all((found / p).is_file() for p in required if p != "INSTRUCTIONS.md"),
             "剧本标准化模块不完整；请重新解压完整Skill包")
@@ -277,11 +279,20 @@ def bind(args):
     require(ledger.get("schema_version") == 3, "新绑定须使用区分场次与布景的schema 3台账；旧项目先离线审计升级")
     require(not ledger.get("pending_reviews") and not any(ledger.get("inactive_assets", {}).values()), "资产仍有待核项目")
     records, length = build_records(script_text, ledger)
+    style_path = project / "video-style.txt"
+    style = style_path.read_text(encoding="utf-8-sig").strip() if style_path.is_file() else None
+    if style is not None:
+        validate_style(style)
+    if ledger.get("image_design_version"):
+        require(style is not None, "已完成美术设计的台账须先保存对应视频风格")
+        require(style == ledger.get("visual_style", {}).get("text"),
+                "资产美术设计风格与视频风格不一致；请按所选风格重新完成资产设计")
     state = {"schema_version": 1, "revision": 0, "phase": "asset_choice", "standardizer": str(dep),
              "files": {key: {"path": str(path), "sha256": file_hash(path)} for key, path in paths.items()},
              "drafts": report["fingerprint"]["drafts"], "length": length, "records": records,
              "ledger": ledger, "entry": {"min": args.min_duration, "max": 30, "durations": args.durations},
-             "style_hash": None, "ranges": [], "units": [], "next_numbers": {}, "receipts": []}
+             "style_hash": sha(style) if style is not None else None,
+             "ranges": [], "units": [], "next_numbers": {}, "receipts": []}
     require(4 <= args.min_duration <= 30, "入口下限须在4～30秒内")
     if args.durations:
         require(all(args.min_duration <= d <= 30 for d in args.durations), "合法档位超出入口时长范围")
@@ -307,13 +318,19 @@ def save(project, state):
     write_json(project / "session.json", state)
 
 
-def set_style(args, state):
-    style = STYLES[args.choice] if args.choice in STYLES else args.file.read_text(encoding="utf-8-sig").strip()
+def validate_style(style):
     require(style.strip() and "\n" not in style and "\r" not in style, "风格须为非空单行文本")
+
+
+def set_style(args, state=None):
+    require(args.choice != "3" or args.file is not None, "自定义风格须指定--file")
+    style = STYLES[args.choice] if args.choice in STYLES else args.file.read_text(encoding="utf-8-sig").strip()
+    validate_style(style)
     # Semantic conflicts (including negated requests) are reviewed by the caller.
     atomic_text(args.project / "video-style.txt", style + "\n")
-    state["style_hash"], state["phase"] = sha(style), "range"
-    save(args.project, state)
+    if state is not None:
+        state["style_hash"], state["phase"] = sha(style), "range"
+        save(args.project, state)
     return {"status": "style_saved", "style_file": str((args.project / "video-style.txt").resolve())}
 
 
@@ -832,7 +849,15 @@ def validate_output_path(state, project, output):
 def render_receipt(state, receipt, project=None):
     if project is not None:
         validate_output_path(state, project, receipt["output"])
-    atomic_text(receipt["output"], "\n\n".join(render_unit(state, u) for u in receipt["units"]) + "\n")
+    display_format = receipt.get("display_format")
+    require(display_format in (None, RECEIPT_DISPLAY_FORMAT), "未知的交付展示格式")
+    rendered = []
+    for number, unit in enumerate(receipt["units"], 1):
+        text = render_unit(state, unit)
+        if display_format == RECEIPT_DISPLAY_FORMAT:
+            text = f"{number:02d} - " + text
+        rendered.append(text)
+    atomic_text(receipt["output"], "\n\n".join(rendered) + "\n")
 
 
 def receipt_summary(receipt):
@@ -887,7 +912,8 @@ def commit(args, state):
     if request["mode"] == "append":
         state["ranges"].append({"span": request["span"], "batch_id": request["request_id"],
                                 "confirmed": bool(request.get("range_confirmation"))})
-    receipt = {"request_id": request["request_id"], "request_hash": request_hash, "mode": request["mode"], "output": str(output), "units": copy.deepcopy(units)}
+    receipt = {"request_id": request["request_id"], "request_hash": request_hash, "mode": request["mode"],
+               "output": str(output), "units": copy.deepcopy(units), "display_format": RECEIPT_DISPLAY_FORMAT}
     state["receipts"].append(receipt)
     state["phase"] = "nodes_choice"
     save(args.project, state)
@@ -937,9 +963,9 @@ def main():
             result = bind(args)
         else:
             args.project = args.project.resolve()
-            state = load(args.project, verify_style=args.command != "style")
+            state = (None if args.command == "style" and not (args.project / "session.json").exists()
+                     else load(args.project, verify_style=args.command != "style"))
             if args.command == "style":
-                require(args.choice != "3" or args.file is not None, "自定义风格须指定--file")
                 result = set_style(args, state)
             elif args.command == "phase":
                 state["phase"] = args.value

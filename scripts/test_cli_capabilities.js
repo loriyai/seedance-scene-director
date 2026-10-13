@@ -57,7 +57,7 @@ function fixture(catalogNames) {
 const normal = fixture(requiredSemantic);
 assert.strictEqual(normal.ensureCLI({ canvas: true }).cli_path, cliPath);
 const probes = normal.calls.filter((call) => call.args.includes("--help")).map((call) => call.args.slice(0, -1).join(" "));
-assert.deepStrictEqual(probes, ["status", "login", "model list", "model describe", "canvas get", "canvas allocate", "canvas upload"]);
+assert.deepStrictEqual(probes, ["status", "login", "canvas get", "canvas allocate", "canvas upload"]);
 assert(!normal.calls.some((call) => call.args.includes("install")));
 
 for (const missing of requiredSemantic) {

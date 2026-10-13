@@ -8,7 +8,7 @@
 
 ## 内置剧本标准化模块
 
-转换/提取资产/改稿时读取[内置规则](../modules/screenplay-standardizer/INSTRUCTIONS.md)。其相对链接以模块目录为根。运行其中示例命令时，将`scripts/文件.py`解析为`<skill>/modules/screenplay-standardizer/scripts/文件.py`，工作产物仍放项目工作目录。完整包包含规则、两份参考文件、四份Python脚本和`component.json`摘要清单。
+转换/提取资产/改稿时读取[内置规则](../modules/screenplay-standardizer/INSTRUCTIONS.md)。其相对链接以模块目录为根。运行其中示例命令时，将`scripts/文件.py`解析为`<skill>/modules/screenplay-standardizer/scripts/文件.py`，工作产物仍放项目工作目录。完整包的内置规则、参考文件与脚本以`component.json`摘要清单为准，包括资产美术设计编译器。
 
 默认仅加载包内版本；同级目录、用户主目录或CODEX_HOME中同名Skill均不会被自动调用。缺失/损坏时停止并提示恢复完整包，不回退外部版本。兼容旧调用的`--standardizer <目录>`仅在用户明确指定外部版本时使用，不作为常规命令，也不因旧session记录了外部路径而自动沿用。旧session的来源、编号、范围、版本数据格式仍兼容，无须因本次内置升级重新转换未变剧本。
 
@@ -17,12 +17,14 @@
 ## 命令顺序
 
 ```text
-python <skill>/scripts/director.py bind --project <project> --script <标准剧本.txt> --source <标准化工作目录/source.json> --review <review.json> --ledger <资产台账.json> [--min-duration 4] [--durations 4 5 6 ... 30]
-python <skill>/scripts/director.py status --project <project>
-python <skill>/scripts/director.py phase --project <project> --value style
+python <skill>/modules/screenplay-standardizer/scripts/asset_ledger.py normalize <候选资产台账.json> --output <命名预检台账.json> --report <命名预检报告.json>
 python <skill>/scripts/director.py style --project <project> --choice 1
 python <skill>/scripts/director.py style --project <project> --choice 2
 python <skill>/scripts/director.py style --project <project> --choice 3 --file <自定义风格.txt>
+python <skill>/modules/screenplay-standardizer/scripts/asset_ledger.py design <标准剧本.txt> <标准化工作目录/source.json> <命名预检台账.json> <美术设计.json> --style-file <project>/video-style.txt --output <完成美术设计的资产台账.json> --catalog-output <分类视觉描述.txt>
+python <skill>/scripts/director.py bind --project <project> --script <标准剧本.txt> --source <标准化工作目录/source.json> --review <review.json> --ledger <完成美术设计的资产台账.json> [--min-duration 4] [--durations 4 5 6 ... 30]
+python <skill>/scripts/director.py status --project <project>
+python <skill>/scripts/director.py phase --project <project> --value range
 python <skill>/scripts/director.py locate --project <project> --anchors <anchors.json>
 python <skill>/scripts/director.py range --project <project> --start <起点整数> --end <终点整数>
 python <skill>/scripts/director.py check --project <project> --request <batch.json> --partial
@@ -34,11 +36,17 @@ python <skill>/scripts/director.py render --project <project> --request-id <已�
 
 示例中的省略号不是可执行参数；默认整数4～30秒无需传`--durations`，只有实际入口明确为离散档位才列出合法值。PowerShell使用`& '<Python绝对路径>' '<脚本绝对路径>' ...`，路径逐个引用。用户文字通过JSON文件传递，不拼进shell命令。
 
-phase只记录交互位置，不代表外部操作授权。bind后为asset_choice；选1按[画布接口](canvas.md)执行资产传输，完成后phase→image_choice并显示上传菜单，选上传后phase→image_folder再询问图片文件夹；完成上传或选暂不上传后phase→style。资产菜单选2直接phase→style。style后自动为range；commit后为nodes_choice；选1按本次request_id批量创建视频节点：一次全量读取当前画布，逐项核对全部台账资产，复用有效ID、自动采用完整name+kind唯一候选或补建缺失role/scene/image空节点并保存ID，再CLI编码正式节点引用、创建/写入视频节点并回读。缺图片不阻塞，候选及人工修改冲突不猜测，最终失败只记录，不网页兜底。交付缺图片与最终引用失败检查TXT，选2跳过，随后phase→followup并显示两条续接提示。恢复时status读当前阶段，避免重复菜单。小云雀按需调用官方CLI，分镜生成本身不依赖登录。
+新项目先完成标准剧本及候选资产台账、身份与命名预检，再选择风格并完成资产美术设计；以上三条style命令是互斥示例，只执行用户选中的一条。`style`在项目尚无session时只保存`video-style.txt`，不建立虚构的绑定、phase或历史。design编译并render最终台账与分类视觉描述后再bind，不在设计摘要确定后静默改名；bind读取并验证预存风格，保存style_hash，初始phase仍为asset_choice。含image_design_version的新台账还须与预存风格匹配：`video_style.strip() == ledger.visual_style.text`，保留内部空格，不改写原风格；缺失或不一致时拒绝绑定。有session时style沿已有更新路径保存风格并进入range，既有单元与receipt保留原样。旧项目没有风格时仍执行风格菜单；预存风格若为空或多行，bind拒绝而不创建session。
 
-`commit`返回`canvas_sync`：replace且已有视频映射时尝试同步当前有效单元的提示词及单元时长，核对Seedance 2.5与720P；未绑定为not_bound，云端冲突或失败为pending。自动局部同步只处理原有映射，不执行显式videos的全台账补建准备。先保留本地已提交版本及TXT，再处理云端待同步项。幂等重放不会用旧receipt单元覆盖更晚的有效版本。TXT渲染默认不含小云雀内部标签；画布引用绑定使用同一render_unit的reference_text入口，仅转换资产位置，保留台词引号内原文。默认videos使用真实节点标签，空资产节点的缺图单独记录；节点引用回读与媒体就绪检查分别判定。
+phase只记录交互位置，不代表外部操作授权。bind后为asset_choice；选1按[画布接口](canvas.md)执行资产传输，完成后phase→image_choice并显示上传菜单，选上传后phase→image_folder再询问图片文件夹；完成上传或选暂不上传后，已有style_hash则phase→range，否则phase→style。资产菜单选2也按同一规则进入range或style，不重复询问已保存风格。绑定后的style保存后自动为range；commit后为nodes_choice；选1按本次request_id批量创建视频节点：一次全量读取当前画布，逐项核对全部台账资产，复用有效ID、自动采用完整name+kind唯一候选或补建缺失role/scene/image空节点并保存ID，再依次创建video节点、改名（name/title/caption）、仅设置对应单元时长、写入CLI正式节点引用编码的完整提示词。新视频沿用小云雀默认Seedance 2.5/720P，不查询、写入或校验这两项。四步分别记录官方确认，全部完成后统一回读名称、时长、提示词、真实节点标签和reference连线，通过后才保存整节点完成回执。创建时不把尚未改名的名称当作失败。缺图片不阻塞，候选及名称、时长、提示词的人工修改冲突不猜测，最终失败只记录，不网页兜底。单独references只刷新已有视频的提示词引用，不改名称、时长或其他生成配置。实际拒绝或未知确认停止后续写入；核对并恢复后在同一真实ID上续接未完成步骤，不重新创建。交付缺图片与最终引用失败检查TXT，选2跳过，随后phase→followup并显示两条续接提示。恢复时status读当前阶段，避免重复菜单。小云雀按需调用官方CLI，分镜生成本身不依赖登录。
 
-后台引用检查通过`write_reference_report(project, session, state, doc, units, failures=(), output=None)`保存，结构化记录位于`canvas/reference-check.json`，用户TXT默认与最近receipt的交付TXT同目录；可显式指定合法交付路径。报告区分缺图片资产和最终引用失败，列完整资产名、类型、真实节点ID及相关分镜、原因，不将正式节点引用成功写为图片已齐。交付TXT中的`@资产完整name `原样保留，失败不清空画布提示词、不执行网页粘贴或生成命令。
+`commit`返回`canvas_sync`：replace且已有视频映射时在同一真实ID上依次同步名称、单元时长及正式引用编码的提示词，逐命令记录官方确认，全部完成后统一回读名称、时长、提示词、节点标签和引用连线，再保存整节点回执；不查询、写入或校验模型与分辨率。时长仅更新generation.durationMs，从最新generation合并并保留modelKey、resolution、prompt、references、比例及其他配置，不改已有媒体实际时长。未绑定为not_bound，实际名称、时长、提示词冲突或失败为pending。自动局部同步只处理原有映射，不执行显式videos的全台账补建准备。先保留本地已提交版本及TXT，再处理云端待同步项。幂等重放不会用旧receipt单元覆盖更晚的有效版本。TXT渲染默认不含小云雀内部标签；画布引用绑定使用同一render_unit的reference_text入口，仅转换资产位置，保留台词引号内原文。默认videos使用真实节点标签，空资产节点的缺图单独记录；节点引用回读与媒体就绪检查分别判定。
+
+显式`videos`在上述同次盘点中还执行黑幕video准备，优先复用有效ID及完整名称，或采用唯一完整名“黑幕”的video；缺失时分配ID并保存、创建video、改name/title/caption、回读保存完成状态。black_video_preparation保存中断状态；逐单元视频映射保存black_node_id/black_node_kind，旧image黑幕按原单元固定映射保留。黑幕不写剧情prompt/分镜时长，不计unit_count或总时长。单独references、自动replace只使用现有映射，不补建黑幕；多候选或改名改类型仍列冲突。详见[画布接口](canvas.md)。
+
+后台引用检查通过`write_reference_report(project, session, state, doc, units, failures=(), output=None)`保存，结构化记录位于`canvas/reference-check.json`，用户TXT默认与最近receipt的交付TXT同目录；可显式指定合法交付路径。报告分开列缺图片资产、黑幕视频素材待补及最终引用失败，分别返回missing_image_count、missing_video_count、reference_issue_count；列完整资产名、类型、真实节点ID及相关分镜、原因，不将正式节点引用成功写为媒体已齐。交付TXT中的`@资产完整name `原样保留，失败不清空画布提示词、不执行网页粘贴或生成命令。
+
+视频单节点JSON回执位于`canvas/video-write-receipts/`，记录真实节点ID、逐命令步骤确认及最终名称、时长、完整提示词、节点标签和引用连线核对。核心字段未通过返回`UNCERTAIN_WRITE`并保存`uncertain`回执；核心字段通过但引用尚未通过保存`partial`回执，不记整节点完成。缺图片单独列待补，不作为节点引用失败。恢复使用字段级初始化基线或各字段已确认的写入值，保留中断前基线，不吸收后来的人工修改；ready节点的name/title/caption三字段均核对并保护。实际冲突处理后仍在同一真实ID上续接。
 
 ## 范围坐标
 
@@ -135,9 +143,9 @@ replace请求：mode=`replace`，新的request_id，units列出要替换的原ID
 
 新规划先确定原文动作、情绪和声音落点，再指定主焦点与参与者，最后选择摄影，并逐镜填写purpose。删除固定景别排序及默认机位优先级；不按镜头索引轮换，也不用固定比例替代观看重点。有目的的同景别正反打、反应、动作衔接及相邻近景/特写允许，单元特写超过两镜、累计特写超过15%只触发审查，不拒绝提交；低于参考值也不是质量合格证明。具体表演变化、重要反应、人物关系、动作细节和道具都可以支持近景，不要求全是峰值。面部镜需要让观众读取具体表演变化，不能把对白、OS或情绪句自动变成正脸怼脸；同人物相似面部看点重复时评估关系构图、动作细节或空间信息，不只修改angle或framing标签。
 
-真实威胁出现、情绪反转、动作爆发及关键信息揭示处主动比较快推、突拉、快速跟随、细节或空间展开，按剧情决定是否使用，写清运动方向、速度、落点及最终焦点，不设快镜头数量配额。短镜头一般只执行一个明确主要运动。静态镜头在能保留表演或空间信息时有依据地使用。动作匹配须明确同一持续动作及切点阶段，视线匹配须写视线方向和所看对象；已完成动作切到新动作不能只贴“动作匹配”标签。无法写清匹配依据时使用具体普通切换。涉及离开、追逐等持续位移时，下一镜明确“继续走远”等动作进度；容易混淆的画面说明相机、人物和物体的前中后景关系，人物的“身后”不能代替相机的“前景/后景”。
+真实威胁出现、情绪反转、动作爆发及关键信息揭示处主动比较快推、突拉、快速跟随、细节或空间展开，按剧情决定是否使用，写清运动方向、速度、落点及最终焦点，不设快镜头数量配额。短镜头一般只执行一个明确主要运动。静态镜头在能保留表演或空间信息时有依据地使用。动作匹配写清同一动作进行中的切出阶段与后镜接续阶段，整组接续到结果、只完成一次；多动作压缩用具体硬切、跳切或蒙太奇，无实际锚点不泛称动作匹配。视线匹配须写视线方向和所看对象。连续呈现位移时写清接续进度，省略非关键中段时交代必要位置与状态，详见[摄影规则](cinematic-rules.md#动作节奏与压缩)；容易混淆的画面说明相机、人物和物体的前中后景关系，人物的“身后”不能代替相机的“前景/后景”。
 
-常规单元在26～30秒、8～13镜范围内按内容选择，单镜仍为1～5秒；26～30秒仅优选；4～25秒自然完成单元可用natural_beat并填写short_basis，不补动作凑时长。普通起身转身离开可用1～2秒动作链，重要次数与情绪停顿保留。参照模板不增加固定镜数、固定时长、不同景别轮换、强制高潮或环境破坏。旧单元的subjects继续按原有主体声明读取；没有output_format/focus/purpose及四项摄影字段的旧receipt不强制迁移，替换仅作用于用户选定单元。
+常规单元在26～30秒、8～13镜范围内按内容选择，单镜仍为1～5秒；26～30秒仅优选；4～25秒自然完成单元可用natural_beat并填写short_basis，不补动作凑时长。按[摄影规则](cinematic-rules.md#动作节奏与压缩)依当前情境区分机械过渡、情节关键动作与情绪氛围动作，分别压缩非关键过程、保留关键行为和结果、保护已有情绪变化及必要停顿，不默认慢演、不自动改稿。参照模板不增加固定镜数、固定时长、不同景别轮换、强制高潮或环境破坏。旧单元的subjects继续按原有主体声明读取；没有output_format/focus/purpose及四项摄影字段的旧receipt不强制迁移，替换仅作用于用户选定单元。
 
 reference-v3逐镜渲染为`·00秒-03秒[镜头1-label]：（@主焦点完整名 的framing；转场：transition）camera，composition，depth_of_field，lighting；text [本镜对白]。音效：前景+环境。`。每镜使用中文外括号，括号内不写“景别：”、不放运镜；四项摄影字段按固定顺序放在括号外。镜头时码为两位整数秒，编号由程序从1递增。群像焦点用多个@主名连接，空focus原有环境镜使用相应环境景别。global紧随场景行渲染为独立“人物站位：”行，connector并入本镜正文，purpose不输出。label是可见短标签，不等于后台purpose。音效缺一项省略空项和+，两项均空写“无”。
 
@@ -161,9 +169,11 @@ commit、幂等重试及render成功后返回unit_count、total_seconds、minute
 
 摄影软审查：连续三镜framing、focus、angle和camera相同，提示检查新增看点；连续两镜明确的正面面部近景/特写，以及同人物连续三镜正面面部中近景/近景/特写，提示审查表演变化、空间与关系。审查延伸到来源连续的单元/批次边界，不把重复渲染批次拼接成故事。首镜面部近景、数量和累计比例也仅提醒。面部识别要求单一CHAR主焦点，依赖face_closeup=true或构图/标签中有限的明确面部描述，再结合正面angle；道具focus不会当作脸，普通“微笑/眼神”动作文字或只有CHAR+正面+近景不足以确定脸主导。缺少明确信号不代表没有怼脸画面，程序不分析图像、不承诺识别所有面部镜。换成斜侧或改景别标签后仍重复看脸的情况必须人工复核；合法近景正反打与重要反应允许保留，不靠警告数或配额验收。
 
-摄影目的、环境依据、人物微动作、具体化是否新增事件、实际口型、动作/声音是否同期、完整事件覆盖均需生成者人工复核。来源span完整覆盖不等于语义已完整呈现，程序不作此承诺。
+摄影目的、环境依据、人物微动作、具体化是否新增事件、实际口型、动作/声音是否同期、完整事件覆盖均需生成者人工复核。动作压缩须另核对关键行为、结果、重要次数及情绪氛围是否保留，省略切换是否可理解、跨镜动作是否仅完成一次；不以来源span完整覆盖代替语义与表演检查，程序不作此承诺。
 
-commit先原子保存session，再渲染交付；同request_id、同内容重试不会重复编号或范围记录。交付失败用render重建已提交文件。指定新输出名以保存历史；不能覆盖来源、风格、session或Skill文件，也不能把交付写进绑定的逐场稿scenes目录或本项目内部canvas状态目录。使用任务outputs或明确的交付目录。渲染旧receipt得到当批原版本，当前有效版本以session.units为准。
+新append和用户指定replace的receipt保存`display_format: numbered-units-v1`。`render_receipt`按receipt.units出现顺序仅在TXT单元标题前加展示序号：每文件从`01 - `开始，跨场景连续，至少两位，100以上不截断也不补固定三位。该序号不写入unit.id、session.next_numbers、镜头编号、图片引用或画布节点名；`render_unit`及其云端reference_text入口继续使用原稳定标题。未记录display_format的旧receipt保持无前缀原输出，包括旧reference-v3；幂等重试不补metadata，指定replace新文件带号且只包含选中单元，旧receipt与未选单元不变。
+
+commit先原子保存session，再渲染交付；同request_id、同内容重试不会重复编号或范围记录。交付失败用render重建已提交文件。指定新输出名以保存历史；不能覆盖来源、风格、session或Skill文件，也不能把交付写进绑定的逐场稿scenes目录或本项目内部canvas状态目录。使用任务outputs或明确的交付目录。渲染旧receipt得到当批原版本及原展示格式，当前有效版本以session.units为准。
 
 状态通过单一session.json原子提交。单项目顺序执行，不并发写同一项目；读取/校验不会改变历史。程序运行产生的JSON只供后台查看。
 

@@ -10,6 +10,9 @@ import re
 import tempfile
 from pathlib import Path
 
+from asset_visual_design import (PROP_POLICY, apply_design, validate_prop_policy,
+                                 validate_visual_design)
+
 
 HEADING = re.compile(r"场景(\d+)(?=-(?:日|夜)-(?:内|外)-|：(?:日|夜)·(?:内|外)·)[：-](日|夜)[·-](内|外)[·-](.+)")
 SCENE_FILE = re.compile(r"scene_(\d+)_(\d+)-(\d+)\.txt")
@@ -158,7 +161,7 @@ def normalize_assets(data):
                 target = shared[key]
                 redirects[aid] = target['id']
                 archived.append(copy.deepcopy(item))
-                for field in ('aliases', 'visual_facts', 'personality_facts', 'production_design'):
+                for field in ('aliases', 'visual_facts', 'personality_facts', 'production_design', 'visible_uses'):
                     for value in item.get(field, []):
                         if value not in target.setdefault(field, []):
                             target[field].append(value)
@@ -429,6 +432,8 @@ def validate(script: list[dict], paragraphs: list[str], data: dict) -> None:
     if data["schema_version"] == 3:
         validate_scene_assets(data, paragraphs, scenes_by_id, locations)
     reference_preflight(data)
+    validate_prop_policy(data, paragraphs, fact_list)
+    validate_visual_design(data)
 
 
 def temporal_context(data, paragraphs=None):
@@ -726,7 +731,8 @@ def initialize(script_path: Path, workdir: Path, output: Path) -> None:
             "time_basis": {"kind": "待核", "source_paragraphs": []},
         })
     data = {
-        "schema_version": 3, "source_digest": digest(paragraphs), "scene_assets": [],
+        "schema_version": 3, "asset_policy": PROP_POLICY,
+        "source_digest": digest(paragraphs), "scene_assets": [],
         "scenes": scenes, "characters": characters, "locations": locations,
         "props": [], "retired_ids": [], "inactive_assets": {"characters": []}, "pending_reviews": [],
     }
@@ -767,20 +773,21 @@ def render(script_path: Path, source_path: Path, ledger_path: Path, output: Path
     props = {item["id"]: item for item in data["props"]}
     scene_assets = {item["id"]: item for item in data.get("scene_assets", [])}
     lines = ["角色列表"]
-    for item in data["characters"]:
+    for number, item in enumerate(data["characters"], 1):
         features = "、".join(visual_text(item["visual_facts"])) or "外观未明示"
-        lines.append(f"- {item['name']}：{features}。")
-        if item.get('production_design'):
+        lines.append(f"{number:02d} - {item['name']}：" + (item["image_prompt"] if item.get("image_prompt") else features + "。"))
+        if item.get('production_design') and not item.get("image_prompt"):
             lines.append('  制作设计：' + '、'.join(visual_text(item['production_design'])) + '。')
         numbers = sorted({scene["number"] for scene in data["scenes"] if item["id"] in scene["character_ids"]})
         lines.append("  出现的场景：" + ("，".join(f"场景{number}" for number in numbers) or "无") + "。")
 
     lines.extend(["", "场景列表"])
-    for scene in (data["scene_assets"] if data["schema_version"] == 3 else data["scenes"]):
+    for number, scene in enumerate(data["scene_assets"] if data["schema_version"] == 3 else data["scenes"], 1):
         loc = locations[scene["location_id"]]
         if data["schema_version"] == 3:
             elements = visual_text(set_visual_facts(scene, locations, scene_assets))
-            lines.append(f"- {scene['name']}｜关键元素：{'、'.join(dict.fromkeys(elements)) or '未明示'}。")
+            description = scene.get("image_prompt")
+            lines.append(f"{number:02d} - {scene['name']}" + ("：" + description if description else f"｜关键元素：{'、'.join(dict.fromkeys(elements)) or '未明示'}。"))
             numbers = sorted(s["number"] for s in data["scenes"] if s["scene_asset_id"] == scene["id"])
             lines.append("  使用的场次：" + ("，".join(f"场景{n}" for n in numbers) or "无（基础布景供版本继承）") + "。")
             continue
@@ -792,12 +799,14 @@ def render(script_path: Path, source_path: Path, ledger_path: Path, output: Path
         elements = list(dict.fromkeys(elements))
         if not elements:
             elements = [script[scene["number"] - 1]["location_name"]]
-        lines.append(f"- {scene['heading']}｜氛围：{'、'.join(atmosphere) or '未明示'}；关键元素：{'、'.join(elements)}。")
+        lines.append(f"{number:02d} - {scene['heading']}｜氛围：{'、'.join(atmosphere) or '未明示'}；关键元素：{'、'.join(elements)}。")
 
     lines.extend(["", "主要道具列表"])
-    for item in data["props"]:
+    for number, item in enumerate(data["props"], 1):
         features = "、".join(visual_text(item["visual_facts"])) or "外形未明示"
-        lines.append(f"- {item['name']}：{features}。")
+        lines.append(f"{number:02d} - {item['name']}：" + (item["image_prompt"] if item.get("image_prompt") else features + "。"))
+        numbers = sorted({scene["number"] for scene in data["scenes"] if item["id"] in scene["prop_ids"]})
+        lines.append("  使用的场次：" + ("，".join(f"场景{n}" for n in numbers) or "无") + "。")
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="\n", dir=output.parent, delete=False) as temp:
         temp.write("\n".join(lines) + "\n")
@@ -829,6 +838,14 @@ def main() -> None:
     view.add_argument("source", type=Path)
     view.add_argument("ledger", type=Path)
     view.add_argument("--output", type=Path, required=True)
+    design = commands.add_parser("design", help="校验作者的制作设计JSON并确定性编译GPT-image-2资产提示词，不调用生图")
+    design.add_argument("script", type=Path)
+    design.add_argument("source", type=Path)
+    design.add_argument("ledger", type=Path)
+    design.add_argument("design_json", type=Path)
+    design.add_argument("--style-file", type=Path, required=True)
+    design.add_argument("--output", type=Path, required=True)
+    design.add_argument("--catalog-output", type=Path)
     args = parser.parse_args()
     try:
         if args.command == "init":
@@ -849,6 +866,32 @@ def main() -> None:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             print(f"已建立 {len(data['scene_assets'])} 个布景资产索引：{args.output}")
+        elif args.command == "design":
+            outputs = [args.output] + ([args.catalog_output] if args.catalog_output else [])
+            inputs = [args.script, args.source, args.ledger, args.design_json, args.style_file]
+            if any(path.exists() for path in outputs) or len({path.resolve() for path in outputs}) != len(outputs) or any(path.resolve() in {value.resolve() for value in inputs} for path in outputs):
+                raise ValueError("design输出须为不同的新文件，不覆盖输入、旧台账或旧分类TXT")
+            script = parse_script(args.script)
+            paragraphs = source_paragraphs(args.source)
+            data = json.loads(args.ledger.read_text(encoding="utf-8-sig"))
+            # Recompilation is also the explicit path for reviewed changes to
+            # facts/style. Validate source structure without stale derivatives.
+            source_data = copy.deepcopy(data)
+            for field in ("image_design_version", "visual_style", "identity_anchors"):
+                source_data.pop(field, None)
+            for category in ("characters", "scene_assets", "props"):
+                for item in source_data.get(category, []):
+                    for field in ("visual_design", "image_prompt", "image_format", "image_design_digest"):
+                        item.pop(field, None)
+            validate(script, paragraphs, source_data)
+            result = apply_design(data, json.loads(args.design_json.read_text(encoding="utf-8-sig")),
+                                  args.style_file.read_text(encoding="utf-8-sig"))
+            validate(script, paragraphs, result)
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            if args.catalog_output:
+                render(args.script, args.source, args.output, args.catalog_output)
+            print(f"已编译完整GPT-image-2资产设计：{args.output}；未调用生图模型")
         else:
             render(args.script, args.source, args.ledger, args.output)
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:

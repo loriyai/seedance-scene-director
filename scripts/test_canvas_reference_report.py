@@ -94,6 +94,43 @@ class ReferenceReportChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '不能覆盖'):
             report.write_reference_report(self.project, self.session, self.state, self.doc, [self.unit], output=self.delivery)
 
+    def test_black_video_media_is_separate_from_images_and_reference_failures(self):
+        c.nodes(self.doc)['B']['type'] = 'biz/video'
+        c.content(self.doc, 'B').pop('pippitAssetId')
+        self.state['black_node_kind'] = 'video'
+        result = report.write_reference_report(self.project, self.session, self.state, self.doc, [self.unit])
+        self.assertEqual(result['missing_image_count'], 3)
+        self.assertEqual(result['missing_video_count'], 1)
+        self.assertEqual(result['reference_issue_count'], 0)
+        text = Path(result['report']).read_text(encoding='utf-8')
+        self.assertIn('黑幕视频素材待补：1项', text)
+        self.assertNotIn('黑幕图片', text)
+        c.content(self.doc, 'B')['pippitAssetId'] = 'BLACK_VIDEO'
+        self.assertNotIn('missing_video', {i['reason'] for i in self.issues()})
+
+    def test_legacy_unit_image_pin_is_preserved_after_project_default_changes(self):
+        self.state['mappings']['V'].update(black_node_id='B', black_node_kind='image')
+        self.state.update(black_node_id='NEW', black_node_kind='video')
+        c.nodes(self.doc)['NEW'] = {'type': 'biz/video'}
+        self.doc['assets']['NEW'] = {'content': {'name': '黑幕'}}
+        self.assertNotIn('BLACK', {i['key'] for i in self.issues()})
+
+    def test_shared_black_media_is_counted_once_with_all_affected_units(self):
+        c.nodes(self.doc)['B']['type'] = 'biz/video'
+        c.content(self.doc, 'B').pop('pippitAssetId')
+        second = copy.deepcopy(self.unit)
+        second['id'] = 'V2'
+        self.state['mappings']['V2'] = {'node_id': 'V2', 'kind': 'video', 'name': 'V2'}
+        c.nodes(self.doc)['V2'] = {'type': 'biz/video'}
+        self.doc['assets']['V2'] = copy.deepcopy(self.doc['assets']['V'])
+        edges = self.doc['assets']['ROOT']['content']['edges']
+        for source in ('R', 'S', 'I', 'B'):
+            edges[source+'-V2'] = {'source': source, 'target': 'V2', 'type': 'reference'}
+        result = report.write_reference_report(self.project, self.session, self.state, self.doc, [self.unit, second])
+        self.assertEqual(result['missing_video_count'], 1)
+        black = next(i for i in result['issues'] if i['reason'] == 'missing_video')
+        self.assertEqual(black['unit_ids'], ['V', 'V2'])
+
 
 if __name__ == '__main__':
     unittest.main()

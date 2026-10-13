@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from urllib.parse import urlparse, parse_qs, urlencode
 
@@ -20,6 +21,8 @@ import canvas_media as media
 
 KINDS = {"role": "biz/role", "scene": "biz/scene", "image": "biz/image", "video": "biz/video", "audio": "biz/audio", "text": "biz/text"}
 NODE_ASSET_TAG = re.compile(r"<node-asset\b[^>]*>([^<]*)</node-asset>")
+VIDEO_READBACK_ATTEMPTS = 3
+VIDEO_READBACK_DELAY = 0.5
 
 
 class CanvasError(ValueError):
@@ -140,6 +143,10 @@ def read_state(project):
     state["mappings"] = {k: m for k, m in state["mappings"].items() if m["node_id"] not in deleted}
     if state.get("black_node_id") in deleted:
         state.pop("black_node_id")
+        state.pop("black_node_kind", None)
+        state.pop("black_video_preparation", None)
+    if state.get("legacy_black_node_id") in deleted:
+        state.pop("legacy_black_node_id", None)
     for path in (Path(project) / "canvas" / "pending-sync").glob("*.json"):
         marker = d.read_json(path)
         state["pending_units"] = list(dict.fromkeys(state["pending_units"] + list(marker["units"])))
@@ -380,7 +387,16 @@ def target_satisfied(doc, target):
     if node_id not in nodes(doc):
         return False
     if action == "create":
+        if target["kind"] == "video":
+            # Legacy video create journals predate the explicit rename step.
+            # The exact allocated ID and kind confirm creation; the final
+            # video receipt owns name/duration/prompt acceptance.
+            return kind_of(nodes(doc)[node_id]) == "video"
         return kind_of(nodes(doc)[node_id]) == target["kind"] and content(doc, node_id).get("name", content(doc, node_id).get("nodeName")) == target["name"]
+    if action == "node_kind":
+        return kind_of(nodes(doc)[node_id]) == target["kind"]
+    if action == "duration":
+        return (content(doc, node_id).get("generation") or {}).get("durationMs") == target["value"]
     if action == "prompt":
         return prompt_of(doc, node_id) == target["value"] and prompt_references_satisfied(doc, node_id, target["value"])
     if action == "prompt_text":
@@ -401,10 +417,21 @@ def target_satisfied(doc, target):
     return False
 
 
-def reconcile(project, cli, state, doc, preview=False):
+def reconcile(project, cli, state, doc, preview=False, decisions=None):
     changed = False
     for entry in state["journal"]:
-        if entry["status"] in ("pending", "uncertain"):
+        if entry["status"] in ("pending", "uncertain", "acknowledged"):
+            target_ids = {target["node_id"] for target in entry["targets"]}
+            replaced = next((key for key, mapping in state["mappings"].items()
+                             if mapping.get("kind") == "video" and target_ids == {mapping["node_id"]}
+                             and mapping["node_id"] not in nodes(doc)
+                             and (decisions or {}).get(key, {}).get("recreate_missing") == mapping["node_id"]), None)
+            if replaced is not None:
+                # The user explicitly deleted this exact missing video and asked
+                # to recreate it. Preserve the old operation; do not replay it.
+                entry.update(status="superseded", resolution="explicitly_recreate_deleted_video", key=replaced)
+                changed = True
+                continue
             if all(target_satisfied(doc, t) for t in entry["targets"]):
                 entry["status"] = "verified"
                 entry["after"] = {t["node_id"]: fingerprint(doc, t["node_id"]) for t in entry["targets"]}
@@ -444,6 +471,174 @@ def write_verified(project, cli, state, command, value, targets):
     entry["after"] = {t["node_id"]: fingerprint(doc, t["node_id"]) for t in targets}
     save(project, state)
     return doc
+
+
+def write_acknowledged(project, cli, state, command, value, targets, receipt):
+    """Journal a video step's official ACK; defer snapshot acceptance to its receipt."""
+    entry = {"id": uuid.uuid4().hex, "command": command, "input": copy.deepcopy(value),
+             "targets": copy.deepcopy(targets), "status": "pending", "video_receipt_id": receipt["id"]}
+    state["journal"].append(entry)
+    receipt["steps"].append(entry["id"])
+    save(project, state)
+    try:
+        cli.command(state["binding"]["canvas_id"], command, value)
+    except (CanvasError, OSError, ValueError, KeyError) as exc:
+        rejected = getattr(exc, "code", None) == "COMMAND_REJECTED"
+        entry.update(status="rejected" if rejected else "uncertain", error=safe_message(exc))
+        save(project, state)
+        if rejected:
+            raise
+        fail("UNCERTAIN_WRITE", "视频写入命令未获得明确确认，已保存节点ID并停止，不直接重放写入。",
+             operation=entry["id"], node_id=receipt["node_id"])
+    entry["status"] = "acknowledged"
+    # Keep field baselines from before the write or from its intended ACK.
+    # A later snapshot must not absorb unrelated manual edits on recovery.
+    baseline = state["mappings"][receipt["key"]].get("video_initialization_baseline")
+    if baseline is not None:
+        for target in targets:
+            if target["action"] == "patch":
+                baseline.update({key: val for key, val in target["patch"].items() if key in ("name", "caption", "title")})
+            elif target["action"] == "duration":
+                baseline["durationMs"] = target["value"]
+            elif target["action"] == "prompt_text":
+                baseline["prompt_hash"] = digest(target["value"])
+    save(project, state)
+    return entry
+
+
+def video_initialization_changes(doc, node_id, mapping, item):
+    baseline = mapping.get("video_initialization_baseline")
+    if baseline is None:
+        return None  # Legacy mappings keep their previous fingerprint guard.
+    current = content(doc, node_id)
+    changes = []
+    if any(field in baseline and current.get(field) not in (baseline[field], item["name"])
+           for field in ("name", "caption", "title")):
+        changes.append("name")
+    if "durationMs" in baseline and (current.get("generation") or {}).get("durationMs") not in (
+            baseline["durationMs"], item.get("settings", {}).get("durationMs")):
+        changes.append("durationMs")
+    if digest(prompt_of(doc, node_id)) not in (baseline["prompt_hash"], digest(item["prompt"])):
+        changes.append("prompt")
+    return changes
+
+
+def video_snapshot(cli, state, node_id):
+    """Read generation before a shallow patch, without accepting name/prompt yet."""
+    for attempt in range(VIDEO_READBACK_ATTEMPTS):
+        doc = document(cli, state["binding"])
+        if node_id in nodes(doc):
+            d.require(kind_of(nodes(doc)[node_id]) == "video", "视频节点类型已变化，已停止写入")
+            return doc
+        if attempt + 1 < VIDEO_READBACK_ATTEMPTS:
+            time.sleep(VIDEO_READBACK_DELAY)
+    fail("UNCERTAIN_WRITE", "已确认创建命令，但节点尚未出现在快照中；保留同一节点ID，停止后续写入。", node_id=node_id)
+
+
+def write_video(project, cli, state, doc, item, node_id, context, create=None, references_only=False):
+    """Create -> rename -> duration -> encoded prompt -> one unified readback receipt."""
+    names = {field: item["name"] for field in ("name", "caption", "title")}
+    targets = [{"action": "node_kind", "node_id": node_id, "kind": "video"},
+               {"action": "prompt_text", "node_id": node_id, "value": item["prompt"]}]
+    if not references_only:
+        targets[1:1] = [{"action": "patch", "node_id": node_id, "patch": names},
+                        {"action": "duration", "node_id": node_id, "value": item["settings"]["durationMs"]}]
+    receipt = {"id": uuid.uuid4().hex, "key": item["key"], "node_id": node_id,
+               "status": "writing", "steps": [], "targets": copy.deepcopy(targets),
+               "references_only": references_only}
+    receipt_path = Path(project) / "canvas" / "video-write-receipts" / (receipt["id"] + ".json")
+    mapping = state["mappings"][item["key"]]
+    mapping["video_receipt_id"] = receipt["id"]
+    if not references_only:
+        if node_id in nodes(doc):
+            mapping["initialization_fingerprint"] = fingerprint(doc, node_id)
+        if "video_initialization_baseline" not in mapping:
+            if create is not None:
+                mapping["video_initialization_baseline"] = {"prompt_hash": digest("")}
+            else:
+                current = content(doc, node_id)
+                mapping["video_initialization_baseline"] = {**{field: current.get(field) for field in names},
+                    "durationMs": (current.get("generation") or {}).get("durationMs"),
+                    "prompt_hash": digest(prompt_of(doc, node_id))}
+        mapping["stage"] = "writing"
+    d.write_json(receipt_path, receipt)
+    save(project, state)
+    try:
+        if create is not None:
+            write_acknowledged(project, cli, state, "create_biz_node", create,
+                               [{"action": "node_kind", "node_id": node_id, "kind": "video"}], receipt)
+        if not references_only:
+            if create is not None or not all(content(doc, node_id).get(k) == v for k, v in names.items()):
+                write_acknowledged(project, cli, state, "update_node_data", {"id": node_id, "patch": names},
+                                   [{"action": "patch", "node_id": node_id, "patch": names}], receipt)
+            # update_node_data replaces nested values. Read and preserve all generation
+            # fields; the only selected parameter is durationMs. No model API is used.
+            doc = video_snapshot(cli, state, node_id)
+            context["doc"] = doc
+            generation = copy.deepcopy(content(doc, node_id).get("generation") or {})
+            d.require(isinstance(generation, dict), "generation格式无效，无法安全更新视频时长")
+            baseline = mapping["video_initialization_baseline"]
+            if digest(prompt_of(doc, node_id)) not in (baseline["prompt_hash"], digest(item["prompt"])):
+                fail("CONCURRENT_EDIT", "视频提示词在初始化期间发生人工修改，已停止。", node_id=node_id)
+            baseline.setdefault("durationMs", generation.get("durationMs"))
+            save(project, state)
+            duration = item["settings"]["durationMs"]
+            if generation.get("durationMs") != duration:
+                generation["durationMs"] = duration
+                write_acknowledged(project, cli, state, "update_node_data",
+                                   {"id": node_id, "patch": {"generation": generation}},
+                                   [{"action": "duration", "node_id": node_id, "value": duration}], receipt)
+        if prompt_of(doc, node_id) != item["prompt"] or not prompt_references_satisfied(doc, node_id, item["prompt"]):
+            doc = repair_role_reference_rows(project, cli, state, doc, node_id, item["prompt"])
+            context["doc"] = doc
+            write_acknowledged(project, cli, state, "xyq.generation.update_prompt",
+                               {"nodeId": node_id, "prompt": item["prompt"]},
+                               [{"action": "prompt_text", "node_id": node_id, "value": item["prompt"]}], receipt)
+        entry = {"id": receipt["id"], "command": "video_write_receipt", "targets": copy.deepcopy(targets),
+                 "status": "pending", "video_receipt_id": receipt["id"]}
+        state["journal"].append(entry)
+        save(project, state)
+        for attempt in range(VIDEO_READBACK_ATTEMPTS):
+            doc = document(cli, state["binding"])
+            context["doc"] = doc
+            core_verified = all(target_satisfied(doc, target) for target in targets)
+            references_verified = (core_verified and prompt_references_satisfied(doc, node_id, item["prompt"])
+                                   and not item.get("unresolved_references"))
+            if core_verified and references_verified:
+                break
+            if attempt + 1 < VIDEO_READBACK_ATTEMPTS:
+                time.sleep(VIDEO_READBACK_DELAY)
+        observed = content(doc, node_id) if node_id in nodes(doc) else {}
+        receipt.update(attempts=attempt + 1, core_verified=core_verified, references_verified=references_verified,
+                       observed={"kind": kind_of(nodes(doc)[node_id]) if node_id in nodes(doc) else None,
+                                 **{field: observed.get(field) for field in names},
+                                 "durationMs": (observed.get("generation") or {}).get("durationMs"),
+                                 "prompt_hash": digest(prompt_of(doc, node_id)) if node_id in nodes(doc) else None},
+                       checks=[{"action": target["action"], "matched": target_satisfied(doc, target)} for target in targets])
+        if not core_verified:
+            entry.update(status="uncertain", error="视频统一回读未通过")
+            save(project, state)
+            fail("UNCERTAIN_WRITE", "视频写入步骤已确认，但最终名称、时长或提示词回读未通过；已保存回执并停止。",
+                 operation=entry["id"], node_id=node_id, video_receipt=str(receipt_path))
+        after = {node_id: fingerprint(doc, node_id)}
+        for operation in state["journal"]:
+            if operation.get("video_receipt_id") == receipt["id"]:
+                operation.update(status="verified", after=after)
+        receipt["status"] = "verified" if references_verified else "partial"
+        mapping["video_write_receipt"] = str(receipt_path)
+        save(project, state)
+        d.write_json(receipt_path, receipt)
+        context.setdefault("video_write_receipts", []).append(str(receipt_path))
+        return doc
+    except (CanvasError, OSError, ValueError, KeyError) as exc:
+        receipt.update(status="rejected" if getattr(exc, "code", None) == "COMMAND_REJECTED" else "uncertain",
+                       error=safe_message(exc))
+        mapping["video_write_receipt"] = str(receipt_path)
+        save(project, state)
+        d.write_json(receipt_path, receipt)
+        if isinstance(exc, CanvasError):
+            exc.details["video_receipt"] = str(receipt_path)
+        raise
 
 
 def desired_assets(session):
@@ -487,7 +682,136 @@ def reference_ready(doc, node_id):
     return ready_image(doc, node_id)
 
 
+def black_reference(state, doc, unit_id=None):
+    """Resolve the special reference without changing old units or creating nodes."""
+    node_map = nodes(doc) if doc else {}
+    mapping = state["mappings"].get(unit_id, {}) if unit_id else {}
+    pinned = "black_node_id" in mapping
+    black = mapping.get("black_node_id") if pinned else state.get("black_node_id")
+    expected = mapping.get("black_node_kind") if pinned else state.get("black_node_kind")
+    if black in node_map:
+        kind = kind_of(node_map[black])
+        expected = expected or kind
+        if kind not in ("video", "image") or kind != expected:
+            return black, expected, {"reason": "node_type_changed", "actual_kind": kind}
+        if kind == "video" and name_of(doc, black) != "黑幕":
+            return black, kind, {"reason": "node_name_changed", "actual_name": name_of(doc, black)}
+        return black, kind, None
+    expected = expected or "video"
+    if pinned:
+        return black, expected, {"reason": "node_missing"}
+    matches = [nid for nid, node in node_map.items()
+               if kind_of(node) == expected and name_of(doc, nid) == "黑幕"]
+    if len(matches) == 1:
+        return matches[0], expected, None
+    return black, expected, {"reason": "ambiguous_node" if matches else "node_missing", "matches": matches}
+
+
+def preserve_legacy_black_bindings(state, doc):
+    """Pin existing image references before changing the project default to video."""
+    black = state.get("black_node_id")
+    if state.get("black_node_kind") == "video" or black not in nodes(doc) or kind_of(nodes(doc)[black]) != "image":
+        return
+    state["legacy_black_node_id"] = black
+    for mapping in state["mappings"].values():
+        if mapping.get("kind") != "video" or "black_node_id" in mapping:
+            continue
+        target = mapping.get("node_id")
+        if (target in nodes(doc) and black in node_asset_ids(prompt_of(doc, target))
+                or mapping.get("references_requested") or mapping.get("references_bound")):
+            mapping.update(black_node_id=black, black_node_kind="image")
+
+
+def reconcile_black_video(project, cli, state, doc, decisions=None, preview=False, context=None):
+    """Prepare one black video with resumable create/rename steps, no generation."""
+    choice = (decisions or {}).get("BLACK", {})
+    result = {"name": "黑幕", "kind": "video", "node_id": None, "resolution": None, "conflicts": []}
+    def conflict(reason, node_id=None, **extra):
+        result["conflicts"].append({"key": "BLACK", "name": "黑幕", "kind": "video",
+                                    "reason": reason, "node_id": node_id, **extra})
+        return doc, result
+    preserve_legacy_black_bindings(state, doc)
+    preparation = state.get("black_video_preparation", {})
+    black = preparation.get("node_id") or state.get("black_node_id")
+    owned = preparation.get("node_id") == black and preparation.get("stage") in ("allocated", "created")
+    if choice.get("skip") is True:
+        return conflict("asset_skipped", black)
+    if choice.get("reuse") is not None:
+        chosen = choice["reuse"]
+        if chosen not in nodes(doc) or kind_of(nodes(doc)[chosen]) != "video" or name_of(doc, chosen) != "黑幕":
+            return conflict("invalid_reuse_decision", chosen, expected_kind="video")
+        if choice.get("fingerprint") != fingerprint(doc, chosen):
+            return conflict("reuse_fingerprint_changed", chosen, fingerprint=fingerprint(doc, chosen))
+        black, owned = chosen, False
+        result["resolution"] = "adopted"
+    elif black in nodes(doc) and (owned or state.get("black_node_kind") == "video"
+                                  or kind_of(nodes(doc)[black]) == "video"):
+        if kind_of(nodes(doc)[black]) != "video":
+            return conflict("node_type_changed", black, expected_kind="video", actual_kind=kind_of(nodes(doc)[black]))
+        if not owned and name_of(doc, black) != "黑幕":
+            return conflict("node_name_changed", black, actual_name=name_of(doc, black), fingerprint=fingerprint(doc, black))
+        result["resolution"] = "resumed" if owned else "reused"
+    elif not owned:
+        matches = [nid for nid, node in nodes(doc).items() if kind_of(node) == "video" and name_of(doc, nid) == "黑幕"]
+        if len(matches) > 1:
+            return conflict("ambiguous_node", matches=[{"node_id": nid, "fingerprint": fingerprint(doc, nid)} for nid in matches])
+        black = matches[0] if matches else None
+        result["resolution"] = "adopted" if black else "create"
+    if preview:
+        result["node_id"] = black
+        return doc, result
+    if black is None:
+        black = cli.allocate()
+        preparation = {"node_id": black, "stage": "allocated"}
+        state["black_video_preparation"] = preparation
+        owned = True
+    state.update(black_node_id=black, black_node_kind="video")
+    save(project, state)
+    result["node_id"] = black
+    if context is not None:
+        context["active"] = {"key": "BLACK", "name": "黑幕", "kind": "video", "node_id": black}
+    if black not in nodes(doc):
+        # An unfinished allocated ID is reused; uncertain journals were reconciled
+        # before reaching here, so an unconfirmed create is never blindly replayed.
+        position = layout_positions(doc, [{"key": "BLACK", "kind": "video"}])["BLACK"]
+        doc = write_verified(project, cli, state, "create_biz_node",
+                             {"nodeKind": "video", "id": black, "initialData": {}, "topLeft": position},
+                             [{"action": "node_kind", "node_id": black, "kind": "video"}])
+        preparation = {"node_id": black, "stage": "created",
+                       "names": {field: content(doc, black).get(field) for field in ("name", "title", "caption")}}
+        state["black_video_preparation"] = preparation
+        save(project, state)
+    elif owned:
+        baseline = preparation.get("names")
+        if baseline is None:
+            previous = next((row.get("after", {}).get(black) for row in reversed(state["journal"])
+                             if row["status"] == "verified" and black in row.get("after", {})), None)
+            if previous is not None and previous != fingerprint(doc, black):
+                return conflict("cloud_edited", black, fingerprint=fingerprint(doc, black))
+            baseline = {field: content(doc, black).get(field) for field in ("name", "title", "caption")}
+            preparation.update(stage="created", names=baseline)
+            save(project, state)
+        if any(content(doc, black).get(field) not in (value, "黑幕") for field, value in baseline.items()):
+            return conflict("node_name_changed", black, actual_name=name_of(doc, black), fingerprint=fingerprint(doc, black))
+    if owned:
+        doc = set_name(project, cli, state, doc, black, "黑幕")
+    d.require(kind_of(nodes(doc)[black]) == "video" and name_of(doc, black) == "黑幕", "黑幕视频节点回读未通过")
+    state["black_video_preparation"] = {"node_id": black, "stage": "ready"}
+    # Explicit videos may recover a deleted video reference for this range.
+    # Legacy image pins remain immutable and outside-range units are untouched.
+    for unit in context.get("units", []) if context is not None else []:
+        mapping = state["mappings"].get(unit["id"], {})
+        if mapping.get("black_node_kind") == "video" and mapping.get("black_node_id") not in nodes(doc):
+            mapping["black_node_id"] = black
+    save(project, state)
+    if context is not None:
+        context["doc"] = doc
+        context.pop("active", None)
+    return doc, result
+
+
 def reference_map(session, state, doc, asset_ids=None, blocked_assets=()):
+    node_map = nodes(doc) if doc else {}
     names = d.reference_catalog(session, asset_ids)
     kinds = {item["id"]: kind for category, kind in (("characters", "role"), ("scene_assets", "scene"), ("props", "image"))
              for item in session["ledger"].get(category, [])}
@@ -498,35 +822,20 @@ def reference_map(session, state, doc, asset_ids=None, blocked_assets=()):
         if key in blocked_assets:
             pending.append({"key": key, "name": name, "reason": "asset_conflict", "node_id": node_id})
             continue
-        actual_kind = kind_of(nodes(doc)[node_id]) if node_id in nodes(doc) else None
+        actual_kind = kind_of(node_map[node_id]) if node_id in node_map else None
         expected_kind = kinds.get(key)
-        if node_id in nodes(doc) and (actual_kind != expected_kind or mapping.get("kind", expected_kind) != expected_kind):
+        if node_id in node_map and (actual_kind != expected_kind or mapping.get("kind", expected_kind) != expected_kind):
             pending.append({"key": key, "name": name, "reason": "node_type_changed", "node_id": node_id,
                             "expected_kind": expected_kind, "actual_kind": actual_kind})
-        elif node_id in nodes(doc) and name_of(doc, node_id) != name:
+        elif node_id in node_map and name_of(doc, node_id) != name:
             pending.append({"key": key, "name": name, "reason": "node_name_changed", "node_id": node_id,
                             "actual_name": name_of(doc, node_id)})
-        elif node_id in nodes(doc):
+        elif node_id in node_map:
             resolved[name] = "<node-asset>" + node_id + "</node-asset>"
             if not ready_image(doc, node_id):
                 pending.append({"key": key, "name": name, "node_id": node_id, "reason": "missing_image"})
         else:
             pending.append({"key": key, "name": name, "reason": "node_missing", "node_id": node_id})
-    black = state.get("black_node_id")
-    if black in nodes(doc) and kind_of(nodes(doc)[black]) == "image":
-        resolved["黑幕"] = "<node-asset>" + black + "</node-asset>"
-        if not ready_image(doc, black):
-            pending.append({"key": "BLACK", "name": "黑幕", "node_id": black, "reason": "missing_image"})
-    else:
-        matches = [nid for nid, node in nodes(doc).items() if kind_of(node) == "image" and name_of(doc, nid) == "黑幕"]
-        if len(matches) == 1:
-            black = matches[0]
-            resolved["黑幕"] = "<node-asset>" + black + "</node-asset>"
-            if not ready_image(doc, black):
-                pending.append({"key": "BLACK", "name": "黑幕", "node_id": black, "reason": "missing_image"})
-        else:
-            pending.append({"key": "BLACK", "name": "黑幕", "reason": "ambiguous_node" if matches else "node_missing",
-                            "matches": matches})
     return resolved, pending
 
 
@@ -548,9 +857,22 @@ def desired_videos(session, state, doc, units, bind_references=False, failures=N
              state["mappings"].get(u["id"], {}).get("references_bound", False)) for u in units}
     needed = set().union(*(unit_asset_ids(session, unit) for unit in units)) if units else set()
     refs, pending = reference_map(session, state, doc, needed, blocked_assets) if any(flags.values()) else ({}, [])
-    convert = reference_renderer(refs, [*d.reference_catalog(session).values(), "黑幕"])
+    # Older lookup adapters included one project-wide BLACK issue. The unit-level
+    # resolver below owns that special reference now, so do not report it twice.
+    pending = [row for row in pending if row.get("key") != "BLACK"]
     wanted = []
     for unit in units:
+        unit_refs = dict(refs)
+        black, black_kind, black_issue = black_reference(state, doc, unit["id"])
+        if flags[unit["id"]]:
+            if black_issue is None:
+                unit_refs["黑幕"] = "<node-asset>" + black + "</node-asset>"
+                if not reference_ready(doc, black):
+                    black_issue = {"reason": "missing_video" if black_kind == "video" else "missing_image"}
+            if black_issue is not None:
+                pending.append({"key": "BLACK", "name": "黑幕", "kind": black_kind, "node_id": black,
+                                "unit_ids": [unit["id"]], **black_issue})
+        convert = reference_renderer(unit_refs, [*d.reference_catalog(session).values(), "黑幕"])
         try:
             prompt = d.render_unit(session, unit, reference_text=convert if flags[unit["id"]] else None)
         except (ValueError, KeyError, TypeError) as exc:
@@ -559,11 +881,12 @@ def desired_videos(session, state, doc, units, bind_references=False, failures=N
             failures.append({"key": unit["id"], "reason": "prompt_encoding_failed", "message": safe_message(exc)})
             continue
         reference_keys = set(unit_asset_ids(session, unit))
-        if "@黑幕" in prompt or refs.get("黑幕") and refs["黑幕"] in prompt:
+        if "@黑幕" in prompt or unit_refs.get("黑幕") and unit_refs["黑幕"] in prompt:
             reference_keys.add("BLACK")
         wanted.append({"key": unit["id"], "name": unit["id"], "kind": "video", "version": unit["version"],
                        "duration": unit["duration"], "prompt": prompt, "references_bound": flags[unit["id"]],
-                       "reference_keys": sorted(reference_keys)})
+                       "reference_keys": sorted(reference_keys), "black_node_id": black if black_issue is None or black_issue.get("reason") in ("missing_image", "missing_video") else None,
+                       "black_node_kind": black_kind})
     used = set().union(*(set(item["reference_keys"]) for item in wanted)) if wanted else set()
     return wanted, [p for p in pending if p["key"] in used]
 
@@ -710,11 +1033,6 @@ def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, pre
                 state["mappings"][key]["appearance_name"] = content(doc, node_id).get("basicInfo", {}).get("appearanceName", "")
             if not preview:
                 save(project, state)
-    black = state.get("black_node_id")
-    if black not in nodes(doc) or kind_of(nodes(doc)[black]) != "image":
-        matches = [nid for nid, node in nodes(doc).items() if kind_of(node) == "image" and name_of(doc, nid) == "黑幕"]
-        if len(matches) == 1:
-            state["black_node_id"] = matches[0]
     if not preview:
         save(project, state)
     if context is not None:
@@ -780,7 +1098,7 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
         state = copy.deepcopy(state)
     context = context if context is not None else {"failures": []}
     context.update(session=session, state=state, doc=doc)
-    reconcile(project, cli, state, doc, preview=preview)
+    reconcile(project, cli, state, doc, preview=preview, decisions=decisions)
     asset_summary = None
     if kind == "assets":
         desired, pending = desired_assets(session), []
@@ -791,14 +1109,11 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
             doc, asset_summary = reconcile_asset_nodes(project, cli, session, state, doc, decisions, preview, context)
             context["doc"] = doc
             context["failures"].extend(asset_summary["conflicts"])
+            doc, black_summary = reconcile_black_video(project, cli, state, doc, decisions, preview, context)
+            context["doc"] = doc
+            asset_summary["black_video"] = black_summary
+            context["failures"].extend(black_summary["conflicts"])
             bind_references = True
-        black = state.get("black_node_id")
-        if black not in nodes(doc) or kind_of(nodes(doc)[black]) != "image":
-            matches = [nid for nid, node in nodes(doc).items() if kind_of(node) == "image" and name_of(doc, nid) == "黑幕"]
-            if len(matches) == 1:
-                state["black_node_id"] = matches[0]
-                if not preview:
-                    save(project, state)
         bind_references = bind_references or references_only or any(m.get("image") for m in state["mappings"].values())
         blocked_assets = {item["key"] for item in asset_summary["conflicts"]} if asset_summary else set()
         desired, pending = desired_videos(session, state, doc, units, bind_references, context["failures"], blocked_assets)
@@ -809,7 +1124,6 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
     unbound = [x["key"] for x in desired if x["key"] not in state["mappings"]] if existing_only else []
     if existing_only:
         desired = [x for x in desired if x["key"] in state["mappings"]]
-    settings, model = media.model_settings(cli) if kind == "videos" and desired and not references_only else ({}, {})
     decisions = decisions or {}
     conflicts, plan, skipped = [], [], []
     for item in desired:
@@ -820,7 +1134,8 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
         mapping = state["mappings"].get(key)
         node_id = mapping.get("node_id") if mapping else None
         allocated_id = None
-        if mapping and node_id not in nodes(doc) and mapping.get("stage") == "allocated":
+        if (mapping and node_id not in nodes(doc) and mapping.get("stage") == "allocated"
+                and decisions.get(key, {}).get("recreate_missing") != node_id):
             allocated_id, node_id, mapping = node_id, None, None
         if mapping and node_id not in nodes(doc):
             choice = decisions.get(key, {})
@@ -842,19 +1157,16 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
                     conflicts.append({"key": key, "reason": "existing_name", "matches": [
                         {"node_id": i, "fingerprint": fingerprint(doc, i)} for i in matches]})
                     continue
-        if settings:
+        if item["kind"] == "video" and not references_only:
             current = content(doc, node_id).get("generation", {}) if node_id else {}
-            media.validate_duration(model, item["duration"], current)
-            item["settings"] = {**settings, "durationMs": item["duration"] * 1000}
+            d.require(type(item["duration"]) is int and item["duration"] > 0, "分镜时长须为正整数秒")
+            item["settings"] = {"durationMs": item["duration"] * 1000}
             changed_settings = []
             if node_id and (not mapping or mapping.get("stage") == "ready"):
                 baseline = (mapping or {}).get("video_settings", {})
-                for field, expected in item["settings"].items():
-                    value = current.get(field)
-                    if field in ("modelKey", "resolution") and value != expected:
-                        changed_settings.append(field)
-                    elif field == "durationMs" and field in baseline and value != baseline[field] and value != expected:
-                        changed_settings.append(field)
+                value = current.get("durationMs")
+                if "durationMs" in baseline and value != baseline["durationMs"] and value != item["settings"]["durationMs"]:
+                    changed_settings.append("durationMs")
                 if changed_settings and choice.get("overwrite_fingerprint") != fingerprint(doc, node_id):
                     conflicts.append({"key": key, "reason": "video_settings_changed", "fields": changed_settings,
                                       "node_id": node_id, "fingerprint": fingerprint(doc, node_id),
@@ -863,15 +1175,26 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
         if node_id and mapping:
             changes = []
             if mapping.get("stage") != "ready":
-                expected = mapping.get("adopted_fingerprint")
-                for entry in reversed(state["journal"]):
-                    if entry["status"] == "verified" and node_id in entry.get("after", {}):
-                        expected = entry["after"][node_id]
-                        break
-                if expected != fingerprint(doc, node_id):
-                    changes.append("initialization")
-            if mapping.get("stage") == "ready" and name_of(doc, node_id) != mapping.get("name") and name_of(doc, node_id) != item["name"]:
-                changes.append("name")
+                field_changes = video_initialization_changes(doc, node_id, mapping, item) if item["kind"] == "video" else None
+                if field_changes is not None:
+                    changes.extend(field_changes)
+                else:
+                    expected = mapping.get("initialization_fingerprint", mapping.get("adopted_fingerprint"))
+                    for entry in reversed(state["journal"]):
+                        if entry["status"] == "verified" and node_id in entry.get("after", {}):
+                            expected = entry["after"][node_id]
+                            break
+                    if expected != fingerprint(doc, node_id):
+                        changes.append("initialization")
+            if not references_only and mapping.get("stage") == "ready":
+                fields = ("name", "caption", "title") if item["kind"] == "video" else ()
+                name_baseline = mapping.get("video_names", {})
+                edited_name = any(content(doc, node_id).get(field) not in (
+                    name_baseline.get(field, mapping.get("name")), item["name"])
+                    if field in name_baseline else content(doc, node_id).get(field) not in (None, mapping.get("name"), item["name"])
+                    for field in fields)
+                if edited_name or name_of(doc, node_id) not in (mapping.get("name"), item["name"]):
+                    changes.append("name")
             if mapping.get("stage") == "ready" and "prompt" in item and digest(prompt_of(doc, node_id)) != mapping.get("prompt_hash") and prompt_of(doc, node_id) != item["prompt"]:
                 changes.append("prompt")
             if item["kind"] in ("role", "scene") and mapping.get("stage") == "ready":
@@ -909,6 +1232,8 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
                 fail("CONCURRENT_EDIT", "引用资产节点在操作期间删除或改名/改类型，已停止。", key=key, node_id=source)
         doc = fresh
         context["doc"] = doc
+        create_video = None
+        before = fingerprint(doc, node_id) if node_id else None
         if not node_id:
             # Recheck name collisions immediately before allocating.
             if any(kind_of(n) == item["kind"] and name_of(doc, i) == item["name"] for i, n in nodes(doc).items()):
@@ -917,11 +1242,14 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
             context["active"]["node_id"] = node_id
             state["mappings"][key] = {"node_id": node_id, "kind": item["kind"], "name": item["name"], "stage": "allocated"}
             save(project, state)
-            init = initial_data(item)
+            init = {} if item["kind"] == "video" else initial_data(item)
             command = {"nodeKind": item["kind"], "id": node_id, "initialData": init, "topLeft": positions[key]}
-            doc = write_verified(project, cli, state, "create_biz_node", command,
-                                 [{"action": "create", "node_id": node_id, "kind": item["kind"], "name": item["name"]}])
-            context["doc"] = doc
+            if item["kind"] == "video":
+                create_video = command
+            else:
+                doc = write_verified(project, cli, state, "create_biz_node", command,
+                                     [{"action": "create", "node_id": node_id, "kind": item["kind"], "name": item["name"]}])
+                context["doc"] = doc
             created += 1
         else:
             reused += 1
@@ -929,8 +1257,22 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
                 state["mappings"][key] = {"node_id": node_id, "kind": item["kind"], "name": name_of(doc, node_id), "stage": "adopted",
                                           "adopted_fingerprint": fingerprint(doc, node_id)}
                 save(project, state)
-        before = fingerprint(doc, node_id)
-        doc = set_name(project, cli, state, doc, node_id, item["name"])
+        if item["kind"] == "video":
+            if (not references_only and node_id in nodes(doc)
+                    and decisions.get(key, {}).get("overwrite_fingerprint") == fingerprint(doc, node_id)):
+                # The user accepted these exact current fields. Rebase only
+                # after the fresh snapshot still matches that authorization.
+                state["mappings"][key].pop("video_initialization_baseline", None)
+            if item.get("black_node_id") is not None and item["references_bound"]:
+                state["mappings"][key].update(black_node_id=item["black_node_id"], black_node_kind=item["black_node_kind"])
+                save(project, state)
+            item["unresolved_references"] = any(row.get("reason") not in ("missing_image", "missing_video") for row in pending
+                                                if row["key"] in item["reference_keys"] and (not row.get("unit_ids") or key in row["unit_ids"]))
+            doc = write_video(project, cli, state, doc, item, node_id, context,
+                              create=create_video, references_only=references_only)
+        else:
+            before = fingerprint(doc, node_id)
+            doc = set_name(project, cli, state, doc, node_id, item["name"])
         context["doc"] = doc
         if item["kind"] in ("role", "scene"):
             field = "appearanceName" if item["kind"] == "role" else "sceneViewName"
@@ -939,7 +1281,7 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
                                      {"nodeId": node_id, "assetId": node_id, "field": field, "value": ""},
                                      [{"action": "field", "node_id": node_id, "value": ""}])
                 context["doc"] = doc
-        if "prompt" in item and (prompt_of(doc, node_id) != item["prompt"]
+        if item["kind"] != "video" and "prompt" in item and (prompt_of(doc, node_id) != item["prompt"]
                                  or not prompt_references_satisfied(doc, node_id, item["prompt"])):
             try:
                 doc = repair_role_reference_rows(project, cli, state, doc, node_id, item["prompt"])
@@ -955,25 +1297,23 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
                 state["pending_units"] = list(dict.fromkeys([*state["pending_units"], key]))
                 save(project, state)
                 continue
-        if item.get("settings"):
-            generation = copy.deepcopy(content(doc, node_id).get("generation") or {})
-            if any(generation.get(k) != v for k, v in item["settings"].items()):
-                generation.update(item["settings"])
-                patch = {"generation": generation}
-                doc = write_verified(project, cli, state, "update_node_data", {"id": node_id, "patch": patch},
-                                     [{"action": "patch", "node_id": node_id, "patch": patch}])
-                context["doc"] = doc
         updated += fingerprint(doc, node_id) != before
         mapping = state["mappings"][key]
-        mapping.update(stage="ready", name=item["name"])
+        mapping["stage"] = "ready"
+        mapping.pop("initialization_fingerprint", None)
+        mapping.pop("video_initialization_baseline", None)
+        if not references_only:
+            mapping["name"] = item["name"]
+            if item["kind"] == "video":
+                mapping["video_names"] = {field: item["name"] for field in ("name", "caption", "title")}
         if item["kind"] in ("role", "scene"):
             mapping["appearance_name"] = ""
         if "prompt" in item:
             text_verified = prompt_of(doc, node_id) == item["prompt"]
             d.require(text_verified, "提示词文字回读尚未通过，不能标记同步完成")
             references_verified = prompt_references_satisfied(doc, node_id, item["prompt"])
-            unit_pending = [row for row in pending if row["key"] in item["reference_keys"]]
-            unresolved = any(row.get("reason") != "missing_image" for row in unit_pending)
+            unit_pending = [row for row in pending if row["key"] in item["reference_keys"] and (not row.get("unit_ids") or key in row["unit_ids"])]
+            unresolved = any(row.get("reason") not in ("missing_image", "missing_video") for row in unit_pending)
             references_verified = references_verified and not unresolved
             mapping.update(prompt_hash=digest(item["prompt"]), version=item["version"],
                            references_requested=item["references_bound"],
@@ -1004,7 +1344,8 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
         save(project, state)
     return {"status": "partial" if context["failures"] else "synced", "created": created, "updated": updated, "reused": reused,
             "pending_references": pending, "unbound_units": unbound, "skipped": skipped, "binding": state["binding"],
-            "failures": context["failures"], "asset_reconciliation": asset_summary}
+            "failures": context["failures"], "asset_reconciliation": asset_summary,
+            "video_write_receipts": context.get("video_write_receipts", [])}
 
 
 def initial_data(item):
@@ -1143,6 +1484,10 @@ def manage(project, cli, action, request, preview=False):
             state["mappings"] = {k: m for k, m in state["mappings"].items() if m["node_id"] != node_id}
             if state.get("black_node_id") == node_id:
                 state.pop("black_node_id")
+                state.pop("black_node_kind", None)
+                state.pop("black_video_preparation", None)
+            if state.get("legacy_black_node_id") == node_id:
+                state.pop("legacy_black_node_id", None)
         else:
             for field, value in request["changes"].items():
                 if field == "name":
@@ -1249,9 +1594,12 @@ def main():
                 state, doc = connected(args.project, cli)
                 if args.command == "black":
                     reconcile(args.project, cli, state, doc)
-                    d.require(args.node_id in nodes(doc) and kind_of(nodes(doc)[args.node_id]) == "image", "黑幕须指定现有图片节点ID")
-                    d.require(ready_image(doc, args.node_id), "黑幕节点尚无图片")
+                    d.require(args.node_id in nodes(doc) and kind_of(nodes(doc)[args.node_id]) == "video", "黑幕须指定现有视频节点ID")
+                    d.require(name_of(doc, args.node_id) == "黑幕", "黑幕视频节点完整名称须为黑幕")
+                    preserve_legacy_black_bindings(state, doc)
                     state["black_node_id"] = args.node_id
+                    state["black_node_kind"] = "video"
+                    state["black_video_preparation"] = {"node_id": args.node_id, "stage": "ready"}
                     save(args.project, state)
                     result = {"status": "black_bound", "node_id": args.node_id}
                 else:
@@ -1261,7 +1609,7 @@ def main():
                               "unfinished_uploads": [{"file_hash": sha, **entry} for sha, entry in state.get("uploads", {}).items()
                                                      if entry.get("status") != "ready"],
                               "unconfirmed_operations": [{"id": e["id"], "command": e["command"], "status": e["status"]}
-                                                         for e in state["journal"] if e["status"] in ("pending", "uncertain")],
+                                                         for e in state["journal"] if e["status"] in ("pending", "uncertain", "acknowledged")],
                               "nodes": [{"id": i, "kind": kind_of(n), "name": name_of(doc, i), "fingerprint": fingerprint(doc, i)} for i, n in nodes(doc).items()]}
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (ValueError, OSError, KeyError, TypeError) as exc:

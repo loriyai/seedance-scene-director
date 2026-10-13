@@ -1,6 +1,6 @@
 ---
 name: screenplay-standardizer
-description: 将非标准中文剧本整理成统一影视剧本 TXT，并基于原文明示信息交付可索引的资产台账 JSON 与分类视觉描述 TXT。适用于剧本格式转换和场景、人物、主要道具资产分析，不用于剧情改写、续写或生图。
+description: 将非标准中文剧本整理成统一影视剧本 TXT，交付可索引资产台账及分类视觉描述；区分原文事实与制作设计，编译可用于GPT-image-2的资产图片提示词，不改写剧情或调用生图。
 ---
 
 # 剧本标准格式与资产台账
@@ -19,14 +19,16 @@ description: 将非标准中文剧本整理成统一影视剧本 TXT，并基于
 
 完成并核对标准剧本后，按 [资产台账结构](references/asset-ledger.md) 建立 UTF-8 JSON。资产包括逐场记录scenes、物理地点locations、可复用布景scene_assets、人物和主要道具；后台稳定 ID 与剧本中的可变场景序号分开。已有台账时沿用 ID，不因改名、插场或排序而重编号，不复用已废弃的 ID。用关联 ID 记录人物、地点、道具在各场的出现关系。
 
-- **原文是事实依据**；标准剧本只用于定位场景和确定人物名称。每条视觉、性格及其他资产事实都带原文段落编号与原文证据。visual_facts/personality_facts只记录原文明示的内容；不从行为、台词语气或格式默认值推断稳定属性。合理服装制作推定单列production_design，注明“制作设计”、场景依据及启用时点，不伪装原文事实。未知项留空，不填造型或风格占位词。标准剧本中的 `基础形象`、未有夜晚线索时默认的 `日`，都不是资产事实。
+- **原文是事实依据**；标准剧本只用于定位场景和确定人物名称。每条视觉、性格及其他资产事实都带原文段落编号与原文证据。visual_facts/personality_facts只记录原文明示的内容；不从行为、台词语气或格式默认值推断稳定属性，未知事实留空。新制作设计独立存visual_design，注明“制作设计”、设计依据和原文约束审阅；允许结合剧本时代、身份、关系和行动需求补足可拍外观，不伪装原文事实，不新增剧情、能力或线索。旧production_design数组保持兼容。标准剧本中的 `基础形象`、未有夜晚线索时默认的 `日`，都不是资产事实。
 - 每场记录 `time_basis`：原文明确写出日夜时填 `原文明示` 与对应原文段落；按格式规则默认写 `日` 时填 `格式默认`，不附原文证据。此字段只说明标题日夜字样的依据，不添加新视觉事实。
 - 人物name是唯一制作名称；source_entry逐字对应人物行完整条目，未填时兼容以name匹配。源条目不因制作命名调整而改正文；同名源条目可在不同场映射到不同世次/形象CHAR。原说话人不变，必要时以source_speaker登记人物行中的准确声源名。身份、世次/当前身份与视觉版本分开，参见[形象启用规则](references/asset-ledger.md#命名预检与形象启用)。
 - 剧情场次scenes的 `heading` 与标准剧本场景标题逐字一致；场景视觉资产独立存入scene_assets，以SET ID及name关联节点和图片，不能逐场新建布景；地点主名称取其关联场景标题中的地点字样，其他确认为同一地点的标题字样放入别名。主要道具source_name取正文原词，name作为制作名称可含必要版本限定；别称放aliases。同原词且没有明确升级/变形/外形变化的道具默认复用一个视觉资产，不因地点或持有人改变拆图。数量、实体身份与持有关系记录在prop_occurrences，不因共用图片合并叙事实体。`render` 在生成 TXT 前检查这些名称及逐场关联。
+- 新台账采用asset_policy="visible-reuse-v1"。主要道具同时满足至少2次独立可见使用及确需保持外观一致；每次登记scene_id、event_id、连续原文evidence/source_paragraphs，并说明consistency_reason。对白提及、同一动作中的多个词、一次事件的不同切镜不累计次数。桌床等固定家具归SET；普通锅碗瓢盆、日用品、临时物件排除；日用品成为特殊信物等时说明special_features，但仍须2次独立可见使用。主要道具可为空，不设数量下限或每集硬上限。程序验证声明、证据和独立定位，使用是否实际可见、是否属于特殊物件仍由作者审阅。旧无policy台账不自动筛除或删除资产。
 - 人物记录原文明示的外貌、服装、造型、明显年龄及**性格特点**。瞬时情绪、动作和伤势不自动成为性格或固定外观。人物自述或他人评价可记录，但注明说话人，不当作旁白确认的客观事实。
 - 地点记录原文明示且各布景版本共用的空间布局、固定陈设、材质和其他可见特征；道具记录原文明示的外形、颜色、材质、相对大小、标记及状态变化。场景中的天气、光线、临时布置等放在逐场事实，不擅自变成地点的永久属性。服装优先作为人物外观，不因出现服装名就自动建道具。decor与temporal分类描述继承同LOC及基础SET中的共用固定元素；temporal的parent只记录版本承接，不把上一版婚堂、废墟等非共性状态自动继承。原文明确被移除或改变的元素不留在共用字段，须放入实际适用的布景版本并人工核对。脚本不从中文描述推断删除或覆盖。
 - 同一地点已在较早时间层出场，剧本明示较大的时间跨度（如“3年后”“十年后”）且未明示仍是原样时，保持LOC身份，新增`variant=temporal`的SET，制作名为“地点-时间跨度”，如“陈家老宅-十年后”。较大跨度由原文及相邻上下文审阅确认，不设统一年数门槛，不把对白中的“十年前”误认成叙事跳时。按[时间层元数据](references/asset-ledger.md#时间层与原样复用)登记来源与每场实际所属层，再运行build-scenes；新地点首次出场只建base。同层同地复用；明示原样时明确复用原始版还是上一次版本。跳时本身不能证明破败、装修或陈设变化，未知视觉事实留空。旧映射/绑定与新层不一致时须审核迁移，不能静默重绑。
-- 本阶段不生成图片、画风设定或生图提示词。资产 TXT 必须由同一份 JSON 渲染，不手工维护第二套事实。TXT 只含“角色列表、场景列表、主要道具列表”三类中文视觉描述；角色列表以JSON中唯一的完整制作资产名作标签，写核心可见特征，每个角色描述下另起一行 `出现的场景：场景1，场景3。`，从各场character_ids按该角色ID反查，按场景号排序去重，不同形象分别统计，包含仅OS/画外音等发声的场景；场景按scene_assets的name列可复用布景和版本及其有证据的固定元素，下另起“使用的场次：场景1，场景3。”；日夜、天气和临时光照不混入基础布景描述，道具写核心可见特征。后台ID、段落与证据保留在JSON，不写入TXT；制作推定另起“制作设计：”行，与原文特征分开。
+- 美术设计按[资产图片设计规范](../../references/asset-image-design.md)及[JSON设计结构](references/asset-ledger.md#制作设计与图片提示词)执行。生成者审阅事实、写人物/SET/PROP完整设计JSON，复用项目原样保存的单行style-file，运行design确定性编译image_prompt和image_format，不调用生图模型。人物固定16:9白底：最左1/3超大正面面部特写占满宽度并贯穿画面高度、平视前方；右2/3正面/90度侧面/背面完整全身等高并排。相同结构化身份与世次共享identity_anchor_id，换装保留身份，已有真实变化按明确版本差异覆盖；不同身体/世次分别设计，不靠名字猜测。
+- 资产TXT必须由同一份JSON渲染。仅三个分类标题，各类各自从01起按台账顺序编号，如 `01 - 陈默-第一世-基础形象：完整image_prompt`；序号只用于查看统计，不进入name、ID、图片文件名或节点名。design后的条目主行直接显示完整image_prompt，下一行人物写 `出现的场景：场景1，场景3。`，SET及PROP写 `使用的场次：场景1，场景3。`，按关联ID反查场景号并排序去重。旧未design台账继续显示原文特征和旧制作设计，不自动补外观；新制作不能仅以“外观未明示”作为生图交付。出处、原文事实和独立制作设计完整留JSON。
 
 ## 可复用流程
 
@@ -34,7 +36,7 @@ description: 将非标准中文剧本整理成统一影视剧本 TXT，并基于
 2. 在任务工作目录的 `scenes/` 下逐场保存 UTF-8 中间稿，文件名为 `scene_001_0001-0049.txt`：前一组数字是场景号，后两组是该场覆盖的原文段落编号，端点均包含在内。场景切分可依据明确转场及实际地点变化调整；各场编号范围必须连续、无重叠。每场处理完即保存，出错时只重做该场。
 3. 对逐场稿运行 [scripts/screenplay_review.py](scripts/screenplay_review.py)，按 [逐场复核与确认格式](references/review.md) 处理报告。每段原文须对应成稿行，或明确标记为纯格式提示；复核引号及无引号台词的文字、人物行和说话人。漏文、额外文字和文字差异须修改逐场稿；上下文仍无法唯一判断说话人时，记录带原文片段、上下文、成稿台词的人工确认。报告必须为 `passed`。改稿重跑时可复用未变化场景的检查结果，变化或确认失效的场景重新检查。
 4. 用同一脚本的 `assemble --review-report` 合并。命令会核对报告与当前原文、逐场稿的摘要和未处理项；文件改动后旧报告不能用于合并。再人工复核补标点、人物行及语义；发现问题时修正对应中间稿，重新运行复核和合并。
-5. 从已核对的剧本和 `source.json` 建立资产台账。先统一人物、地点、道具的身份与别名，建立世次/形象启用表，再填写原文事实、独立制作设计及逐场关联。核实并合并相同物理地点的LOC，填写identity_status=confirmed及identity_basis；审阅明确的大跨度跳时及原样复用，登记temporal_layers、各SC的temporal_layer_id和必要的set_reuse。运行asset_ledger.py build-scenes --source建立每个LOC唯一的基础SET及适用的temporal版本。日夜/天气/光照变化只保留在SC及分镜，不增加布景；明示真实布景变化可建立有证据的少量decor版本或填写当前temporal版本事实，并指定适用SC。对新未绑定台账运行asset_ledger.py normalize，完成群像地点命名、同名道具复用和全局唯一名称预检，保存redirects与合并档案；旧绑定/节点不自动迁移。然后使用 [scripts/asset_ledger.py](scripts/asset_ledger.py) 验证JSON 与人物行、场景标题、道具正文用词及原文证据的对应关系，并从 JSON 生成分类视觉描述 TXT；语义上是否确属原文明示仍须人工核对。
+5. 从已核对的剧本和source.json建立台账。统一人物、地点、道具身份与别名，登记世次/形象启用、原文事实及逐场关联；对主要道具按新双门槛审阅并记录证据。核实LOC、时间层与原样复用，运行build-scenes；对新未绑定台账normalize完成命名及复用，保留redirects和合并档案。再按美术规范写完整设计JSON，使用项目已保存的style-file运行design，输出新台账和分类TXT；验证名称、事实、设计摘要、图片提示词及版式一致。脚本不设计外观、不调用模型，原文语义、设计是否尊重事实及审美质量由生成者核对。
 6. 改稿时保留旧 `source.json`、旧 JSON 台账和新稿工作目录，运行 [scripts/asset_migrate.py](scripts/asset_migrate.py)。原文完全一致且唯一对应的场景自动沿用 ID；改写、拆场、并场或删场须填写新旧场景对应，拆并时指定哪个新场沿用哪个旧 `SC` ID。迁移只自动保留可唯一定位的证据；人物改名显式映射，暂时未出现的人物留在 `inactive_assets` 待核，不自动废弃 ID。地点标题改名不自动作为旧地点别名。逐项处理 `pending_reviews` 和 `inactive_assets` 后才生成资产 TXT；不得静默丢失事实或重用废弃 ID。详见 [改稿迁移](references/asset-ledger.md#改稿迁移)。
 
 ```text
@@ -44,6 +46,7 @@ python scripts/screenplay_io.py assemble <task-work-dir> --review-report <review
 python scripts/asset_ledger.py init <standard-script.txt> <task-work-dir> --output <asset-ledger.json>
 python scripts/asset_ledger.py build-scenes <identity-and-time-reviewed-ledger.json> --source <task-work-dir>/source.json --output <sets-draft.json>
 python scripts/asset_ledger.py normalize <unbound-ledger.json> --output <normalized-ledger.json> --report <name-audit.json>
+python scripts/asset_ledger.py design <standard-script.txt> <task-work-dir>/source.json <normalized-ledger.json> <asset-design.json> --style-file <project>/video-style.txt --output <designed-ledger.json> --catalog-output <asset-catalog.txt>
 python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/source.json <asset-ledger.json> --output <asset-catalog.txt>
 python scripts/asset_migrate.py <old-ledger.json> <old-source.json> <new-script.txt> <new-workdir> --output <migrated-draft.json> --report <migration-report.json> [--mapping <mapping.json>]
 ```

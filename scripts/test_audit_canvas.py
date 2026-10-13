@@ -110,7 +110,8 @@ class CanvasAuditChecks(unittest.TestCase):
     def sync(self, ids=('V1',), decisions=None):
         def render(session, unit, reference_text=None):
             return reference_text(unit['test_prompt']) if reference_text else unit['test_prompt']
-        with patch.object(c.d, 'load', return_value=self.session), patch.object(c.d, 'render_unit', side_effect=render):
+        with patch.object(c.d, 'load', return_value=self.session), patch.object(c.d, 'render_unit', side_effect=render), \
+             patch.object(c.media, 'model_settings', side_effect=AssertionError('Reference refresh must not look up video models')):
             return c.sync(self.project, self.cli, 'videos', ids=list(ids), decisions=decisions,
                           bind_references=True, existing_only=True, references_only=True)
 
@@ -130,9 +131,22 @@ class CanvasAuditChecks(unittest.TestCase):
         self.assertEqual(pending, [])
         self.assertEqual(wanted[0]['key'], '场景3-分镜12')
         self.assertEqual(wanted[0]['name'], '场景3-分镜12')
-        created = c.initial_data(wanted[0])
-        self.assertEqual({key: created[key] for key in ('name', 'caption', 'title')},
-                         dict.fromkeys(('name', 'caption', 'title'), '场景3-分镜12'))
+        self.assertEqual(wanted[0]['duration'], 27)
+        self.assertEqual(wanted[0]['prompt'], '完整提示词')
+
+    def test_reference_only_refresh_preserves_metadata_duration_and_platform_defaults(self):
+        data = c.content(self.cli.doc, 'V1')
+        data.update(title='Manual title', caption='Manual caption')
+        data['generation'].update(modelKey='platform-default-v7', resolution='1080p',
+                                  durationMs=17000, parameters={'strength': .6})
+        metadata = {key: data[key] for key in ('name', 'title', 'caption')}
+        generation = {key: copy.deepcopy(value) for key, value in data['generation'].items()
+                      if key not in ('prompt', 'references')}
+        self.assertEqual(self.sync()['status'], 'synced')
+        self.assertEqual({key: data[key] for key in metadata}, metadata)
+        self.assertEqual({key: value for key, value in data['generation'].items()
+                          if key not in ('prompt', 'references')}, generation)
+        self.assertEqual([command for command, _ in self.cli.writes], ['xyq.generation.update_prompt'])
 
     def test_photography_fields_include_assets_in_reference_requirements(self):
         self.session['ledger']['props'].append({'id': 'P2', 'name': 'Lamp'})

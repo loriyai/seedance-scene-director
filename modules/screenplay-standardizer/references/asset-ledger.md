@@ -6,6 +6,7 @@
 python scripts/asset_ledger.py init <standard-script.txt> <task-work-dir> --output <asset-ledger.json>
 python scripts/asset_ledger.py build-scenes <identity-and-time-reviewed-ledger.json> --source <task-work-dir>/source.json --output <sets-draft.json>
 python scripts/asset_ledger.py normalize <new-unbound-ledger.json> --output <normalized-ledger.json> --report <naming-audit.json>
+python scripts/asset_ledger.py design <standard-script.txt> <task-work-dir>/source.json <normalized-ledger.json> <asset-design.json> --style-file <project>/video-style.txt --output <designed-ledger.json> --catalog-output <asset-catalog.txt>
 python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/source.json <asset-ledger.json> --output <asset-catalog.txt>
 ```
 
@@ -14,6 +15,7 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
 ```json
 {
   "schema_version": 3,
+  "asset_policy": "visible-reuse-v1",
   "source_digest": "由 init 计算的原文段落摘要",
   "scenes": [
     {
@@ -44,9 +46,7 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
   "scene_assets": [
     {"id": "SET0001", "name": "昏暗房间", "location_id": "LOC0001", "variant": "base", "parent_id": null, "visual_facts": []}
   ],
-  "props": [
-    {"id": "PROP0001", "name": "枪", "aliases": [], "visual_facts": []}
-  ],
+  "props": [],
   "retired_ids": [],
   "inactive_assets": {"characters": []},
   "pending_reviews": []
@@ -77,13 +77,57 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
 
 可记录的明示视觉信息包括：人物外貌、明显年龄、发型、衣着及配饰；地点布局、固定陈设、可见材质；道具形状、颜色、材质、相对大小、标记与状态。逐场临时的天气、光线放在 `scenes[].visual_facts`；固定布局与陈设放在locations，真实布景变化以有证据的decor版本记录。未知信息留空。`基础形象`、默认的 `日`、自动生成的 ID 和未出现的生图风格都不是原文事实。
 
-道具只收录对剧情、人物动作或视觉识别有作用的主要物件。相同source_name且无明确视觉变化默认复用一个PROP图片资产，不因地点/持有人变化另建；不同原词仅在确认别名后归并，不用近义词盲合。物理上是否同一件由prop_occurrences独立保存，未知不冒认同一实体；服装通常作为人物视觉事实，不自动建为道具。
+新init默认asset_policy="visible-reuse-v1"；旧台账缺少该字段仍按原规则读取，未经显式审阅不迁移或删除旧PROP。新主要道具必须有至少2次独立可见使用，并且确需固定形制以避免前后不一致。词频、对白提及和同一事件的多个镜头不累计；普通桌床等固定家具归SET，普通日用品和一次性小物件不提取，props可为空。相同source_name且无明确视觉变化默认复用一个PROP图片资产，不因地点/持有人变化另建。物理实体由prop_occurrences独立保存，不因共用图片冒认同一件。
+
+```json
+{
+  "id": "PROP0001",
+  "name": "青铜令牌",
+  "source_name": "青铜令牌",
+  "aliases": [],
+  "visual_facts": [],
+  "extraction_review": {"kind": "special_reusable", "consistency_reason": "先后取出和再次收起时轮廓与细节需匹配"},
+  "visible_uses": [
+    {"scene_id": "SC0001", "event_id": "取出并放桌", "evidence": "取出一枚青铜令牌，放到桌上", "source_paragraphs": [1]},
+    {"scene_id": "SC0002", "event_id": "再次拿起收怀", "evidence": "再次拿起青铜令牌，收入怀中", "source_paragraphs": [2]}
+  ]
+}
+```
+
+event_id是同场独立可见事件标识，不是镜头号。每条evidence须唯一定位关联场内连续原文段落；同(scene_id,event_id)不重复，证据范围不重叠，至少两条。source_paragraphs连续、按顺序且无重复。程序不做关键词计数，不自动发现事件，也不能理解使用是否可见；作者逐条核实。extraction_review.kind只能为special_reusable；普通日用品、家具、穿戴、临时物件均不成立。手机、水杯等日用品成为特殊信物时另填special_features说明可辨形制，但仍须2次独立可见使用。程序对明确桌床等名称做辅助拒绝，对部分日用品要求特殊说明，不能覆盖中文全部语义，不能通过改kind、改名或泛泛理由绕过审阅。
+
+## 制作设计与图片提示词
+
+原文visual_facts和personality_facts保持事实及出处，未知事实仍留空；完整美术方案另存visual_design，不写回事实字段。生成者结合剧本约束和[资产图片设计规范](../../../references/asset-image-design.md)写设计JSON，脚本只校验并编译，不设计外观、不调用生图模型、不改变ID/名称/形象启用。design只接受已核实schema 3台账，旧schema 2须按原显式迁移流程处理；旧schema 3可在用户授权后显式执行design，新政策字段不自动添加。normalize先于design执行。
+
+输入design JSON必须覆盖全部现用CHAR、SET、PROP；即使某基础SET只供版本继承也须设计。设计数组不增加或删除资产。每项attribution固定“制作设计”，basis记简短设计依据，reviewed_source_facts=true表示作者已审阅所有原文明示约束，不代表程序能理解或自动修正语义冲突。
+
+```json
+{
+  "identity_anchors": [
+    {"id": "陈默-第一世", "age": "二十余岁成年男性", "body": "修长结实，比例自然", "face": "眉眼舒展，五官清晰，保留自然皮肤纹理", "hair": "乌黑长发束起"}
+  ],
+  "designs": [
+    {"asset_id": "CHAR0001", "attribution": "制作设计", "basis": "沿用明示灰色布衣，补足适合古装短剧的外貌", "reviewed_source_facts": true, "identity_anchor_id": "陈默-第一世", "styling": "灰色粗布交领衣，深灰布腰带和布鞋，无额外首饰"},
+    {"asset_id": "SET0001", "attribution": "制作设计", "basis": "陈府室内及放桌动作需要稳定空间", "reviewed_source_facts": true, "space": "入口正对后墙，侧窗在右，长桌与入口间留出通道", "materials_palette": "木构、米色墙面、暗棕家具", "furnishings": "侧窗下长桌，后墙旁两把椅子", "lighting": "窗侧柔和日光，暗部保留木纹"},
+    {"asset_id": "PROP0001", "attribution": "制作设计", "basis": "两次使用的令牌需稳定外形，不新增未知铭文", "reviewed_source_facts": true, "structure": "圆角长方形，顶端小孔，简洁凸边", "materials_palette": "青铜主体，轻微自然氧化", "scale": "可单手握持，孔与主体比例合理", "state": "完整未损，正常使用磨痕"}
+  ]
+}
+```
+
+所有视觉文字字段为非空单行。identity_anchors记录共享的年龄与性别感、体型、五官、发型，不填无关背景故事。已登记appearance.identity与incarnation相同的CHAR共享identity_anchor_id，不同世次或身份的身体不得共享；没有appearance的简单或旧人物由作者审阅，不从名字拆分猜身份。已有换装版本只改styling，面部和体型继承同一锚点。已有真实发型等变化可选appearance_overrides对象（age/body/face/hair）及variant_differences文字数组，逐项写明确差异与保持项；这不会创建新CHAR，也不能代替原形象启用规则。覆盖face/body还必须在override_source_facts对象中以相应字段映射到该资产已有、经验证的visual_facts.text，例如face对应明确疤痕事实；程序只检查引用存在，是否证明该变化仍须审阅。跨世次不以覆盖方式借用旧身体锚点。
+
+SET的space必须写主要活动区、出入口和固定相对关系；materials_palette/furnishings/lighting提供可拍材质、陈设与基础受光。普通家具进入SET，单幅无人物主视图；父SET共用事实继承规则保持原规定，不把temporal时间跨度推成自动破败。PROP的structure/materials_palette/scale/state只描写物件本体，不编造未知密码、铭文或剧情线索；单件完整、纯净白底、不夹手部或剧情环境。
+
+style-file使用项目原样保存的单行video-style.txt；只去除文件首尾空白，不折叠内部空格、不重新翻译或缩写。编译后顶层新增image_design_version="gpt-image-2-v1"、visual_style={text,digest}、identity_anchors。每个现用资产新增visual_design、image_prompt、image_format、image_design_digest；visual_design中自动记录source_fact_digest及source_context_digest。角色image_format固定model="gpt-image-2"、aspect_ratio="16:9"、background="pure_white"、layout="left_1/3_large_front_face_right_2/3_front_side90_back_full_body"。最左面部特写占满1/3宽并贯穿高度，右2/3正面、90度侧面、背面完整全身等高并排。SET和PROP记录单幅主视图/完整单品版式，不伪造模型API参数或已生成图片。
+
+编译将原文明示可见特征作为优先约束，结合既定风格、已写设计和分类构图，不把审计出处或“无外观事实”等说明塞入生图提示词。render再次确定性编译并核对保存的提示词、版式、设计摘要、事实完整证据及场次映射摘要。source_context_digest同时包含台账顶层source_digest：制作设计可能依赖全剧上下文，因此任意原文版本变更均保守地要求重新审阅设计，即使heading、range、visual_facts保持不变也不能沿用旧提示词。改原文、事实、证据、适用映射、设计或审阅依据、名称、风格后须审阅并显式重新design，不能只手改image_prompt；改稿迁移保留旧设计并登记制作设计待复核。旧无设计台账不受此检查影响。设计命令输出不同的新文件，不覆盖旧台账或旧TXT。重新design可读取旧设计台账，按当前事实结构核实后重编译全部完整方案。
 
 ## 核对
 
 `render` 检查：原文摘要、场景与段落范围、ID 引用、每场人物source_entry（缺省name）与人物行完整条目逐项、逐字、按顺序匹配、场景标题及地点名称与剧本一致、道具source_name和别名在关联正文中出现、全目录制作名称唯一及安全、形象启用区间、资产事实的场景出现关系、证据在原文段落中出现。`pending_reviews` 或 `inactive_assets.characters` 未处理完时不能渲染。它无法判断摘要是否正确表达证据，也无法证明“性格”是否真的被原文明确写出；这些仍需人工逐条核对。
 
-生成的 TXT 只保留三个标题及其列表：`角色列表`、`场景列表`、`主要道具列表`。角色以完整人物资产 `name` 为标签，列核心可见特征，其下另起一行 `出现的场景：场景1，场景3。`。该行由scenes[].character_ids反查角色ID，场景号取number，排序去重，不同形象分别统计；仅发声的OS/画外音角色也计入。场景按scene_assets的name逐项列固定元素、真实布景版本及审阅确认的时间版本，其下另起“使用的场次：场景1，场景3。”，按scene_asset_id反查并排序；不逐场重复列布景，不混入临时日夜、天气及光照；主要道具列核心可见特征。没有明示信息时写“未明示”，不从 `基础形象`、跳时标签或格式默认时间补造。合理服装制作推定另起“制作设计：”行，不与原文特征混写。TXT不展示后台ID、出处段落、证据原句、别名表、其他逐场索引或性格栏；完整信息仍由 JSON 保存。
+生成TXT只保留角色列表、场景列表、主要道具列表，各分类从01开始按台账数组顺序编号，超过99自然显示100，不截断。序号只用于查看统计，不写入稳定ID、name、图片名或节点名。完成design时主行为 `01 - 完整资产名：完整image_prompt`，下一行角色写出现的场景、SET/PROP写使用的场次，关联ID反查number后排序去重。旧未design台账仍显示原文核心可见特征，缺信息时保留“未明示”和旧独立production_design行，不静默补设计；新制作须先design，完整图片描述直接可用。TXT不显示后台ID、证据或性格栏；原文事实、出处、完整制作设计与格式元数据同存JSON，不能手工维护第二份提示词。
 
 ## 改稿迁移
 
@@ -190,7 +234,7 @@ SET通过temporal_layer_id关联时间来源、parent_id关联之前同LOC使用
 - 角色身份、世次/当前身份、视觉版本三层分开，参考“陈默-第一世-基础形象”“陈默-第二世-林默-基础形象”“陈默-第二世-林默-富家日常形象”。同世次换装保持面部身份；不同世次身体不能只因旁白仍称陈默而复用旧身体。
 - “第二世即将重开”、结算、加点仍用上一世形象；实际重生进入新家庭才启用新世次。发财、获知富家身份或刚到富家认亲不自动换衣；实际换装/洗漱、合理时间跳跃或稳定的新生活阶段才启用新造型。可提前登记候选，但不提前挂到场景character_ids。
 - 涉及重生/换装的CHAR登记appearance对象：identity、incarnation、variant、active_from、可选active_until（均为SC）、trigger、basis。trigger只能为source_appearance/rebirth/change_clothes/time_jump；basis须为启用场原文连续短句。active_until为包含该场的末场。生成者核实“即将”与“已经”的语义，程序只检查时段、枚举和出处，不能理解剧情。
-- 合理服装推定放production_design数组，沿用事实记录的text/evidence/source_paragraphs/scene_ids结构，但attribution固定“制作设计”。evidence说明合理场景依据，不声称原文写了推定服装。不随意补固定面容、颜色、首饰、能力。原文明示服装仍进visual_facts。
+- 旧合理服装推定的production_design数组保持兼容，沿用原证据结构且attribution固定“制作设计”，不冒充原文明示。新完整视觉设计放visual_design，按显式设计流程补足必要面容、配色与妆造；不得新增能力、秘密、剧情线索。原文明示服装仍进visual_facts。
 - normalize只用于新未绑定台账，写不同的新文件及报告，不改输入；合并保留首个稳定ID，将旧ID记retired_ids，报告保存redirects及完整被合并记录，重指SC和实体记录。不迁移旧session、图片或节点。明确视觉版本须在运行前登记，不能依靠程序判断两条事实是否冲突。
 - render及bind全量检查名称唯一、ID、原词映射、启用区间、证据及关联，资产传输前仍检查全部目标。分镜只检查本范围；旧项目无关范围问题不阻止本地有效输出，全量云端操作不能绕过重名。
 - 显示名独立调整不改source/逐场稿，不重跑剧情复核；只重跑台账/映射预检。事实、形象启用或正文改变时按影响范围复核，正文变化可用--previous-report复用未变场。旧交付与画布保留，不静默迁移。
