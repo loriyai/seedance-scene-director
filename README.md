@@ -1,8 +1,10 @@
 # Seedance 场景分镜导演
 
-当前版本：**v0.08**；发布日期：**2026-10-13**。
+当前版本：**v0.09**；更新日期：**2026-10-13**。
 
-v0.08 保存 2026-10-13 本次融合修改前的已安装 Skill，包含完整资产美术设计、分类及分镜展示编号、黑幕视频节点准备及 reference-v3 摄影规则。
+v0.09 在 v0.08 基础上将表演分级、表情弧线、反应过程、台词韵律及镜头方案词库接入阶段4规划、实际TXT渲染和逐单元复核。保留原文保真、动态时长镜数、固定抬头和旧交付格式；摄影与表演按实际内容复核。
+
+同时修复带括号提示的显式对白标签识别，保留原有提示与声源核验；复核版本升级为 review_version 5，避免新复核复用旧算法缓存，已绑定项目与旧分镜保持原版。
 
 将完整中文剧本整理成标准剧本，筛选可复用资产并完成美术设计，输出适用于Gpt-image-2的资产图片提示词，再根据用户指定的剧本范围按场景生成适用于 Seedance 2.5 的分镜提示词。
 
@@ -12,13 +14,13 @@ v0.08 保存 2026-10-13 本次融合修改前的已安装 Skill，包含完整�
 
 需要支持本地Skill的Codex环境，以及Python 3.10或更高版本。核心脚本使用标准库；收到完整剧本时会后台检查当前Python的PyYAML，缺失则直接安装并验证，已有版本不重复安装或升级。小云雀画布操作另需Node.js 16+、npm和官方CLI；首次使用时按需配置并完成浏览器授权。
 
-安装此基线版本时明确选择 `v0.08` 标签：
+安装指定版本 `v0.09`：
 
 ```bash
-git clone --branch v0.08 --single-branch https://github.com/loriyai/seedance-scene-director.git ~/.codex/skills/seedance-scene-director
+git clone --branch v0.09 --single-branch https://github.com/loriyai/seedance-scene-director.git ~/.codex/skills/seedance-scene-director
 ```
 
-也可下载 [v0.08 源码 ZIP](https://github.com/loriyai/seedance-scene-director/archive/refs/tags/v0.08.zip)，解压后将根目录重命名为 `seedance-scene-director`；本地安装包 `seedance-scene-director-v0.08.zip` 已使用该目录名。已有同名安装时，先在 Skills 目录外备份旧文件夹，再完整替换。使用自定义 `CODEX_HOME` 时，安装到对应的 `skills/seedance-scene-director` 目录。切换版本时检查 `VERSION`，每次只安装一个版本。
+也可下载 [v0.09 源码 ZIP](https://github.com/loriyai/seedance-scene-director/archive/refs/tags/v0.09.zip)，解压后将根目录重命名为 `seedance-scene-director`；本地安装包 `seedance-scene-director-v0.09.zip` 已使用该目录名。已有同名安装时，先在 Skills 目录外备份旧文件夹，再完整替换。使用自定义 `CODEX_HOME` 时，安装到对应的 `skills/seedance-scene-director` 目录。切换版本时检查 `VERSION`，每次只安装一个版本。
 
 ## 使用
 
@@ -49,6 +51,8 @@ git clone --branch v0.08 --single-branch https://github.com/loriyai/seedance-sce
 - 29～30 秒默认建议 11 镜，26～28 秒默认建议 9～10 镜；为自然表达可调整至 8～13 镜。不足 26 秒的单元按内容安排镜数。
 - 单镜头为 1～5 秒整数，各镜头时长之和严格等于单元总时长。
 - 按当前情境中的动作作用安排节奏：机械过渡优先短镜、合并或省略非关键中段；情节关键动作保留关键行为与结果；情绪氛围动作保留原文变化与必要停顿，不默认慢演。动作匹配在进行中切出、后镜接续，整组只完成一次；画面压缩不改写标准剧本。
+- 表演按实际可见程度选细节；原文有转折才写触发后的弧线，听者不虚构心理，关键动作按需核对接触、路径和落点。机位与微动词库提供选择，不要求逐镜换角度或堆微动作。
+- 必要声音表现通过dialogue_parts.delivery渲染在原台词引号外；配套中文词库覆盖音量、尾音、发声质感、咬字，语速统一来自audio.speed。没有标注时沿原输出，旧receipt不迁移；声音/表演改变后重新核对时长、口型与连续性。
 - 台词、说话人及发声类型以标准剧本为准。短句完整放一镜；长句按标点和语义分到各镜，每镜写实际台词部分。估时仅存后台，不按时间比例切字，不用抽象续声说明。
 - 景别、主焦点、机位与运镜按本镜剧情看点选择，不设固定景别权重或默认正面/45°机位。新提交逐镜填写后台purpose说明依据；近景/特写数量、相邻与首镜面部限制改为审查提醒，检查重复画面和连续正面脸部镜头（含中近景），不机械凑比例或换角度。
 - 新生成或指定修改使用reference-v3：场景行只列布景资产名、时间与天气，不输出完整heading；其后独立写人物站位。每镜以括号包住主焦点景别与转场，括号外依次填写机位与运镜、构图、景深、光照。旧reference-v1/v2及更早交付保留原版渲染。
@@ -68,6 +72,8 @@ seedance-scene-director/
 ├── agents/openai.yaml               Skill 界面信息
 ├── assets/fixed-header.txt          固定抬头与禁止项
 ├── references/                     分镜、输出及后台接口规则
+│   ├── performance-direction.md     表演、反应、台词导演及词库
+│   └── shot-options.md              机位、参考图适配及运镜词库
 ├── scripts/director.py              范围、时长、对白、版本校验与渲染
 ├── scripts/dialogue_layout.py       完整台词、逐镜自然分句与旧版兼容
 ├── scripts/canvas.py                官方 CLI 画布连接与节点同步
@@ -92,10 +98,12 @@ seedance-scene-director/
 
 运行离线回归自检：
 
+Windows PowerShell 先在当前终端设置 `$env:PYTHONUTF8='1'`，让测试主进程及其子进程使用一致编码；其他平台按当前 UTF-8 环境运行。
+
 ```bash
 python scripts/self_check.py
 python -m unittest discover -s scripts -p "test_*.py"
 node scripts/test_cli_capabilities.js
 ```
 
-自检使用临时虚构剧本与画布mock，不调用真实CLI或网络，覆盖逐镜台词、动态镜数/时长、新旧模板、提交幂等、资产命名复用、实体记录、形象启用及迁移，以及范围数值、声源、逐场证据、输出目录保护、引用验收、删除摘要和人工气口。Node检查用mock验证必要命令探测，不执行CLI安装。内置模块摘要在加载时校验。摄影目的、剧情覆盖和自然表演仍需在生成时复核；画布集成及实际视频效果需在授权使用时另行验证。
+自检使用临时虚构剧本与画布mock，不调用真实CLI或网络，覆盖逐镜台词、可选声音表现及语速唯一来源、动态镜数/时长、新旧模板、提交幂等、资产命名复用、实体记录、形象启用及迁移，以及范围数值、带括号提示的原文台词与声源、逐场证据、输出目录保护、引用验收、删除摘要和人工气口。Node检查用mock验证必要命令探测，不执行CLI安装。内置模块摘要在加载时校验。摄影目的、剧情覆盖和自然表演仍需在生成时复核；画布集成及实际视频效果需在授权使用时另行验证。

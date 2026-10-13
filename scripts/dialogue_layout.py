@@ -5,6 +5,9 @@ POLICY = 'semantic-v2'
 LEGACY_POLICY = 'semantic-v1'
 PUNCTUATION = '，、,。？！?!；;…—～~：:'
 TAILS = set('了呢吧啊呀哦嘛么啦呗哟喽的')
+DELIVERY_FIELDS = (('volume', '音量'), ('ending', '尾音'),
+                   ('texture', '发声质感'), ('articulation', '咬字'))
+SPEED_LABELS = {'常速': '自然语速', '快节奏': '较快语速', '情绪慢速': '放缓语速'}
 
 def require(ok, message):
     if not ok:
@@ -12,6 +15,34 @@ def require(ok, message):
 
 def compact(text):
     return ''.join(c for c in text if c.isalnum())
+
+def validate_delivery(unit, part):
+    """Validate only reliable structure; authors verify emotional/source meaning."""
+    if 'delivery' not in part:
+        return
+    require(unit.get('output_format') == 'reference-v3' and unit.get('dialogue_layout') == POLICY,
+            'delivery仅用于reference-v3与semantic-v2；旧交付不自动补标')
+    value = part['delivery']
+    require(isinstance(value, dict) and bool(value), 'delivery须为非空对象；没有声音表现要求时省略')
+    require(set(value) <= {key for key, _ in DELIVERY_FIELDS},
+            'delivery只允许volume/ending/texture/articulation；语速来自audio.speed，停顿来自audio.pause')
+    for field, cue in value.items():
+        require(isinstance(cue, str) and cue.strip() and re.search(r'[\u4e00-\u9fff]', cue)
+                and not any(c in cue for c in '\r\n@"\'“”‘’（）()[]{}')
+                and compact(cue) not in ('无', '同前', '同上'),
+                f'delivery.{field}须为具体单行中文声音描述，不含引号、括号或资产引用')
+
+def delivery_text(part, event):
+    """Render outside the unchanged quote; pace has one source of truth."""
+    value = part.get('delivery')
+    if not value:
+        return ''
+    cues = []
+    if 'volume' in value:
+        cues.append('音量：' + value['volume'].strip())
+    cues.append('语速：' + SPEED_LABELS[event['speed']])
+    cues.extend(label + '：' + value[key].strip() for key, label in DELIVERY_FIELDS[1:] if key in value)
+    return '（' + '；'.join(cues) + '）'
 
 def pause_seconds(text):
     """Repeated punctuation is a single semantic pause."""
@@ -58,6 +89,7 @@ def validate(unit):
     for i, shot in enumerate(unit['shots']):
         for part in shot.get('dialogue_parts', []):
             require(part.get('record') in events, '台词片段声源不存在')
+            validate_delivery(unit, part)
             grouped[part['record']].append((i, part))
         for link in shot.get('dialogue_continuations', []):
             require(link.get('record') in events and type(link.get('segment')) is int, '续声引用无效')

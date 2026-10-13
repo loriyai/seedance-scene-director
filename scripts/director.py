@@ -794,7 +794,8 @@ def render_unit(state, unit, reference_text=None):
         for part in shot.get("dialogue_parts", []):
             event = next(e for e in unit["audio"] if e["record"] == part["record"])
             timing = dialogue_layout.timing(part, shot, event.get("timing_basis") == "recording") if not current_format and unit.get("dialogue_layout") == dialogue_layout.LEGACY_POLICY else ""
-            parts.append(convert("@" + chars[event["character_id"]] + " ") + event["voice"] + timing + '：“' + part["text"] + '”')
+            delivery = dialogue_layout.delivery_text(part, event) if structured_format else ""
+            parts.append(convert("@" + chars[event["character_id"]] + " ") + event["voice"] + timing + delivery + '：“' + part["text"] + '”')
         for link in shot.get("dialogue_continuations", []):
             event = next(e for e in unit["audio"] if e["record"] == link["record"])
             chunks = [p for s in unit["shots"] for p in s.get("dialogue_parts", []) if p["record"] == link["record"]]

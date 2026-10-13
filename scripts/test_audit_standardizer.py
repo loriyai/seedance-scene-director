@@ -113,6 +113,46 @@ class StandardizerAuditRepairs(unittest.TestCase):
         self.assertEqual(report['status'], 'needs_review')
         self.assertEqual(report['counts']['speaker'], 2)
 
+    def test_explicit_parenthetical_dialogue_preserves_cues_and_speaker(self):
+        for source, body in [
+            ('阿明（低声，语气平静）：我知道。', '阿明(低声，语气平静)：我知道。'),
+            ('阿明 (低声): 我知道。', '阿明（低声）：我知道。'),
+            ('阿明（内心想法）：我知道。', '阿明(OS)：我知道。'),
+            ('阿红（轻声）：「走吧。」', '阿红(轻声)：走吧。'),
+        ]:
+            with self.subTest(source=source):
+                report = self.review_fixture(source, body)
+                self.assertEqual(report['status'], 'passed', report)
+                self.assertEqual(report['counts']['missing'], 0)
+                self.assertEqual(report['counts']['extra'], 0)
+
+    def test_dropping_or_changing_parenthetical_cue_is_still_missing_content(self):
+        for body in ('阿明：我知道。', '阿明(高声)：我知道。', '阿明(低声)：我知道。'):
+            with self.subTest(body=body):
+                report = self.review_fixture('阿明（低声，语气平静）：我知道。', body)
+                self.assertEqual(report['status'], 'needs_review')
+                self.assertEqual(report['counts']['missing'], 1)
+                self.assertIn('括号提示', report['scenes'][0]['coverage_missing'][0]['issue'])
+
+    def test_parenthetical_label_does_not_relax_cast_or_attribution_checks(self):
+        report = self.review_fixture('阿明（低声）：我知道。', '阿红(低声)：我知道。')
+        self.assertEqual(report['status'], 'needs_review')
+        self.assertEqual(report['counts']['speaker'], 1)
+        report = self.review_fixture('阿明看向阿红（低声）：我知道。', '阿红(低声)：我知道。')
+        self.assertEqual(report['status'], 'needs_review')
+        self.assertGreater(report['counts']['missing'], 0)
+        report = self.review_fixture('陌生人（低声）：我知道。', '阿明(低声)：我知道。')
+        self.assertEqual(report['status'], 'needs_review')
+
+    def test_parenthetical_change_invalidates_previous_review(self):
+        report = self.review_fixture('阿明（低声）：我知道。', '阿明(低声)：我知道。')
+        self.assertEqual(report['status'], 'passed')
+        draft = self.work / 'scenes/scene_001_0001-0001.txt'
+        draft.write_text(draft.read_text(encoding='utf-8').replace('(低声)', ''), encoding='utf-8')
+        rechecked = review.make_report(self.work, {}, report)
+        self.assertEqual(rechecked['status'], 'needs_review')
+        self.assertEqual(rechecked['counts']['reused_scenes'], 0)
+
     def test_legacy_cached_wrong_speaker_is_rechecked(self):
         report = self.review_fixture('阿明看向阿红，阿红说「走吧。」',
                                      '△ 阿明看向阿红，阿红说\n阿明：走吧。')

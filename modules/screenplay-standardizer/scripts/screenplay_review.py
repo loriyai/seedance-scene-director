@@ -13,7 +13,7 @@ from asset_ledger import digest, scene_ranges, source_paragraphs, split_cast_ent
 
 SCENE_FILE = re.compile(r"scene_(\d+)_(\d+)-(\d+)\.txt$")
 TRANSITION = re.compile(r"^(?:遮挡转场|转场)\s*")
-REVIEW_VERSION = 4
+REVIEW_VERSION = 5
 
 
 def compact(value):
@@ -56,6 +56,21 @@ def cue_reason(value, names):
     return None
 
 
+def explicit_label(value, names):
+    """Read only a known cast name followed by a bounded cue and speech delimiter."""
+    for name in sorted(names, key=len, reverse=True):
+        match = re.match(re.escape(name) + r"\s*(?:（([^（）]*)）|\(([^()]*)\))?\s*(?:[：:]\s*|(?=「))", value)
+        if match:
+            return {"speaker": name, "cue": match.group(1) or match.group(2) or "",
+                    "text": value[match.end():]}
+    return None
+
+
+def normalized_cue(value):
+    value = compact(value).lower()
+    return "内心想法" if value in ("os", "内心os", "内心想法") else value
+
+
 def draft_parts(path):
     lines = [(i, line.strip()) for i, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1) if line.strip()]
     if len(lines) < 2 or not lines[0][1].startswith("场景") or not lines[1][1].startswith("人物："):
@@ -73,7 +88,9 @@ def draft_parts(path):
             label, value = line.split("：", 1)
             speaker = re.sub(r"[（(][^（）()]*[）)]$", "", label).strip()
             kind = "dialogue"
-            dialogues.append({"line": number, "speaker": speaker, "text": value})
+            cue = re.search(r"[（(]([^（）()]*)[）)]$", label)
+            dialogues.append({"line": number, "speaker": speaker, "text": value,
+                              "cue": cue.group(1) if cue else ""})
         else:
             raise ValueError(f"{path.name}:{number} 正文行无法识别")
         normalized = compact(value)
@@ -108,6 +125,9 @@ def cue_hint(paragraphs, start, paragraph, names):
         value = paragraphs[i - 1].strip()
         if i < paragraph and "」" in value:
             break
+        label = explicit_label(value, ordered)
+        if label and value.count("「") <= 1:
+            return label["speaker"]
         for name in ordered:
             if value.startswith(name):
                 suffix = value[len(name):].strip()
@@ -180,13 +200,9 @@ def check_scene(paragraphs, start, end, path, decisions):
             continue
         candidate = TRANSITION.sub("", value)
         candidate = re.sub(r"^(?:OS|os|画外音)\s*(?=「)", "", candidate)
-        for name in sorted(names, key=len, reverse=True):
-            if candidate.startswith((name + "：", name + ":")):
-                candidate = candidate[len(name) + 1:]
-                break
-            if candidate.startswith(name + "「"):
-                candidate = candidate[len(name):]
-                break
+        source_label = explicit_label(candidate, names)
+        if source_label:
+            candidate = source_label["text"]
         fragment = compact(candidate)
         if not fragment:
             paragraph_map.append({"paragraph": paragraph, "source_text": value, "status": "纯标点", "reason": "仅含标点", "destinations": []})
@@ -207,6 +223,13 @@ def check_scene(paragraphs, start, end, path, decisions):
         finish = found + len(fragment)
         destinations = [{"line": line["line"], "kind": line["kind"]} for line in lines
                         if line["start"] < finish and line["end"] > found]
+        if source_label and source_label["cue"]:
+            target_dialogues = [item for item in dialogues
+                                if any(dest["line"] == item["line"] for dest in destinations)]
+            if (len(target_dialogues) != 1
+                    or normalized_cue(target_dialogues[0]["cue"]) != normalized_cue(source_label["cue"])):
+                missing.append({"paragraph": paragraph, "text": source_label["cue"],
+                                "issue": "原文台词括号提示未在对应台词标签完整保留"})
         paragraph_map.append({"paragraph": paragraph, "source_text": value, "status": "已覆盖", "destinations": destinations})
         cursor = finish
     if cursor < len(flat):
