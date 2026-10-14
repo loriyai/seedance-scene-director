@@ -10,8 +10,10 @@ import json
 import re
 
 
-PROP_POLICY = "visible-reuse-v1"
-GROUP_POLICY = "visible-reuse-v1"
+LEGACY_PROP_POLICY = "visible-reuse-v1"
+PROP_POLICY = "visual-continuity-v2"
+LEGACY_GROUP_POLICY = "visible-reuse-v1"
+GROUP_POLICY = "visual-continuity-v2"
 DESIGN_VERSION = "gpt-image-2-v1"
 ASSET_CATEGORIES = ("characters", "scene_assets", "props")
 FURNITURE = re.compile(r"(?:桌|床|椅|柜|沙发|茶几|凳)(?:子|铺)?$")
@@ -46,7 +48,7 @@ def visual_assets(data, category):
 
 def validate_group_modes(data):
     policy = data.get("group_policy")
-    if policy not in (None, GROUP_POLICY):
+    if policy not in (None, LEGACY_GROUP_POLICY, GROUP_POLICY):
         raise ValueError(f"不支持的群像提取政策：{policy}")
     for category in ASSET_CATEGORIES:
         for item in data.get(category, []):
@@ -67,10 +69,35 @@ def validate_group_modes(data):
             if not data.get("source_digest") or review.get("source_digest") != data.get("source_digest"):
                 raise ValueError(f"{item['id']}群像筛选审阅与原文版本不匹配，须重新审阅")
             nonempty(review.get("identity_basis"), f"{item['id']}无姓名、无独立台词及原文明示身份依据")
+            if policy == GROUP_POLICY:
+                basis = review.get("selection_basis")
+                if basis not in ("reusable", "core_continuity", "prompt_only"):
+                    raise ValueError(f"{item['id']}群像selection_basis须为reusable/core_continuity/prompt_only")
+                required = review.get("requires_reference")
+                if type(required) is not bool:
+                    raise ValueError(f"{item['id']}群像须明确requires_reference布尔值")
+                if mode == "image_asset":
+                    if basis not in ("reusable", "core_continuity") or not required:
+                        raise ValueError(f"{item['id']}群像图片须选择reusable或core_continuity且requires_reference=true")
+                    if basis == "core_continuity":
+                        nonempty(review.get("story_role"), f"{item['id']}原文明示的群像剧情作用")
+                elif basis != "prompt_only" or required:
+                    raise ValueError(f"{item['id']}仅文字群像须选择prompt_only且requires_reference=false")
+                else:
+                    nonempty(review.get("text_sufficiency_reason"), f"{item['id']}群像文字描述足够维持效果的具体理由")
             if mode == "image_asset":
                 nonempty(review.get("consistency_reason"), f"{item['id']}群像外观一致性理由")
             else:
                 nonempty(review.get("exclusion_reason"), f"{item['id']}群像不提取图片的依据")
+
+
+def group_minimum_visible_uses(data, item):
+    if item.get("visual_mode") != "image_asset":
+        return 1
+    if (data.get("group_policy") == GROUP_POLICY
+            and item.get("extraction_review", {}).get("selection_basis") == "core_continuity"):
+        return 1
+    return 2
 
 
 def validate_group_policy(data, paragraphs, fact_validator, script=None):
@@ -88,7 +115,7 @@ def validate_group_policy(data, paragraphs, fact_validator, script=None):
             if any(pattern.search(scene["body_text"]) for scene in script):
                 raise ValueError(f"{item['id']}群像称谓具有独立台词，须按个体人物核实而非背景群像筛选")
         validate_visible_uses(item, paragraphs, scenes, fact_validator, "character_ids",
-                              2 if item["visual_mode"] == "image_asset" else 1, "可见出场")
+                              group_minimum_visible_uses(data, item), "可见出场")
 
 
 def apply_group_review(data, payload):
@@ -107,7 +134,10 @@ def apply_group_review(data, payload):
         records[aid] = record
     if set(records) != set(groups):
         raise ValueError(f"全剧群像审阅须覆盖normalize后全部群像：缺少{sorted(set(groups) - set(records))}")
-    result["group_policy"] = GROUP_POLICY
+    policy = payload.get("group_policy", data.get("group_policy") or LEGACY_GROUP_POLICY)
+    if policy not in (LEGACY_GROUP_POLICY, GROUP_POLICY):
+        raise ValueError(f"不支持的群像提取政策：{policy}")
+    result["group_policy"] = policy
     for aid, item in groups.items():
         item.update({key: copy.deepcopy(value) for key, value in records[aid].items() if key != "character_id"})
     validate_group_modes(result)
@@ -194,28 +224,144 @@ def source_context_digest(data, category, item):
     if "visual_mode" in item:
         record["visual_mode"] = item["visual_mode"]
         record["extraction_review"] = item.get("extraction_review")
+        if is_group(item) and data.get("group_policy") == GROUP_POLICY:
+            record["group_policy"] = GROUP_POLICY
+    if data.get("asset_policy") == PROP_POLICY:
+        record["prop_policy"] = PROP_POLICY
+        record["prop_coverage"] = [candidate for candidate in
+                                   data.get("prop_coverage_review", {}).get("candidates", [])
+                                   if candidate.get("target_id") == item["id"]]
+        if category == "props":
+            record["extraction_review"] = item.get("extraction_review")
     return fingerprint(record)
+
+
+def validate_prop_coverage(data, paragraphs=None, fact_validator=None):
+    """Check an author's reverse audit; do not claim to discover props from prose.
+
+    Without source text this validates completeness, links and review freshness.
+    Ledger validation additionally verifies every quoted source occurrence.
+    """
+    if data.get("asset_policy") != PROP_POLICY:
+        return
+    review = data.get("prop_coverage_review")
+    if not isinstance(review, dict) or review.get("reviewed_full_script") is not True:
+        raise ValueError("道具反向覆盖审阅未完成：须逐场审阅全部原文，空props也不能跳过")
+    if not data.get("source_digest") or review.get("source_digest") != data["source_digest"]:
+        raise ValueError("道具反向覆盖审阅与原文版本不匹配，须重新审阅")
+    scenes = {scene["id"]: scene for scene in data["scenes"]}
+    reviewed = review.get("reviewed_scene_ids")
+    if (not isinstance(reviewed, list) or any(not isinstance(sid, str) for sid in reviewed)
+            or len(reviewed) != len(set(reviewed)) or set(reviewed) != set(scenes)):
+        raise ValueError("道具反向覆盖审阅须声明全部场次且不得重复")
+    candidates = review.get("candidates")
+    if not isinstance(candidates, list):
+        raise ValueError("道具反向覆盖审阅缺少candidates数组")
+    categories = {"asset": {item["id"]: item for item in data["props"]},
+                  "character": {item["id"]: item for item in data["characters"]},
+                  "set": {item["id"]: item for item in data.get("scene_assets", [])}}
+    seen, asset_coverage = set(), {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            raise ValueError("道具候选审阅须为对象")
+        cid = nonempty(candidate.get("candidate_id"), "道具候选稳定candidate_id")
+        if cid in seen:
+            raise ValueError(f"重复道具候选ID：{cid}")
+        seen.add(cid)
+        nonempty(candidate.get("name"), f"{cid}候选名称")
+        aliases = candidate.get("aliases", [])
+        if not isinstance(aliases, list) or any(not isinstance(alias, str) or not alias.strip() for alias in aliases):
+            raise ValueError(f"{cid}候选aliases须为非空文字数组")
+        nonempty(candidate.get("reason"), f"{cid}具体归类理由")
+        sids = candidate.get("scene_ids")
+        if (not isinstance(sids, list) or not sids or any(not isinstance(sid, str) for sid in sids)
+                or len(sids) != len(set(sids)) or any(sid not in scenes for sid in sids)):
+            raise ValueError(f"{cid}候选场次无效")
+        if type(candidate.get("requires_reference")) is not bool:
+            raise ValueError(f"{cid}须明确requires_reference布尔值")
+        disposition, target = candidate.get("disposition"), candidate.get("target_id")
+        if disposition == "prompt_only":
+            if target is not None:
+                raise ValueError(f"{cid}普通描述不能指定资产target_id")
+            if candidate["requires_reference"]:
+                raise ValueError(f"{cid}需要视觉参考的核心物件不能归入prompt_only")
+        elif disposition in categories:
+            if not isinstance(target, str) or target not in categories[disposition]:
+                raise ValueError(f"{cid}归类目标不存在或类型错误")
+            if categories[disposition][target].get("visual_mode") == "prompt_only":
+                raise ValueError(f"{cid}归类目标不具备图片参考")
+            for sid in sids:
+                scene = scenes[sid]
+                linked = (target in scene["prop_ids"] if disposition == "asset" else
+                          target in scene["character_ids"] if disposition == "character" else
+                          target == scene.get("scene_asset_id"))
+                if not linked:
+                    raise ValueError(f"{cid}归类目标未关联候选场次{sid}")
+            if disposition == "asset":
+                if not candidate["requires_reference"]:
+                    raise ValueError(f"{cid}独立道具资产须明确需要视觉参考")
+                asset_coverage.setdefault(target, set()).update(sids)
+        else:
+            raise ValueError(f"{cid}disposition须为asset/character/set/prompt_only")
+        evidence = candidate.get("source_evidence")
+        if not isinstance(evidence, list) or not evidence:
+            raise ValueError(f"{cid}须保存可定位的source_evidence")
+        evidence_scenes = set()
+        for occurrence in evidence:
+            if not isinstance(occurrence, dict) or occurrence.get("scene_id") not in sids:
+                raise ValueError(f"{cid}原文证据场次不属于候选场次")
+            sid = occurrence["scene_id"]
+            evidence_scenes.add(sid)
+            quote = nonempty(occurrence.get("evidence"), f"{cid}原文证据")
+            refs = occurrence.get("source_paragraphs")
+            if (not isinstance(refs, list) or not refs or any(type(ref) is not int for ref in refs)
+                    or refs != list(range(min(refs), max(refs) + 1))
+                    or any(ref < scenes[sid]["source_range"][0] or ref > scenes[sid]["source_range"][1]
+                           for ref in refs)):
+                raise ValueError(f"{cid}原文证据须为对应场次内连续、顺序且不重复的段落")
+            if paragraphs is not None:
+                if fact_validator is None:
+                    raise ValueError("验证道具候选原文需要fact_validator")
+                fact_validator([{"text": candidate["name"], "evidence": quote,
+                                 "source_paragraphs": refs, "scene_ids": [sid],
+                                 "attribution": "道具覆盖审阅"}], paragraphs, scenes, cid, sid)
+                text = "".join("".join(paragraphs[ref - 1] for ref in refs).split())
+                if len(list(re.finditer(re.escape("".join(quote.split())), text))) != 1:
+                    raise ValueError(f"{cid}原文证据须唯一定位，请缩小段落或补全原句")
+        if evidence_scenes != set(sids):
+            raise ValueError(f"{cid}原文证据未覆盖全部候选场次")
+    for aid in categories["asset"]:
+        linked = {sid for sid, scene in scenes.items() if aid in scene["prop_ids"]}
+        if not linked or asset_coverage.get(aid) != linked:
+            raise ValueError(f"{aid}须有覆盖全部关联场次的独立资产候选审阅")
 
 
 def validate_prop_policy(data, paragraphs, fact_validator):
     policy = data.get("asset_policy")
     if policy is None:
         return  # Existing ledgers keep their policy until explicitly reviewed.
-    if policy != PROP_POLICY:
+    if policy not in (LEGACY_PROP_POLICY, PROP_POLICY):
         raise ValueError(f"不支持的道具提取政策：{policy}")
     scenes = {scene["id"]: scene for scene in data["scenes"]}
     for item in data["props"]:
         label = item["id"]
         review = item.get("extraction_review")
-        if not isinstance(review, dict) or review.get("kind") != "special_reusable":
+        allowed = ("special_reusable", "core_continuity") if policy == PROP_POLICY else ("special_reusable",)
+        if not isinstance(review, dict) or review.get("kind") not in allowed:
+            if policy == PROP_POLICY:
+                raise ValueError(f"{label}须按special_reusable或core_continuity完成主要道具入选审阅")
             raise ValueError(f"{label}须为需复用的特殊主要道具；普通日用品、家具、服装或临时物件不提取")
         nonempty(review.get("consistency_reason"), f"{label} 前后一致性理由")
+        core = review["kind"] == "core_continuity"
+        if core:
+            nonempty(review.get("story_role"), f"{label}原文明示的关键动作或视觉反差作用")
         names = [item.get("source_name", item["name"]), *item.get("aliases", [])]
-        if any(FURNITURE.search(name) for name in names):
+        if not core and any(FURNITURE.search(name) for name in names):
             raise ValueError(f"{label}桌床等固定大件家具归入SET，不单独提取")
-        if any(name in DAILY_ITEMS for name in names):
+        if not core and any(name in DAILY_ITEMS for name in names):
             nonempty(review.get("special_features"), f"{label}日用品须说明特殊可辨形制，普通日用品不提取")
-        validate_visible_uses(item, paragraphs, scenes, fact_validator, "prop_ids", 2, "可见使用")
+        validate_visible_uses(item, paragraphs, scenes, fact_validator, "prop_ids", 1 if core else 2, "可见使用")
+    validate_prop_coverage(data, paragraphs, fact_validator)
 
 
 def validate_design_record(category, item, design, anchors):
@@ -313,6 +459,7 @@ def compile_prompt(data, category, item, design, anchors):
 
 
 def validate_visual_design(data):
+    validate_prop_coverage(data)
     validate_group_modes(data)
     for item in data["characters"]:
         if item.get("visual_mode") == "prompt_only" and any(field in item for field in ("visual_design", "image_prompt", "image_format", "image_design_digest")):
@@ -346,6 +493,7 @@ def validate_visual_design(data):
 
 
 def apply_design(data, payload, style_text):
+    validate_prop_coverage(data)
     validate_group_modes(data)
     if data.get("schema_version") != 3:
         raise ValueError("design仅用于已审阅schema 3；旧项目须显式升级，不自动迁移")

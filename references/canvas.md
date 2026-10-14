@@ -1,6 +1,6 @@
 # 小云雀 CLI 画布接口
 
-本文件仅供后台执行。所有路径用绝对路径，JSON使用UTF-8；用户名称、提示词和链接通过参数数组或文件传入，不拼接shell命令。运行入口为`<skill>/scripts/canvas.py`；不需要另装小云雀Skill或MCP。
+本文件仅供后台执行。所有路径用绝对路径，JSON使用UTF-8；用户名称、提示词和链接通过参数数组或文件传入，不拼接shell命令。常规资产/视频/引用/图片任务使用[后台队列](canvas-jobs.md)的`canvas_jobs.py`；配置、绑定、预览和精确编辑/删除继续使用`canvas.py`；不需要另装小云雀Skill或MCP。
 
 ## 首次连接与绑定
 
@@ -22,12 +22,12 @@ python <skill>/scripts/canvas.py status --project <project>
 ## 资产与视频节点
 
 ```text
-python <skill>/scripts/canvas.py assets --project <project> [--preview] [--decisions <选择.json>]
-python <skill>/scripts/canvas.py videos --project <project> --request-id <本批提交ID> [--preview] [--decisions <选择.json>]
-python <skill>/scripts/canvas.py videos --project <project> --ids 场景1-分镜1 场景1-分镜2
+python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind assets --start [--decisions <选择.json>]
+python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind videos --request-id <本批提交ID> --start [--decisions <选择.json>]
+python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind videos --ids 场景1-分镜1 场景1-分镜2 --start
 ```
 
-`assets`读取session绑定台账，逐个创建role/scene/image业务节点。仅需图片的角色使用台账完整name；visual_mode为prompt_only的群像不建节点、不匹配上传图片、不列为缺图，场景使用scene_assets[].name及SET ID，每个SET仅一个节点（包括有证据的时间版本和布置版本），SC heading不参与资产建节点，道具使用主name；角色/场景同时设置节点显示名和basicInfo.name，basicInfo.appearanceName为空。视频普通业务节点的name/title/caption逐字使用对应已提交单元display_name，例如 `A01-场景3-分镜2`；无新名称的旧单元继续使用原ID，不附加时长、镜头标签或布景名称。完整提示词直接由当前有效单元按其输出版本渲染写入generation.prompt，保留固定抬头、视频风格、换行和人物/场景前缀；不调用生成命令。
+`assets`后台任务冻结session绑定台账，创建role/scene/image业务节点并写入完整image_prompt；角色/场景写入appearanceInfo.description，道具写入generation.prompt。只有最终字段与ID映射全部核验才算完成。仅需图片的角色使用台账完整name；visual_mode为prompt_only的群像不建节点、不匹配上传图片、不列为缺图，场景使用scene_assets[].name及SET ID，每个SET仅一个节点（包括有证据的时间版本和布置版本），SC heading不参与资产建节点，道具使用主name；角色/场景同时设置节点显示名和basicInfo.name，basicInfo.appearanceName为空。视频普通业务节点的name/title/caption逐字使用对应已提交单元display_name，例如 `A01-场景3-分镜2`；无新名称的旧单元继续使用原ID，不附加时长、镜头标签或布景名称。完整提示词直接由当前有效单元按其输出版本渲染写入generation.prompt，保留固定抬头、视频风格、换行和人物/场景前缀；不调用生成命令。
 
 显式执行`videos`时，先全量读取目标画布一次，用同一份节点索引逐项核对当前台账全部需图片的角色、布景和主要道具，不只核对本批分镜所用资产，不比较节点总数。已保存的真实ID仍在当前画布且完整名称、类型一致时复用，保留该节点当前主图和形象/视角；无映射或原ID已不存在时，按完整name+kind查找，唯一候选自动复用并保存映射，没有候选自动补建对应role/scene/image空节点并立即保存CLI真实ID。有多个候选或已绑定资产改名/类型变化时，列入待处理，不猜测或覆盖；其余合法项可继续。画布额外节点保留，不改名、不删除。复用阶段1资产传输已保存的ID，不额外按名称重新寻找有效映射；恢复时沿用已确认进度，不重复创建。新增节点更新本次内存索引，开始时一次全量盘点不代替每次写后的回读。
 
@@ -67,7 +67,7 @@ python <skill>/scripts/canvas.py videos --project <project> --ids 场景1-分镜
 
 选择文件只能根据用户的实际选择填写；不自动填覆盖。候选或摘要变化重新核对。多个候选不能默认取第一个，用户选定后使用该候选真实ID及本次fingerprint继续。已有映射正常复用；直接`assets`中绑定节点被删或类型变化时说明实际情况，由用户决定恢复/重绑。用户明确要求重建缺失节点时，在该资产选择中填写`{"recreate_missing":"查询确认已缺失的原节点ID"}`；若出现同名候选仍需明确reuse。显式`videos`的资产准备已获自动唯一匹配和补建缺失节点授权，无需逐项确认，但不因此自动填任何云端覆盖选择。资产引用准备保留当前主图及形象/视角名称；直接改写资产名称、描述或默认形象/视角，以及视频节点名称、提示词或参数时，仍检查各自保存基线并处理实际冲突。
 
-大批量操作在浏览器授权支持时先建检查点。每个节点串行处理：资产保持逐步写后回读，写入失败或未知ACK时先读取画布，能核对目标已生效则继续，否则返回`UNCERTAIN_WRITE`并停止；视频按创建、改名、时长、正式引用提示词四步取得官方确认后统一回读。ID由CLI真实分配并在创建前保存，可恢复进程在已确认步骤之间中断的情况。视频步骤收到实际拒绝、未知或无法确认的官方ACK，立即停止后续写入并保留真实ID、命令确认和步骤进度；先读取画布核对远端状态，按官方支持的恢复流程解决未确认步骤，再在同一真实节点ID上续接，不重新创建。未确认状态仍无法核对时返回`UNCERTAIN_WRITE`，不得把该节点或整个批次标为完成。不要删除CLI隔离的未确认事务或换request ID盲目重放。项目`operation.lock`及系统临时目录中对应账号/画布摘要的`seedance-canvas-*.lock`只在确认旧进程已退出后才能移除；不批量清理其他项目的锁。`status`可在未知写入后读取节点与未确认操作列表。
+大批量操作在浏览器授权支持时先建检查点。每个节点串行处理：后台资产按小组申请ID、逐条记录ACK并整组回读全部目标字段，写入失败或未知ACK时先读取画布，能核对目标已生效则继续，否则返回`UNCERTAIN_WRITE`并停止；视频按创建、改名、时长、正式引用提示词四步取得官方确认后统一回读。ID由CLI真实分配并在创建前保存，可恢复进程在已确认步骤之间中断的情况。视频步骤收到实际拒绝、未知或无法确认的官方ACK，立即停止后续写入并保留真实ID、命令确认和步骤进度；先读取画布核对远端状态，按官方支持的恢复流程解决未确认步骤，再在同一真实节点ID上续接，不重新创建。未确认状态仍无法核对时返回`UNCERTAIN_WRITE`，不得把该节点或整个批次标为完成。不要删除CLI隔离的未确认事务或换request ID盲目重放。项目`operation.lock`及系统临时目录中对应账号/画布摘要的`seedance-canvas-*.lock`只在确认旧进程已退出后才能移除；不批量清理其他项目的锁。`status`可在未知写入后读取节点与未确认操作列表。
 
 仅当用户明确授权重建并填写`recreate_missing=旧真实节点ID`，且当前snapshot确认该视频节点已不存在时，才将旧未确认日志保留为`superseded`并分配新ID；不重放旧写入，不删除历史或CLI隔离状态。
 
@@ -77,7 +77,7 @@ python <skill>/scripts/canvas.py videos --project <project> --ids 场景1-分镜
 
 ```text
 python <skill>/scripts/canvas.py images --project <project> --folder <图片文件夹绝对路径> --preview
-python <skill>/scripts/canvas.py images --project <project> --folder <图片文件夹绝对路径> [--decisions <选择.json>]
+python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind images --folder <图片文件夹绝对路径> --start [--decisions <选择.json>]
 ```
 
 先扫描并核对已保存的资产节点映射；未建节点列入unbound_assets，不按同名猜测。重复文件、缺失文件、未匹配文件和文件头错误分别返回duplicates/missing/unmatched/invalid；继续其余合法项。已有图片默认保留，返回retained与existing_image。只有用户明确选定替换后，把该冲突返回的replace_image对象原样写入选择文件；文件摘要或节点摘要变化需重新核对：
@@ -99,8 +99,9 @@ python <skill>/scripts/canvas.py images --project <project> --folder <图片文�
 
 ```text
 python <skill>/scripts/canvas.py black --project <project> --node-id <完整名称为黑幕的现有video节点ID>
-python <skill>/scripts/canvas.py references --project <project> --request-id <本批提交ID> [--preview] [--decisions <选择.json>]
-python <skill>/scripts/canvas.py references --project <project> --ids 场景1-分镜1 场景1-分镜2
+python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind references --request-id <本批提交ID> [--decisions <选择.json>] --start
+python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind references --ids 场景1-分镜1 场景1-分镜2 --start
+python <skill>/scripts/canvas.py references --project <project> --request-id <本批提交ID> --preview
 ```
 
 `references`只处理已映射视频节点，未创建的编号列入unbound_units，不自动创建。角色、场景及道具资产的节点映射有效时，即使图片为空也编码真实节点标签并尝试正式节点引用；不以先上传图片为前置条件。没有映射或映射冲突的图片资产保留`@台账完整名称 `（名称后英文空格）并记录。edge-only-v1单元的BLACK无论提示词内容如何都属于后台引用清单，黑幕无法确定时报告引用失败但不插入黑幕文字；旧单元保留独立行`@黑幕`的兼容行为。黑幕优先使用该单元已固定的ID，否则使用项目已保存的默认video节点；旧项目既有image绑定兼容保留。没有有效默认ID时可只读解析完整名称恰为“黑幕”的唯一video候选；没有候选或有多个候选则记录，不自行创建或生成。`black`命令仅显式绑定完整名为“黑幕”的现有video，不要求提前有视频素材；绑定前保存旧单元的image引用，不自动刷新任何旧单元。已确认的节点引用、图片待补和黑幕视频素材待补分别计数，不把文字@当成实际引用，也不把缺媒体自动判为节点引用失败。
@@ -133,7 +134,7 @@ python <skill>/scripts/canvas.py delete --project <project> --request <删除.js
 
 ## 局部修改同步与结果
 
-director.commit的replace会先保存本地版本并输出TXT，再同步已有映射的视频节点；未绑定的不新建，也不触发全台账资产盘点或无关资产补建。待同步版本额外保存于`canvas/pending-sync/`，即使其他进程占用操作锁也保留任务；查询汇入pending_units，同步确认后清理对应标记。用户明确要求继续批量创建时可用`videos --ids ...`，该显式操作按资产准备流程执行；先处理日志未确认或云端冲突。正常同步在同一真实节点ID上依次更新名称、仅更新分镜时长、写入正式引用编码提示词，各步记录官方确认后统一回读并保存完成回执；不查询、写入或校验模型与分辨率。名称、时长、提示词的人工修改按实际冲突处理。保留已有素材及其他参数，不重建已绑定视频节点。
+director.commit的replace会先保存本地版本并输出TXT，再提交已有映射的视频节点更新任务并启动后台worker；未绑定的不新建，也不触发全台账资产盘点或无关资产补建。冻结输入与版本保存在`canvas/jobs/`，同画布worker忙时任务排队；后台状态只读本地文件，旧pending-sync记录仍兼容。用户明确要求继续批量创建时可用`videos --ids ...`，该显式操作按资产准备流程执行；先处理日志未确认或云端冲突。正常同步在同一真实节点ID上依次更新名称、仅更新分镜时长、写入正式引用编码提示词，各步记录官方确认后统一回读并保存完成回执；不查询、写入或校验模型与分辨率。名称、时长、提示词的人工修改按实际冲突处理。保留已有素材及其他参数，不重建已绑定视频节点。
 
 用户可见结果只给简短创建/更新/复用/删除数量、待处理项及画布链接。错误中出现凭据须隐藏；JSON、CLI命令、内部标签、日志与执行分析不在对话输出。所选操作因连接失败中断时说明阻塞项，并保留已经完成的文件与节点。
 

@@ -120,10 +120,15 @@ class CLI:
         return result.get("data", {})
 
     def allocate(self):
-        ids = self.native("canvas", "allocate", "--count", "1").get("asset_ids")
-        if not isinstance(ids, list) or len(ids) != 1 or not isinstance(ids[0], str) or not ids[0]:
+        return self.allocate_many(1)[0]
+
+    def allocate_many(self, count):
+        d.require(isinstance(count, int) and 1 <= count <= 5000, "ID申请数量须为1至5000")
+        ids = self.native("canvas", "allocate", "--count", str(count)).get("asset_ids")
+        if (not isinstance(ids, list) or len(ids) != count
+                or not all(isinstance(value, str) and value for value in ids) or len(set(ids)) != count):
             fail("INVALID_ID", "CLI未返回唯一字符串资产ID。")
-        return ids[0]
+        return ids
 
 
 def blank_state():
@@ -304,6 +309,7 @@ def connected(project, cli):
 
 
 def checkpoint(project, cli, state, reason):
+    check_control(cli)
     # The durable checkpoint requires browser-scoped credentials.
     if cli.auth().get("credential_scope"):
         result = cli.command(state["binding"]["canvas_id"], "create_checkpoint", {"reason": reason})
@@ -475,7 +481,14 @@ def reconcile(project, cli, state, doc, preview=False, decisions=None):
         save(project, state)
 
 
+def check_control(cli):
+    callback = getattr(cli, "check_control", None)
+    if callable(callback):
+        callback()
+
+
 def write_verified(project, cli, state, command, value, targets):
+    check_control(cli)
     entry = {"id": uuid.uuid4().hex, "command": command, "input": copy.deepcopy(value),
              "targets": copy.deepcopy(targets), "status": "pending"}
     state["journal"].append(entry)
@@ -506,6 +519,7 @@ def write_verified(project, cli, state, command, value, targets):
 
 def write_acknowledged(project, cli, state, command, value, targets, receipt):
     """Journal a video step's official ACK; defer snapshot acceptance to its receipt."""
+    check_control(cli)
     entry = {"id": uuid.uuid4().hex, "command": command, "input": copy.deepcopy(value),
              "targets": copy.deepcopy(targets), "status": "pending", "video_receipt_id": receipt["id"]}
     state["journal"].append(entry)
@@ -1102,12 +1116,12 @@ def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, pre
 
 
 def sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview=False, bind_references=False,
-         existing_only=False, references_only=False):
+         existing_only=False, references_only=False, session_override=None):
     """Always leave a batch report, including on a stopped/uncertain CLI write."""
     context = {"failures": []}
     try:
         result = _sync(project, cli, kind, request_id, ids, decisions, preview, bind_references,
-                       existing_only, references_only, context)
+                       existing_only, references_only, context, session_override)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         if kind == "videos" and not preview and context.get("session") and context.get("state") and context.get("doc"):
             try:
@@ -1151,8 +1165,8 @@ def reference_report(project, context):
 
 
 def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview=False, bind_references=False,
-          existing_only=False, references_only=False, context=None):
-    session = d.load(Path(project))
+          existing_only=False, references_only=False, context=None, session_override=None):
+    session = copy.deepcopy(session_override) if session_override is not None else d.load(Path(project))
     d.require(session["ledger"].get("schema_version") == 3, "旧项目须先审核资产去重升级方案；当前同步不会连接画布或续接旧写入")
     state, doc = connected(project, cli)
     if preview:
@@ -1280,6 +1294,7 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
     positions = layout_positions(doc, plan)
     for item in plan:
         key, node_id = item["key"], item.get("node_id")
+        check_control(cli)
         context["active"] = {"key": key, "name": item["name"], "kind": item["kind"], "node_id": node_id}
         # Re-read before every node; detect changes since planning.
         fresh = document(cli, state["binding"])

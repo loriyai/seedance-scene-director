@@ -748,6 +748,10 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
     continuity_result = continuity.validate_unit(state, unit, required=require_continuity)
     if continuity_result is not None:
         warnings.extend(continuity_result["warnings"])
+    from prop_reference_review import check as check_prop_references
+    warnings.extend(check_prop_references(state, unit))
+    from group_reference_review import check as check_group_references
+    warnings.extend(check_group_references(state, unit))
     return warnings
 
 
@@ -925,8 +929,13 @@ def sync_canvas_replacements(project, receipt):
     if receipt.get("mode") != "replace" or not (project / "canvas" / "state.json").is_file():
         return {"status": "not_bound"}
     try:
-        from canvas import sync_replacements
-        return sync_replacements(project, [u["id"] for u in receipt["units"]])
+        from canvas import read_state
+        from canvas_jobs import enqueue
+        mappings = read_state(project)["mappings"]
+        selected = [u["id"] for u in receipt["units"] if mappings.get(u["id"], {}).get("kind") == "video"]
+        if not selected:
+            return {"status": "not_bound"}
+        return enqueue(project, "videos", request_id=receipt["request_id"], ids=selected, existing_only=True, start=True)
     except (OSError, ValueError, KeyError, TypeError, ImportError) as exc:
         return {"status": "pending", "message": str(exc)}
 
@@ -1060,6 +1069,9 @@ def main():
                 for item, unit in zip(result["units"], state["units"]):
                     item["name"] = unit_name(unit)
                 result["batch_scope"] = state.get("batch_scope")
+                if (args.project / "canvas" / "jobs").is_dir():
+                    from canvas_jobs import status as job_status
+                    result["canvas_jobs"] = job_status(args.project)
             elif args.command == "locate":
                 result = locate(args, state)
             elif args.command == "range":

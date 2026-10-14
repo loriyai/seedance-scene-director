@@ -16,8 +16,8 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
 ```json
 {
   "schema_version": 3,
-  "asset_policy": "visible-reuse-v1",
-  "group_policy": "visible-reuse-v1",
+  "asset_policy": "visual-continuity-v2",
+  "group_policy": "visual-continuity-v2",
   "source_digest": "由 init 计算的原文段落摘要",
   "scenes": [
     {
@@ -49,6 +49,12 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
     {"id": "SET0001", "name": "昏暗房间", "location_id": "LOC0001", "variant": "base", "parent_id": null, "visual_facts": []}
   ],
   "props": [],
+  "prop_coverage_review": {
+    "source_digest": "由 init 计算的原文段落摘要",
+    "reviewed_full_script": false,
+    "reviewed_scene_ids": [],
+    "candidates": []
+  },
   "retired_ids": [],
   "inactive_assets": {"characters": []},
   "pending_reviews": []
@@ -79,7 +85,18 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
 
 可记录的明示视觉信息包括：人物外貌、明显年龄、发型、衣着及配饰；地点布局、固定陈设、可见材质；道具形状、颜色、材质、相对大小、标记与状态。逐场临时的天气、光线放在 `scenes[].visual_facts`；固定布局与陈设放在locations，真实布景变化以有证据的decor版本记录。未知信息留空。`基础形象`、默认的 `日`、自动生成的 ID 和未出现的生图风格都不是原文事实。
 
-新init默认asset_policy="visible-reuse-v1"；旧台账缺少该字段仍按原规则读取，未经显式审阅不迁移或删除旧PROP。新主要道具必须有至少2次独立可见使用，并且确需固定形制以避免前后不一致。词频、对白提及和同一事件的多个镜头不累计；普通桌床等固定家具归SET，普通日用品和一次性小物件不提取，props可为空。相同source_name且无明确视觉变化默认复用一个PROP图片资产，不因地点/持有人变化另建。物理实体由prop_occurrences独立保存，不因共用图片冒认同一件。
+## 主要道具筛选
+
+新init默认asset_policy="visual-continuity-v2"，两条入选路径均须原文可见证据与具体外观连续性需求：
+
+- `special_reusable`：至少2次独立可见使用，`consistency_reason`说明需固定的轮廓、色材、细节或结构。
+- `core_continuity`：至少1次原文明示的可见使用；`story_role`具体说明物件承担的关键动作、视觉反差或结构交互，`consistency_reason`说明跨镜头或生成单元需要固定参考的部位和原因。单次连续剧情也可有充分的制作连续性需求，不能因只有“一次出行/争执/碰撞”就直接排除；也不能只写“很重要”“保持一致”或以车辆等类别自动入选。
+
+词频、对白提及和同一事件拆镜不能冒充独立使用。审阅`special_reusable`时按实际动作与因果关系划分独立事件，不能把所有经过粗并为“一次出行”，也不能为凑两次把一次开门拆成多条；`core_continuity`单独判断参考需求，不靠扩大事件计数取得资格。普通固定家具通常归SET，普通日用品和临时小物件由分镜动作表达；有具体核心功能时再按上述路径审阅。服装通常归CHAR，可拆卸、交换或操作且承担核心功能的穿戴物件不能仅因可穿戴而一律排除。日用品经`special_reusable`入选时另填`special_features`说明原文依据与可辨特征，普通家具仍不走这条路径；`core_continuity`统一在`story_role`和`consistency_reason`中说明具体依据，不按家具、日用品或穿戴名称直接拒绝。
+
+旧asset_policy="visible-reuse-v1"继续保持至少2次独立可见使用的原规则；旧台账缺少该字段仍按原规则读取，不自动升级、删PROP、改绑定或动下游节点。显式升级先按新规则复核并补全候选覆盖审阅，再重新校验和建立明确绑定。props可为空，但新策略仍须完成全剧候选覆盖审阅。相同source_name且无明确视觉变化默认复用一个PROP图片资产，不因地点/持有人变化另建。物理实体由prop_occurrences独立保存，不因共用图片冒认同一件。
+
+多次复用路径示例：
 
 ```json
 {
@@ -96,30 +113,125 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
 }
 ```
 
-event_id是同场独立可见事件标识，不是镜头号。每条evidence须唯一定位关联场内连续原文段落；同(scene_id,event_id)不重复，证据范围不重叠，至少两条。source_paragraphs连续、按顺序且无重复。程序不做关键词计数，不自动发现事件，也不能理解使用是否可见；作者逐条核实。extraction_review.kind只能为special_reusable；普通日用品、家具、穿戴、临时物件均不成立。手机、水杯等日用品成为特殊信物时另填special_features说明可辨形制，但仍须2次独立可见使用。程序对明确桌床等名称做辅助拒绝，对部分日用品要求特殊说明，不能覆盖中文全部语义，不能通过改kind、改名或泛泛理由绕过审阅。
-
-## 群像图片筛选
-
-人物行与characters/CHAR是完整剧情索引；是否制作图片由群像visual_mode决定。新台账group_policy="visible-reuse-v1"要求每个群像完成全剧审阅，至少2次独立可见出场并有具体外观一致性需求才取image_asset；其余取prompt_only。具名角色、有独立台词的匿名角色以及SET/PROP不能用prompt_only规避图片规则。旧台账无group_policy且群像无visual_mode时沿用原图片资产行为，不自动筛除；显式填写模式即接受此校验。
-
-先normalize同LOC、同称谓、同形象的候选，再按完整剧本登记visible_uses。一次事件切成多镜、不同文句重复提名或对白提及不累计；跨场次的同一连续事件仍只算一次，同场的真实独立再次出场可以累计。群像图片复用只固定制作外观，不据此认定是同一批实体人物。程序校验连续原文证据、唯一定位、事件与证据不重复，背景身份、出场是否独立/实际可见及一致性必要性由作者审阅。
-
-每个群像必填extraction_review：kind="background_group"、reviewed_full_script=true、source_digest与台账当前摘要一致、identity_basis说明原文明示群体称谓且无姓名/独立台词。image_asset另填consistency_reason并登记至少2条visible_uses；prompt_only另填exclusion_reason，保留至少1条可见出场证据。未达两次不能靠泛泛一致性理由提取；多次但无需固定外观仍可prompt_only。后者保留source_entry、事实、CHAR和逐场character_ids，不含visual_design/image_prompt等生图派生字段；分镜保留人物与动作，渲染普通名称，不输出@引用，不生成图片、资产条目、画布节点或缺图报告项。
-
-可直接在normalize后的候选JSON填写上述字段，或用独立审阅JSON：
+核心连续性路径示例（该虚构剧情只有一次操作事件）：
 
 ```json
 {
+  "id": "PROP0002",
+  "name": "机械匣",
+  "source_name": "机械匣",
+  "aliases": [],
+  "visual_facts": [],
+  "extraction_review": {
+    "kind": "core_continuity",
+    "story_role": "人物依次操作卡扣和齿轮才打开匣子，结构交互推动本段关键动作",
+    "consistency_reason": "总览、手部操作和开匣结果需保持卡扣、齿轮与铰链的相对位置，依靠同一参考避免接触位置变化"
+  },
+  "visible_uses": [
+    {"scene_id": "SC0001", "event_id": "操作并开匣", "evidence": "按下机械匣的卡扣，转动齿轮，匣盖弹开", "source_paragraphs": [3]}
+  ]
+}
+```
+
+event_id是同场实际可见事件标识，不是镜头号。每条evidence须唯一定位关联场内连续原文段落；同(scene_id,event_id)不重复，证据范围不重叠。source_paragraphs连续、按顺序且无重复；special_reusable至少两条，core_continuity至少一条。程序不做词频计数、不自动发现独立事件，也不能理解证据是否实际可见、story_role是否成立或参考是否必要；作者必须逐条核实，不能通过改kind、改名或泛泛理由绕过语义审阅。
+
+## 候选反向覆盖审阅
+
+新策略要求顶层`prop_coverage_review`；init只建立`reviewed_full_script:false`的空草稿，未审阅不得design/render或绑定。先逐场阅读原文中的可见动作、关键物件交互和视觉反差，收集需要作出分类决定的候选，再与最终台账反向核对。包括被排除候选，尤其是核心事件主体、明确外观/结构、可拆卸穿戴和跨镜头持续使用的物件；不要求把环境中的每个普通名词都变成独立资产。不能仅从最终props倒推一份全部“已覆盖”的表。
+
+```json
+{
+  "prop_coverage_review": {
+    "source_digest": "当前台账source_digest",
+    "reviewed_full_script": true,
+    "reviewed_scene_ids": ["SC0001", "SC0002"],
+    "candidates": [
+      {
+        "candidate_id": "PC0001",
+        "name": "青铜令牌",
+        "scene_ids": ["SC0001", "SC0002"],
+        "source_evidence": [
+          {"scene_id": "SC0001", "evidence": "取出一枚青铜令牌，放到桌上", "source_paragraphs": [1]},
+          {"scene_id": "SC0002", "evidence": "再次拿起青铜令牌，收入怀中", "source_paragraphs": [2]}
+        ],
+        "disposition": "asset",
+        "target_id": "PROP0001",
+        "reason": "已按多次复用路径入选，形制在两次使用中保持一致",
+        "requires_reference": true
+      },
+      {
+        "candidate_id": "PC0002",
+        "name": "木桌",
+        "scene_ids": ["SC0001"],
+        "source_evidence": [
+          {"scene_id": "SC0001", "evidence": "木桌靠着窗边", "source_paragraphs": [4]}
+        ],
+        "disposition": "set",
+        "target_id": "SET0001",
+        "reason": "普通固定陈设，位置与外观随房间布景统一，不需要单独道具图",
+        "requires_reference": false
+      },
+      {
+        "candidate_id": "PC0003",
+        "name": "纸巾",
+        "scene_ids": ["SC0001"],
+        "source_evidence": [
+          {"scene_id": "SC0001", "evidence": "抽出纸巾擦去水迹", "source_paragraphs": [5]}
+        ],
+        "disposition": "prompt_only",
+        "target_id": null,
+        "reason": "普通临时清洁用品，无需固定可辨形制，保留原动作即可",
+        "requires_reference": false
+      }
+    ]
+  }
+}
+```
+
+示例字段需按实际剧本填写，不能复制示例证据。`source_digest`与当前原文摘要一致，`reviewed_scene_ids`须覆盖全部现用SC；`reviewed_full_script:true`表示生成者已完成逐场阅读与判断。每个候选ID唯一，可选`aliases`文字数组记录原文明示别称，`scene_ids`列出实际可见关联，`source_evidence`覆盖其中每场并能在该场原文段落定位。需要补齐候选时追加ID，不把候选展示序号当资产ID。
+
+`disposition`只取`asset`、`character`、`set`、`prompt_only`，依次指向PROP、CHAR、SET或普通分镜描述。前三者的`target_id`必须存在且确实关联候选列出的每场；最后一种为null。`reason`说明实际分类依据，`requires_reference`记录是否需要图片参考；true不能归入prompt_only。穿戴件可用CHAR形象满足参考需求，固定陈设可由SET统一，但需核实对应设计确实包含该物件，不只挂一个目标ID。每个现用PROP都必须有asset候选覆盖，指向该PROP的候选场次合计与该PROP实际关联场次一致。
+
+程序检查审阅声明、摘要、ID、场次覆盖、证据定位和目标关联，不能从空候选列表推知全剧没有物件，也不能证明所有核心物件都被发现。候选是否找齐、分类是否合理、证据是否证明可见和参考必要性，都由生成者通读后审阅。即使props为空，也不得跳过这项工作。全剧来源改变、资产归并或场次关联变化后重新核对覆盖审阅，不能只改摘要让旧声明通过。
+
+分镜规划时仅复核当前范围：从原文与计划镜头的关键交互反查候选及目标资产。多镜头持续依赖某物件的轮廓、色材、结构或交互位置，而台账将其遗漏或仅写普通描述时，回到两条路径审阅；确认需要独立资产后，补齐其证据、设计、逐场关联及覆盖记录，再按明确重绑定流程提交。保留旧ID和交付，不重盘无关范围或静默更改画布；不能用“台账没有”作为无需参考的理由。 对已登记为需要图片参考的PROP候选，单元覆盖完整可见使用证据却未引用时输出复核提醒；若名称、制作名或显式别名能确定是该物件，却将其登记为空asset_ids的临时实体，则阻止提交。共用一句动作证据不等于同一物件，不能据此强行绑定。上述检查不能发现未登记候选，也不替代逐场语义复核。
+
+## 群像图片筛选
+
+人物行与characters/CHAR是完整剧情索引；是否制作图片由群像visual_mode决定。此筛选仅适用于无姓名、无独立台词且原文明示群体称谓的背景群像，具名角色、有独立台词的匿名角色以及SET/PROP不能用prompt_only规避图片规则。新台账group_policy="visual-continuity-v2"要求每个群像完成全剧审阅，图片入选有复用与核心连续性两条路径；文字足够时仍可prompt_only。不要因群像只参与一次剧情事件，就认定不需要跨镜头固定外观。
+
+先normalize同LOC、同称谓、同形象的候选，再按完整剧本登记visible_uses。一次事件切成多镜、不同文句重复提名或对白提及不累计为独立出场；跨场次的同一连续事件仍只算一次，同场真实独立的再次出场可以累计。不要把所有行为笼统合并为“一次活动”后否决核心连续性需求，也不为凑复用次数拆分同一事件。群像图片只固定服饰、轮廓、色材等制作外观，不据此认定是同一批实体人物；剧情人数、队形、站位、动作进度和成员位置仍由原文及分镜状态管理。需要特定成员辨识时，先核实独立人物身份和原称谓，不用一张群像图替代个体参考，也不补造姓名或关系。
+
+每个群像必填extraction_review：kind仍为"background_group"、reviewed_full_script=true、source_digest与台账当前摘要一致、identity_basis说明原文明示群体称谓且无姓名/独立台词。v2另在extraction_review内填写selection_basis和requires_reference，其组合为：
+
+| visual_mode | selection_basis | requires_reference | 原文可见出场与具体理由 |
+| --- | --- | --- | --- |
+| image_asset | reusable | true | 至少2次独立可见出场；consistency_reason说明跨镜头或单元需保持的外观及参考必要性。 |
+| image_asset | core_continuity | true | 至少1次可见出场；story_role说明具体关键行动、互动或视觉反差，consistency_reason说明为什么需要固定群体外观参考。 |
+| prompt_only | prompt_only | false | 至少1次可见出场；exclusion_reason说明排除图片的依据，text_sufficiency_reason说明文字为何足以表达实际画面用途。 |
+
+不得只用“同一次事件”作为prompt_only的全部依据，也不能只填“重要”“保持一致”就认定核心图片需求。多次出场但无需固定外观仍可prompt_only；一次事件承担核心作用也须证明实际参考需求，不能自动提取全部一次性群像。prompt_only保留source_entry、事实、CHAR和逐场character_ids，不含visual_design/image_prompt等生图派生字段；分镜保留人物与动作，渲染普通名称，不输出@引用，不生成图片、资产条目、画布节点或缺图报告项。
+
+旧group_policy="visible-reuse-v1"保留图片至少2次独立可见出场的原门槛和原字段；旧无group_policy且无visual_mode时沿用原图片资产行为，已有visual_mode按旧规则校验。未明确选定的项目、绑定、图片和节点不迁移、不自动升降模式。原文可见性、独立事件、背景身份、剧情作用和文字是否足够仍由生成者审阅；程序只检查字段组合、审阅声明与摘要、连续原文证据、唯一定位及关联，不能自动找全遗漏或判断重要性。
+
+可直接在normalize后的候选JSON填写上述字段，或用独立审阅JSON。以下为虚构示例，证据与画面用途须按实际原文和规划填写：
+
+```json
+{
+  "group_policy": "visual-continuity-v2",
   "groups": [
     {
       "character_id": "CHAR0002",
       "visual_mode": "prompt_only",
       "extraction_review": {
         "kind": "background_group",
+        "selection_basis": "prompt_only",
+        "requires_reference": false,
         "reviewed_full_script": true,
         "source_digest": "当前台账source_digest",
         "identity_basis": "原文明示围观村民，无姓名和独立台词",
-        "exclusion_reason": "全剧只有一次围观事件，在镜头文字中描述即可"
+        "exclusion_reason": "普通围观背景，无特定成员辨识或固定外观要求",
+        "text_sufficiency_reason": "该群体只作为远景环境人群，按原文交代围观与站位即可，无需重复辨认服饰细节"
       },
       "visible_uses": [
         {"scene_id": "SC0001", "event_id": "门前围观", "evidence": "村民站在门前围观", "source_paragraphs": [3]}
@@ -129,11 +241,37 @@ event_id是同场独立可见事件标识，不是镜头号。每条evidence须�
 }
 ```
 
+核心连续性审阅项示例（独立JSON中的groups仍须覆盖全部已登记群像）：
+
+```json
+{
+  "character_id": "CHAR0003",
+  "visual_mode": "image_asset",
+  "extraction_review": {
+    "kind": "background_group",
+    "selection_basis": "core_continuity",
+    "requires_reference": true,
+    "reviewed_full_script": true,
+    "source_digest": "当前台账source_digest",
+    "identity_basis": "原文明示围堵的守卫，无姓名和独立台词",
+    "story_role": "守卫包围主人公并封住通道，群体行动形成当前段落的具体阻力",
+    "consistency_reason": "全景与近距离互动中需保持守卫服饰轮廓和色材一致，群体外观参考不用于规定人数或队形"
+  },
+  "visible_uses": [
+    {"scene_id": "SC0002", "event_id": "守卫围堵", "evidence": "守卫围住他，封住通道", "source_paragraphs": [8]}
+  ]
+}
+```
+
 ```text
 python scripts/asset_ledger.py normalize <sets-draft.json> --group-review <group-review.json> --source <source.json> --output <group-reviewed-ledger.json> --report <group-review-report.json>
 ```
 
-groups须覆盖归并后全部群像CHAR，不填非群像；--source必需且须为同一原文摘要。命令先执行命名归并，再应用审阅，保留原输入；若尚不知最终ID，先不带审阅参数normalize并读取redirects。合并前的群像筛选决定不能自动代表合并后的全剧群像，合并后须重审；可见证据会保留供审阅。design/render及bind再次校验，发现群像称谓的独立台词时阻止按背景群像处理。改稿迁移保留模式和证据、只迁移可唯一定位的出场；全文改变或不足复用门槛加入待核项，不自动升降级、删图或删除节点。
+groups须覆盖归并后全部群像CHAR，不填非群像；--source必需且须为同一原文摘要。独立审阅JSON顶层group_policy可选：省略时保留台账现有策略，旧台账无策略时采用legacy visible-reuse-v1；不会因为使用新版脚本自动升级。明确选择升级时才传group_policy="visual-continuity-v2"并完整填写v2审阅，null及未知策略拒绝。上面的显式v2示例不能不经审阅直接用于旧项目。
+
+命令先执行命名归并，再应用审阅，保留原输入；若尚不知最终ID，先不带审阅参数normalize并读取redirects。合并前的群像筛选决定不能自动代表合并后的全剧群像，合并后须重审；可见证据会保留供审阅。design/render及bind再次校验，发现群像称谓的独立台词时阻止按背景群像处理。改稿迁移保留模式与旧审阅，只迁移可唯一定位的出场；v2来源、身份、关联场次或证据定位改变时，把审阅标为未完成并加入待核项，不自动刷新旧摘要或升降模式；最低出场次数按对应路径核查，不把单次core_continuity误判为未达两次。旧未选项目不改绑定、删图或删除节点。
+
+进入分镜后只复核当前范围的群像画面作用。v2纯文字群像在至少2镜作为subjects，或任一镜作为focus时，程序提示“群像图片需求需复核”；对应场次的完整已审visible_uses证据落入本单元动作记录但未登记该群像为本单元角色时，提示复核覆盖与画内/画外参与。以上均为人工判断入口，不机械拒绝、升级图片或把两镜计成两次独立事件。image_asset群像被精确制作名、source_entry或显式别名确定，却登记为空asset_ids的临时实体时，程序阻止提交；共用一句动作证据不能证明同一实体。生成者仍须发现未登记群像和审阅真实参考需求，程序不能自动完成语义查漏。
 
 分类TXT按实际图片资产顺序输出角色01、场景01、道具01，三类分别计数，超过99自然为100；prompt_only不占号。编号不进入name、ID、图片文件名、节点名或引用。
 
@@ -166,7 +304,7 @@ style-file使用项目原样保存的单行video-style.txt；只去除文件首�
 
 ## 核对
 
-`render` 检查：原文摘要、场景与段落范围、ID 引用、每场人物source_entry（缺省name）与人物行完整条目逐项、逐字、按顺序匹配、场景标题及地点名称与剧本一致、道具source_name和别名在关联正文中出现、全目录制作名称唯一及安全、形象启用区间、资产事实的场景出现关系、证据在原文段落中出现。`pending_reviews` 或 `inactive_assets.characters` 未处理完时不能渲染。它无法判断摘要是否正确表达证据，也无法证明“性格”是否真的被原文明确写出；这些仍需人工逐条核对。
+`render` 检查：原文摘要、场景与段落范围、ID 引用、每场人物source_entry（缺省name）与人物行完整条目逐项、逐字、按顺序匹配、场景标题及地点名称与剧本一致、道具source_name和别名在关联正文中出现、全目录制作名称唯一及安全、形象启用区间、资产事实的场景出现关系、证据在原文段落中出现。新策略还检查道具入选路径、使用证据及prop_coverage_review的声明、全部SC覆盖、候选证据与目标关联、全部PROP覆盖。群像按group_policy检查模式、入选路径、参考需求、对应最低可见出场次数及审阅理由字段，v2纯文字模式还须说明文字足够的理由。`pending_reviews` 或 `inactive_assets.characters` 未处理完时不能渲染。它无法判断摘要是否正确表达证据、候选是否语义完整或“性格”是否真的被原文明确写出；这些仍需人工逐条核对。
 
 生成TXT只保留角色列表、场景列表、主要道具列表，各分类从01开始按台账数组顺序编号，超过99自然显示100，不截断。序号只用于查看统计，不写入稳定ID、name、图片名或节点名。完成design时主行为 `01 - 完整资产名：完整image_prompt`，下一行角色写出现的场景、SET/PROP写使用的场次，关联ID反查number后排序去重。旧未design台账仍显示原文核心可见特征，缺信息时保留“未明示”和旧独立production_design行，不静默补设计；新制作须先design，完整图片描述直接可用。TXT不显示后台ID、证据或性格栏；原文事实、出处、完整制作设计与格式元数据同存JSON，不能手工维护第二份提示词。
 

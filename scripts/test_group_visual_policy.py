@@ -43,7 +43,7 @@ class GroupVisualPolicyTests(unittest.TestCase):
         save(self.script, "\n".join(drafts))
         save(self.source, {"paragraphs": [{"id": n, "text": p} for n, p in enumerate(self.paragraphs, 1)]})
         self.data["source_digest"] = ledger.digest(self.paragraphs)
-        self.data["group_policy"] = design.GROUP_POLICY
+        self.data["group_policy"] = design.LEGACY_GROUP_POLICY
         group = {"id": "CHAR0002", "name": "村民-群像-基础形象-陈府", "source_entry": "村民-群像-基础形象",
                  "aliases": [], "visual_facts": [], "personality_facts": [], "visual_mode": mode,
                  "extraction_review": {"kind": "background_group", "reviewed_full_script": True,
@@ -182,7 +182,7 @@ class GroupVisualPolicyTests(unittest.TestCase):
         run = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", env=dict(os.environ, PYTHONUTF8="1"))
         self.assertEqual(run.returncode, 0, run.stderr)
         result, report = migration.migrate(out, self.source, self.script, self.work, {})
-        self.assertEqual(result["group_policy"], design.GROUP_POLICY)
+        self.assertEqual(result["group_policy"], design.LEGACY_GROUP_POLICY)
         preserved = next(c for c in result["characters"] if c["id"] == group["id"])
         self.assertEqual(preserved["visual_mode"], "prompt_only")
         self.assertEqual(preserved["visible_uses"], group["visible_uses"])

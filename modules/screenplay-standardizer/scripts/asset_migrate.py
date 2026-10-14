@@ -7,8 +7,9 @@ import json
 import re
 from pathlib import Path
 
-from asset_ledger import HEADING, GENERIC_ROLE, digest, parse_script, scene_ranges, source_paragraphs, split_cast_entry
-from asset_visual_design import validate_visual_design
+from asset_ledger import HEADING, GENERIC_ROLE, digest, fact_list, parse_script, scene_ranges, source_paragraphs, split_cast_entry
+from asset_visual_design import (PROP_POLICY, GROUP_POLICY, group_minimum_visible_uses, is_group,
+                                 validate_group_policy, validate_prop_coverage, validate_visual_design)
 
 
 PREFIXES = {"scenes": "SC", "characters": "CHAR", "locations": "LOC", "props": "PROP"}
@@ -125,6 +126,85 @@ def migrate_fact(fact, old_by_id, lineage, new_scenes_by_number, old_paragraphs,
     if evidence not in original:
         return None
     return revised
+
+
+def preserve_prop_coverage(old, result, paragraphs, pending):
+    """Retain reviewed candidates without silently blessing changed context."""
+    if old.get("asset_policy") != PROP_POLICY:
+        return
+    previous = old.get("prop_coverage_review")
+    review = copy.deepcopy(previous) if isinstance(previous, dict) else {
+        "source_digest": old.get("source_digest"), "reviewed_scene_ids": [], "candidates": []}
+    result["prop_coverage_review"] = review
+    fields = ("id", "number", "heading", "source_range", "location_id", "scene_asset_id",
+              "character_ids", "prop_ids", "temporal_layer_id", "set_reuse")
+
+    def scene_context(data):
+        return [{**{field: scene.get(field) for field in fields},
+                 "prop_occurrences": scene.get("prop_occurrences", [])} for scene in data["scenes"]]
+
+    def asset_context(data, category):
+        items = copy.deepcopy(data.get(category, []))
+        if category == "characters":
+            # Migration materializes this optional empty array on every CHAR;
+            # an absent legacy field and [] carry the same production meaning.
+            for item in items:
+                item.setdefault("production_design", [])
+        return items
+
+    changed = (old.get("source_digest") != result.get("source_digest")
+               or scene_context(old) != scene_context(result)
+               or any(asset_context(old, category) != asset_context(result, category)
+                      for category in ("characters", "locations", "scene_assets", "props")))
+    detail = "原文、场次/段落定位或资产目标记录发生变化" if changed else None
+    if detail is None:
+        try:
+            validate_prop_coverage(result, paragraphs, fact_list)
+        except (ValueError, KeyError, TypeError, IndexError) as exc:
+            detail = str(exc)
+    if detail is not None:
+        review["reviewed_full_script"] = False
+        pending.append({"kind": "道具反向覆盖待复核", "detail": detail,
+                        "action": "保留旧候选和出处；逐场重审去向、目标与证据后更新审阅，不自动改写旧source_digest"})
+
+
+def preserve_group_reviews(old, result, paragraphs, script, pending):
+    """Keep v2 modes stable and require fresh review after context changes."""
+    if old.get("group_policy") != GROUP_POLICY:
+        return
+    old_items = {item["id"]: item for item in old["characters"]}
+    fields = ("id", "number", "heading", "source_range", "location_id", "scene_asset_id",
+              "character_ids", "temporal_layer_id")
+
+    def linked_context(data, aid):
+        return [{field: scene.get(field) for field in fields} for scene in data["scenes"]
+                if aid in scene["character_ids"]]
+
+    def item_context(item):
+        value = copy.deepcopy(item)
+        value.setdefault("production_design", [])
+        return value
+
+    for item in result["characters"]:
+        if not is_group(item):
+            continue
+        original = old_items.get(item["id"])
+        changed = (original is None or old.get("source_digest") != result.get("source_digest")
+                   or item_context(original) != item_context(item)
+                   or linked_context(old, item["id"]) != linked_context(result, item["id"]))
+        detail = "原文、群像身份或场次/可见出场定位发生变化" if changed else None
+        if detail is None:
+            try:
+                validate_group_policy({**result, "characters": [item], "scene_assets": [], "props": []},
+                                      paragraphs, fact_list, script)
+            except (ValueError, KeyError, TypeError, IndexError) as exc:
+                detail = str(exc)
+        if detail is not None:
+            review = item.get("extraction_review")
+            if isinstance(review, dict):
+                review["reviewed_full_script"] = False
+            pending.append({"kind": "群像全剧筛选待复核", "asset_id": item["id"], "detail": detail,
+                            "action": "保留原图片模式与证据；重审剧情连续性和文字充分性后更新审阅，不自动升降或刷新旧摘要"})
 
 
 def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requested):
@@ -319,11 +399,15 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
                         pending.append({"kind": "群像独立可见出场待核" if category == "characters" else "道具独立可见使用待核",
                                         "asset_id": item["id"], "old_use": copy.deepcopy(use)})
                 item["visible_uses"] = uses
-                if category == "props" and len(uses) < 2 and old.get("asset_policy"):
+                prop_minimum = 1 if (old.get("asset_policy") == PROP_POLICY
+                                     and item.get("extraction_review", {}).get("kind") == "core_continuity") else 2
+                if category == "props" and len(uses) < prop_minimum and old.get("asset_policy"):
                     pending.append({"kind": "主要道具复用门槛待核", "asset_id": item["id"], "remaining_visible_uses": len(uses)})
-                if category == "characters" and item.get("visual_mode") == "image_asset" and len(uses) < 2:
+                if (category == "characters" and item.get("visual_mode") == "image_asset"
+                        and len(uses) < group_minimum_visible_uses(old, item)):
                     pending.append({"kind": "群像图片复用门槛待核", "asset_id": item["id"], "remaining_visible_uses": len(uses)})
-            if category == "characters" and item.get("extraction_review", {}).get("kind") == "background_group":
+            if (category == "characters" and item.get("extraction_review", {}).get("kind") == "background_group"
+                    and old.get("group_policy") != GROUP_POLICY):
                 if item["extraction_review"].get("source_digest") != digest(new_paragraphs):
                     pending.append({"kind": "群像全剧筛选待复核", "asset_id": item["id"],
                                     "action": "复核全剧出场与身份后更新群像审阅，不自动切换图片资产模式"})
@@ -444,6 +528,8 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
             item["visual_facts"] = facts
             if item["variant"] != "base" and not any(s["scene_asset_id"] == item["id"] for s in scenes):
                 pending.append({"kind": "未用布景版本去向待核", "asset_id": item["id"]})
+    preserve_group_reviews(old, result, new_paragraphs, bases, pending)
+    preserve_prop_coverage(old, result, new_paragraphs, pending)
     if "image_design_version" in old:
         try:
             validate_visual_design(result)

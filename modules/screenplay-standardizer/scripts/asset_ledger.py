@@ -745,6 +745,8 @@ def initialize(script_path: Path, workdir: Path, output: Path) -> None:
         "source_digest": digest(paragraphs), "scene_assets": [],
         "scenes": scenes, "characters": characters, "locations": locations,
         "props": [], "retired_ids": [], "inactive_assets": {"characters": []}, "pending_reviews": [],
+        "prop_coverage_review": {"source_digest": digest(paragraphs), "reviewed_full_script": False,
+                                 "reviewed_scene_ids": [], "candidates": []},
     }
     # The index is a draft until each scene's time basis is checked.
     output.parent.mkdir(parents=True, exist_ok=True)

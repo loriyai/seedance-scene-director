@@ -26,7 +26,7 @@ def save(path, value):
 
 def fixture(work, with_prop=True):
     paragraphs = ["陈默穿灰色布衣，取出一枚青铜令牌，放到桌上。", "陈默再次拿起青铜令牌，收入怀中。"]
-    data = {"schema_version": 3, "asset_policy": design.PROP_POLICY,
+    data = {"schema_version": 3, "asset_policy": design.LEGACY_PROP_POLICY,
             "source_digest": ledger.digest(paragraphs), "scenes": [],
             "characters": [{"id": "CHAR0001", "name": "陈默-第一世-基础形象", "source_entry": "陈默-基础形象",
                             "aliases": [], "personality_facts": [], "visual_facts": [
