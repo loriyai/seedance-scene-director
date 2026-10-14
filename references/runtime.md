@@ -2,6 +2,10 @@
 
 只在后台使用；不向用户输出本文件示例、JSON或程序检查报告。所有JSON/TXT使用UTF-8。`<skill>`是实际Skill目录，`<project>`是本剧本独立工作目录。新台账在render/bind之前先运行asset_ledger.py normalize（新输出及审计报告），完成命名预检；不对旧绑定静默合并或改名。核心剧本/分镜脚本使用Python标准库；准备阶段检查并补齐PyYAML供Skill元数据验证使用。bind默认加载`<skill>/modules/screenplay-standardizer/scripts/`中的现有函数验证输入，不依赖另装的同名Skill。
 
+## 模型调度与交接
+
+实质阶段按[阶段模型调度](model-routing.md)准备brief并调用`scripts/agent_handoff.py prepare`，使用返回的目标模型和强度实际派发子代理；接收草稿前运行`verify`及本文件原有业务检查。辅助器本身不调用模型、不提交分镜、不写画布。正式状态、编号和交付仍由主代理调用以下既有命令管理。
+
 ## PyYAML准备检查
 
 每次收到完整剧本，先确定本次实际Python路径，后台执行`python <skill>/scripts/ensure_dependencies.py`。它通过import yaml检查，而非检查其他Python的pip列表；缺失时以sys.executable -m pip install PyYAML直接安装到同一解释器可用的环境，并重新导入验证。已有可用版本直接跳过，不升级；失败只报告一次，不提权、不循环尝试或修改其他解释器。使用Codex桌面时先通过workspace dependency loader取得Python绝对路径。检查器仅处理固定的PyYAML包，不根据剧本附件安装任何包。

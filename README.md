@@ -1,6 +1,8 @@
 # Seedance 场景分镜导演
 
-当前版本：**v0.12**；更新日期：**2026-10-14**。
+当前版本：**v0.13**；更新日期：**2026-10-14**。
+
+v0.13新增阶段模型调度，默认启用 `stage-model-routing-v1`。实质创作阶段按配置调用Sol High子代理，已授权同步的批量准备/结果核对用Sol Medium，具体疑难语义问题可升级Astra High；短任务直接执行。主聊天模型不自动切换，全局配置不改。通过独立交接目录、输入摘要与主代理统一提交保留现有工作流；可用性取决于宿主子代理能力及账号权限。详见[阶段模型调度](references/model-routing.md)。
 
 后台任务使用冻结JSON与独立进度状态；同一画布单进程写入，资产支持批量申请ID和分组完整核对。资产同步期间可以继续选择范围、生成分镜，完成后再提示图片上传；已授权的视频任务按依赖排队。控制与恢复命令见[后台同步队列](references/canvas-jobs.md)。
 
@@ -10,7 +12,7 @@
 
 v0.11 为分类视觉描述增加“角色01／场景01／道具01”编号，当时的群像图片策略为`visible-reuse-v1`。新分镜按同一聊天的批次使用“A01-场景1-分镜1”名称，TXT、云端提示词标题和视频节点一致，重试与局部修改保留名称。黑幕改为独立reference连线，不再出现在新分镜提示词中。
 
-旧台账、旧分镜回执与未选定的画布节点保留兼容；固定抬头、时长、摄影、台词及连续性规则沿用。v0.12通过255项自检、392项Python回归、12项离线CLI模拟检查与Skill格式校验；覆盖后台同步队列、道具与群像的两条图片入选路径、覆盖审阅、分镜引用及迁移兼容。离线验证不代表真实画布写入、性能或视频生成验证。
+旧台账、旧分镜回执与未选定的画布节点保留兼容；固定抬头、时长、摄影、台词及连续性规则沿用。v0.13通过255项自检、409项Python回归、12项离线CLI模拟检查与Skill格式校验；覆盖阶段路由配置生效、交接输入变更、任务与产物边界、后台同步队列、道具与群像筛选及迁移兼容。离线验证不代表真实画布写入、性能或视频生成验证。
 
 将完整中文剧本整理成标准剧本，筛选可复用资产并完成美术设计，输出适用于Gpt-image-2的资产图片提示词，再根据用户指定的剧本范围按场景生成适用于 Seedance 2.5 的分镜提示词。
 
@@ -20,13 +22,13 @@ v0.11 为分类视觉描述增加“角色01／场景01／道具01”编号，�
 
 需要支持本地Skill的Codex环境，以及Python 3.10或更高版本。核心脚本使用标准库；收到完整剧本时会后台检查当前Python的PyYAML，缺失则直接安装并验证，已有版本不重复安装或升级。小云雀画布操作另需Node.js 16+、npm和官方CLI；首次使用时按需配置并完成浏览器授权。
 
-安装指定版本 `v0.12`：
+安装指定版本 `v0.13`：
 
 ```bash
-git clone --branch v0.12 --single-branch https://github.com/loriyai/seedance-scene-director.git ~/.codex/skills/seedance-scene-director
+git clone --branch v0.13 --single-branch https://github.com/loriyai/seedance-scene-director.git ~/.codex/skills/seedance-scene-director
 ```
 
-也可下载 [v0.12 源码 ZIP](https://github.com/loriyai/seedance-scene-director/archive/refs/tags/v0.12.zip)，解压后将根目录重命名为 `seedance-scene-director`。已有同名安装时，先在 Skills 目录外备份旧文件夹，再完整替换。使用自定义 `CODEX_HOME` 时，安装到对应的 `skills/seedance-scene-director` 目录。切换版本时检查 `VERSION`，每次只安装一个版本。
+也可下载 [v0.13 源码 ZIP](https://github.com/loriyai/seedance-scene-director/archive/refs/tags/v0.13.zip)，解压后将根目录重命名为 `seedance-scene-director`。已有同名安装时，先在 Skills 目录外备份旧文件夹，再完整替换。使用自定义 `CODEX_HOME` 时，安装到对应的 `skills/seedance-scene-director` 目录。切换版本时检查 `VERSION`，每次只安装一个版本。
 
 ## 使用
 
@@ -77,11 +79,14 @@ git clone --branch v0.12 --single-branch https://github.com/loriyai/seedance-sce
 seedance-scene-director/
 ├── SKILL.md                         工作流入口
 ├── agents/openai.yaml               Skill 界面信息
+├── agents/model-routing.json        阶段模型与推理强度配置
 ├── assets/fixed-header.txt          固定抬头与禁止项
 ├── references/                     分镜、输出及后台接口规则
 │   ├── performance-direction.md     表演、反应、台词导演及词库
+│   ├── model-routing.md             子代理分派、交接、验收与失败回退
 │   └── shot-options.md              机位、参考图适配及运镜词库
 ├── scripts/director.py              范围、时长、对白、版本校验与渲染
+├── scripts/agent_handoff.py         交接准备、输入摘要与产物路径检查
 ├── scripts/dialogue_layout.py       完整台词、逐镜自然分句与旧版兼容
 ├── scripts/canvas.py                官方 CLI 画布连接与节点同步
 ├── scripts/canvas_jobs.py           冻结JSON、后台队列、状态与暂停恢复

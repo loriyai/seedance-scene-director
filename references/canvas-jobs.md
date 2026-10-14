@@ -2,6 +2,8 @@
 
 资产、视频、引用刷新和图片上传默认使用 `scripts/canvas_jobs.py`。先完成 `canvas.py setup/auth/bind`，复用已绑定账号与用户指定画布。后台只调用官方CLI，不生成图片或视频。
 
+启用[阶段模型调度](model-routing.md)时，sync子代理仅准备已授权操作及核对本地结果；enqueue、pause、resume、image-choice与正式状态变更由主代理统一执行。云端写入仍由本队列worker独占，不因多个模型参与而增加画布writer。
+
 ## 提交、状态与控制
 
 ```text
