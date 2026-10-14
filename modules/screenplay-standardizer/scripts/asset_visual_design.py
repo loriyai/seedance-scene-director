@@ -11,6 +11,7 @@ import re
 
 
 PROP_POLICY = "visible-reuse-v1"
+GROUP_POLICY = "visible-reuse-v1"
 DESIGN_VERSION = "gpt-image-2-v1"
 ASSET_CATEGORIES = ("characters", "scene_assets", "props")
 FURNITURE = re.compile(r"(?:桌|床|椅|柜|沙发|茶几|凳)(?:子|铺)?$")
@@ -32,6 +33,127 @@ def nonempty(value, label):
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def is_group(item):
+    return "-群像-" in item.get("source_entry", item.get("name", ""))
+
+
+def visual_assets(data, category):
+    """CHAR remains the narrative cast index even when no reference image is needed."""
+    return [item for item in data.get(category, []) if item.get("visual_mode") != "prompt_only"]
+
+
+def validate_group_modes(data):
+    policy = data.get("group_policy")
+    if policy not in (None, GROUP_POLICY):
+        raise ValueError(f"不支持的群像提取政策：{policy}")
+    for category in ASSET_CATEGORIES:
+        for item in data.get(category, []):
+            mode = item.get("visual_mode")
+            if mode is not None and mode not in ("image_asset", "prompt_only"):
+                raise ValueError(f"{item['id']} visual_mode须为image_asset或prompt_only")
+            if category != "characters" or not is_group(item):
+                if mode == "prompt_only":
+                    raise ValueError(f"{item['id']}仅无姓名、无独立台词的背景群像可设为prompt_only")
+                continue
+            if policy is None and mode is None:
+                continue  # Existing groups are never silently demoted.
+            if mode is None:
+                raise ValueError(f"{item['id']}新群像须审阅并明确visual_mode")
+            review = item.get("extraction_review")
+            if not isinstance(review, dict) or review.get("kind") != "background_group" or review.get("reviewed_full_script") is not True:
+                raise ValueError(f"{item['id']}群像须完成全剧背景身份与独立出场审阅")
+            if not data.get("source_digest") or review.get("source_digest") != data.get("source_digest"):
+                raise ValueError(f"{item['id']}群像筛选审阅与原文版本不匹配，须重新审阅")
+            nonempty(review.get("identity_basis"), f"{item['id']}无姓名、无独立台词及原文明示身份依据")
+            if mode == "image_asset":
+                nonempty(review.get("consistency_reason"), f"{item['id']}群像外观一致性理由")
+            else:
+                nonempty(review.get("exclusion_reason"), f"{item['id']}群像不提取图片的依据")
+
+
+def validate_group_policy(data, paragraphs, fact_validator, script=None):
+    validate_group_modes(data)
+    scenes = {scene["id"]: scene for scene in data["scenes"]}
+    for item in data["characters"]:
+        if not is_group(item) or (data.get("group_policy") is None and "visual_mode" not in item):
+            continue
+        entry = item.get("source_entry", item["name"])
+        speaker = entry.split("-群像-", 1)[0]
+        if script is not None:
+            # Speaker lines are a computable exclusion; other identity semantics
+            # remain the author's full-script review, backed by source evidence.
+            pattern = re.compile(r"^\s*" + re.escape(speaker) + r"(?:-群像)?(?:\s*(?:OS|VO|O\.S\.|V\.O\.))?(?:（[^\n]*?）|\([^\n]*?\))?\s*[:：]", re.M)
+            if any(pattern.search(scene["body_text"]) for scene in script):
+                raise ValueError(f"{item['id']}群像称谓具有独立台词，须按个体人物核实而非背景群像筛选")
+        validate_visible_uses(item, paragraphs, scenes, fact_validator, "character_ids",
+                              2 if item["visual_mode"] == "image_asset" else 1, "可见出场")
+
+
+def apply_group_review(data, payload):
+    """Apply an explicit author review after normalized CHAR identities are known."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("groups"), list):
+        raise ValueError("群像审阅JSON须包含groups数组")
+    result = copy.deepcopy(data)
+    groups = {item["id"]: item for item in result["characters"] if is_group(item)}
+    records = {}
+    for record in payload["groups"]:
+        if not isinstance(record, dict) or set(record) != {"character_id", "visual_mode", "extraction_review", "visible_uses"}:
+            raise ValueError("群像审阅项须含character_id、visual_mode、extraction_review及visible_uses")
+        aid = record["character_id"]
+        if aid not in groups or aid in records:
+            raise ValueError(f"群像审阅ID不存在、非群像或重复：{aid}")
+        records[aid] = record
+    if set(records) != set(groups):
+        raise ValueError(f"全剧群像审阅须覆盖normalize后全部群像：缺少{sorted(set(groups) - set(records))}")
+    result["group_policy"] = GROUP_POLICY
+    for aid, item in groups.items():
+        item.update({key: copy.deepcopy(value) for key, value in records[aid].items() if key != "character_id"})
+    validate_group_modes(result)
+    return result
+
+
+def validate_visible_uses(item, paragraphs, scenes, fact_validator, linked_field, minimum, label_text):
+    label = item["id"]
+    uses = item.get("visible_uses")
+    if not isinstance(uses, list) or len(uses) < minimum:
+        raise ValueError(f"{label}至少需要{minimum}次独立{label_text}，不以词频或对白提及次数计数")
+    offsets, cursor = [], 0
+    for paragraph in paragraphs:
+        offsets.append(cursor)
+        cursor += len("".join(paragraph.split()))
+    events, spans = set(), []
+    for use in uses:
+        if not isinstance(use, dict):
+            raise ValueError(f"{label}{label_text}须为对象")
+        sid, event = use.get("scene_id"), nonempty(use.get("event_id"), f"{label}独立事件标识")
+        scene = scenes.get(sid)
+        if not scene or label not in scene[linked_field]:
+            raise ValueError(f"{label}{label_text}场次不存在或未关联该人物/道具")
+        key = (sid, event)
+        if key in events:
+            raise ValueError(f"{label}同一独立事件重复计数")
+        events.add(key)
+        refs = use.get("source_paragraphs")
+        if not isinstance(refs, list) or not refs or any(type(ref) is not int for ref in refs):
+            raise ValueError(f"{label}{label_text}缺少有效原文段落")
+        if refs != list(range(min(refs), max(refs) + 1)):
+            raise ValueError(f"{label}每次{label_text}证据段落须连续、按顺序且不重复")
+        evidence = nonempty(use.get("evidence"), f"{label}{label_text}证据")
+        fact_validator([{"text": label_text, "evidence": evidence, "source_paragraphs": refs,
+                         "scene_ids": [sid], "attribution": label_text + "审阅"}],
+                       paragraphs, scenes, label, sid)
+        text = "".join("".join(paragraphs[ref - 1] for ref in refs).split())
+        needle = "".join(evidence.split())
+        positions = [match.start() for match in re.finditer(re.escape(needle), text)]
+        if len(positions) != 1:
+            raise ValueError(f"{label}{label_text}证据须唯一定位独立事件，请缩小段落或补全原句")
+        start = offsets[refs[0] - 1] + positions[0]
+        span = (start, start + len(needle))
+        if any(span[0] < previous[1] and previous[0] < span[1] for previous in spans):
+            raise ValueError(f"{label}同一原文事件证据重叠，不能重复拆分成2次使用/出场")
+        spans.append(span)
 
 
 def asset_facts(data, category, item):
@@ -67,6 +189,11 @@ def source_context_digest(data, category, item):
               "source_name": item.get("source_name"), "appearance": item.get("appearance"),
               "visible_uses": item.get("visible_uses"), "variant": item.get("variant"),
               "parent_id": item.get("parent_id"), "location_id": item.get("location_id")}
+    # Preserve legacy digests exactly; new reviewed groups bind the extraction
+    # decision as well as the source facts to their compiled image prompt.
+    if "visual_mode" in item:
+        record["visual_mode"] = item["visual_mode"]
+        record["extraction_review"] = item.get("extraction_review")
     return fingerprint(record)
 
 
@@ -77,10 +204,6 @@ def validate_prop_policy(data, paragraphs, fact_validator):
     if policy != PROP_POLICY:
         raise ValueError(f"不支持的道具提取政策：{policy}")
     scenes = {scene["id"]: scene for scene in data["scenes"]}
-    offsets, cursor = [], 0
-    for paragraph in paragraphs:
-        offsets.append(cursor)
-        cursor += len("".join(paragraph.split()))
     for item in data["props"]:
         label = item["id"]
         review = item.get("extraction_review")
@@ -92,40 +215,7 @@ def validate_prop_policy(data, paragraphs, fact_validator):
             raise ValueError(f"{label}桌床等固定大件家具归入SET，不单独提取")
         if any(name in DAILY_ITEMS for name in names):
             nonempty(review.get("special_features"), f"{label}日用品须说明特殊可辨形制，普通日用品不提取")
-        uses = item.get("visible_uses")
-        if not isinstance(uses, list) or len(uses) < 2:
-            raise ValueError(f"{label}至少需要2次独立可见使用，不以词频或对白提及次数计数")
-        events, spans = set(), []
-        for use in uses:
-            if not isinstance(use, dict):
-                raise ValueError(f"{label}可见使用须为对象")
-            sid, event = use.get("scene_id"), nonempty(use.get("event_id"), f"{label}独立事件标识")
-            scene = scenes.get(sid)
-            if not scene or label not in scene["prop_ids"]:
-                raise ValueError(f"{label}可见使用场次不存在或未关联该道具")
-            key = (sid, event)
-            if key in events:
-                raise ValueError(f"{label}同一独立事件重复计数")
-            events.add(key)
-            refs = use.get("source_paragraphs")
-            if not isinstance(refs, list) or not refs or any(type(ref) is not int for ref in refs):
-                raise ValueError(f"{label}可见使用缺少有效原文段落")
-            if refs != list(range(min(refs), max(refs) + 1)):
-                raise ValueError(f"{label}每次可见使用证据段落须连续、按顺序且不重复")
-            evidence = nonempty(use.get("evidence"), f"{label}可见使用证据")
-            fact_validator([{"text": "可见使用", "evidence": evidence, "source_paragraphs": refs,
-                             "scene_ids": [sid], "attribution": "可见使用审阅"}],
-                           paragraphs, scenes, label, sid)
-            text = "".join("".join(paragraphs[ref - 1] for ref in refs).split())
-            needle = "".join(evidence.split())
-            positions = [match.start() for match in re.finditer(re.escape(needle), text)]
-            if len(positions) != 1:
-                raise ValueError(f"{label}可见使用证据须唯一定位独立事件，请缩小段落或补全原句")
-            start = offsets[refs[0] - 1] + positions[0]
-            span = (start, start + len(needle))
-            if any(span[0] < previous[1] and previous[0] < span[1] for previous in spans):
-                raise ValueError(f"{label}同一原文事件证据重叠，不能重复拆分成2次使用")
-            spans.append(span)
+        validate_visible_uses(item, paragraphs, scenes, fact_validator, "prop_ids", 2, "可见使用")
 
 
 def validate_design_record(category, item, design, anchors):
@@ -181,7 +271,7 @@ def identity_map(data):
 
 def validate_shared_identity(data):
     identities, anchor_owners = {}, {}
-    for item in data["characters"]:
+    for item in visual_assets(data, "characters"):
         appearance = item.get("appearance")
         if not appearance:
             continue  # No string splitting to guess the identity of old/simple casts.
@@ -223,6 +313,10 @@ def compile_prompt(data, category, item, design, anchors):
 
 
 def validate_visual_design(data):
+    validate_group_modes(data)
+    for item in data["characters"]:
+        if item.get("visual_mode") == "prompt_only" and any(field in item for field in ("visual_design", "image_prompt", "image_format", "image_design_digest")):
+            raise ValueError(f"{item['id']}仅提示词群像不能保留生图派生字段；请显式重新design")
     version = data.get("image_design_version")
     has_records = any("visual_design" in item or "image_prompt" in item or "image_format" in item
                       for category in ASSET_CATEGORIES for item in data.get(category, []))
@@ -235,7 +329,7 @@ def validate_visual_design(data):
         raise ValueError("视觉风格与摘要不匹配，请重新运行design")
     anchors = identity_map(data)
     for category in ASSET_CATEGORIES:
-        for item in data[category]:
+        for item in visual_assets(data, category):
             design = item.get("visual_design")
             validate_design_record(category, item, design, anchors)
             if item.get("image_design_digest") != fingerprint(design):
@@ -252,6 +346,7 @@ def validate_visual_design(data):
 
 
 def apply_design(data, payload, style_text):
+    validate_group_modes(data)
     if data.get("schema_version") != 3:
         raise ValueError("design仅用于已审阅schema 3；旧项目须显式升级，不自动迁移")
     if not isinstance(payload, dict) or not isinstance(payload.get("designs"), list):
@@ -271,11 +366,15 @@ def apply_design(data, payload, style_text):
         if aid in designs:
             raise ValueError(f"重复资产设计：{aid}")
         designs[aid] = {key: copy.deepcopy(value) for key, value in record.items() if key != "asset_id"}
-    expected = {item["id"] for category in ASSET_CATEGORIES for item in result[category]}
+    expected = {item["id"] for category in ASSET_CATEGORIES for item in visual_assets(result, category)}
     if set(designs) != expected:
-        raise ValueError(f"design须覆盖全部现用CHAR/SET/PROP，不创建或删除资产；缺少{sorted(expected - set(designs))}，多余{sorted(set(designs) - expected)}")
+        raise ValueError(f"design须覆盖全部现用图片CHAR/SET/PROP，prompt_only群像不填设计；缺少{sorted(expected - set(designs))}，多余{sorted(set(designs) - expected)}")
+    for item in result["characters"]:
+        if item.get("visual_mode") == "prompt_only":
+            for field in ("visual_design", "image_prompt", "image_format", "image_design_digest"):
+                item.pop(field, None)
     for category in ASSET_CATEGORIES:
-        for item in result[category]:
+        for item in visual_assets(result, category):
             design = designs[item["id"]]
             validate_design_record(category, item, design, anchors)
             design["source_fact_digest"] = fingerprint(source_constraints(result, category, item))

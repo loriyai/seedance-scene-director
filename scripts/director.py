@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Persist checked screenplay bindings, locate ranges, validate and render prompts."""
 import argparse
+from contextlib import nullcontext
 import copy
 import hashlib
 import importlib
@@ -17,13 +18,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import dialogue_layout
 import continuity
+import batch_naming
 HEADER_SHA = "8001822afdf324cbbfa3eb284b2a03ccbde084b2e70fa66763a26b5c738e5962"
 STYLES = {"1": "3D国风动漫,暗黑武侠/超写实仙侠风格", "2": "3D国风动漫，眷思量风格，东方奇幻唯美风格"}
 SPEEDS = {"常速": (4.0, 5.2), "快节奏": (4.5, 5.8), "情绪慢速": (3.3, 4.4)}
 FRAMINGS = {"大远景", "大全景", "远景", "全景", "中景", "中近景", "近景", "特写"}
 CLOSE = {"近景", "特写"}
 OUTPUT_FORMAT = "reference-v3"
-RECEIPT_DISPLAY_FORMAT = "numbered-units-v1"
+RECEIPT_DISPLAY_FORMAT = "batch-names-v1"
+LEGACY_RECEIPT_DISPLAY_FORMAT = "numbered-units-v1"
+BLACK_REFERENCE_MODE = "edge-only-v1"
 PHOTOGRAPHY_FIELDS = ("camera", "composition", "depth_of_field", "lighting")
 FACE_FRAMINGS = CLOSE | {"中近景"}
 
@@ -498,12 +502,22 @@ def scene_asset_ids(state, scene_ids):
     return list(dict.fromkeys(scenes[sid]["scene_asset_id"] for sid in scene_ids)) if state["ledger"].get("schema_version") == 3 else list(scene_ids)
 
 
+def prompt_only_ids(state):
+    return {item["id"] for item in state["ledger"]["characters"] if item.get("visual_mode") == "prompt_only"}
+
+
+def reference_name(state, asset_id, catalog):
+    name = catalog[asset_id]
+    return name if asset_id in prompt_only_ids(state) else "@" + name + " "
+
+
 def asset_text(state, unit, text):
     """Resolve explicit references only; never replace bare substrings or dialogue."""
     scenes = {s["id"]: s for s in state["ledger"]["scenes"]}
     allowed = set(scene_asset_ids(state, unit["scene_ids"]) + unit["character_ids"])
     allowed.update(pid for sid in unit["scene_ids"] for pid in scenes[sid]["prop_ids"])
     catalog = reference_catalog(state, allowed)
+    plain = prompt_only_ids(state)
     by_name = {name: aid for aid, name in catalog.items()}
     names = sorted(by_name, key=len, reverse=True)
     pattern = re.compile(r"@(?:\{([^{}]+)\}|(" + "|".join(re.escape(name) for name in names) + r")(?= ))")
@@ -515,13 +529,33 @@ def asset_text(state, unit, text):
         require(match is not None, f"无法识别资产引用（名称后须有英文空格）：{text[at.start():at.start() + 40]}")
         asset_id = match.group(1) or by_name[match.group(2)]
         require(asset_id in catalog and asset_id in allowed, f"资产引用不属于本单元或不存在：{asset_id}")
-        output.extend([text[cursor:at.start()], "@" + catalog[asset_id]])
-        if match.group(1) and text[match.end():match.end() + 1] != " ":
+        output.extend([text[cursor:at.start()], ("" if asset_id in plain else "@") + catalog[asset_id]])
+        if asset_id not in plain and match.group(1) and text[match.end():match.end() + 1] != " ":
             output.append(" ")
         used.add(asset_id)
         cursor = match.end()
     output.append(text[cursor:])
     return "".join(output), used
+
+
+def unit_name(unit):
+    return unit.get("display_name", unit["id"])
+
+
+def resolve_unit_id(state, value):
+    """Resolve exact stable IDs, full visible names or a unique batch short name."""
+    matches = {unit["id"] for unit in state["units"] if value == unit["id"] or value == unit_name(unit)
+               or (unit.get("display_name") and value == unit["display_name"].split("-", 1)[0])}
+    require(len(matches) == 1, f"分镜名称不存在或无法唯一定位：{value}")
+    return next(iter(matches))
+
+
+def resolved_request(state, request):
+    request = copy.deepcopy(request)
+    if request.get("mode") == "replace":
+        for unit in request.get("units", []):
+            unit["id"] = resolve_unit_id(state, unit.get("id"))
+    return request
 
 
 def validate_unit(state, unit, request_span, *, require_continuity=False):
@@ -729,6 +763,8 @@ def validate(state, request, partial=False):
         if unit.get("audio"):
             require(unit.get("dialogue_layout") == dialogue_layout.POLICY,
                     "新生成/修改的有声单元须采用semantic-v2台词布局；旧交付仅保留读取和渲染")
+    request = resolved_request(state, request)
+    units = request["units"]
     warnings = []
     if request["mode"] == "append":
         a, b = interval(request["span"], state["length"])
@@ -782,13 +818,17 @@ def render_unit(state, unit, reference_text=None):
     structured_format = unit.get("output_format") == OUTPUT_FORMAT
     current_format = unit.get("output_format") in ("reference-v2", OUTPUT_FORMAT)
     reference_format = unit.get("output_format") in ("reference-v1", "reference-v2", OUTPUT_FORMAT)
-    people = ("，".join(convert("@" + chars[c] + " ") for c in unit["character_ids"]) + "；") if reference_format else "".join(chars[c] + convert("@" + chars[c] + " ") + "；" for c in unit["character_ids"])
+    people = ("，".join(convert(reference_name(state, c, chars)) for c in unit["character_ids"]) + "；") if reference_format else "".join(chars[c] + convert(reference_name(state, c, chars)) + "；" for c in unit["character_ids"])
     scene_text = "".join(("" if structured_format else scenes[s])
                          + convert("@" + catalog[scene_asset_ids(state, [s])[0]] + " ") + "；"
                          for s in unit["scene_ids"])
-    lines = [f'{unit["id"]}（时长：{unit["duration"]}秒）', convert("@黑幕"), unit["style"] + ";" + header[0], header[1],
+    require(unit.get("black_reference_mode") in (None, BLACK_REFERENCE_MODE), "未知的黑幕引用模式")
+    lines = [f'{unit_name(unit)}（时长：{unit["duration"]}秒）']
+    if unit.get("black_reference_mode") != BLACK_REFERENCE_MODE:
+        lines.append(convert("@黑幕"))
+    lines.extend([unit["style"] + ";" + header[0], header[1],
              "人物：" + (people if unit["character_ids"] else "无；"),
-             "场景：" + scene_text + f'时间：{unit["time"]}；天气：{unit["weather"]}；']
+             "场景：" + scene_text + f'时间：{unit["time"]}；天气：{unit["weather"]}；'])
     if current_format:
         positions = unit["global"].removeprefix("人物站位：").strip()
         lines.append("人物站位：" + convert(asset_text(state, unit, positions)[0]))
@@ -802,12 +842,12 @@ def render_unit(state, unit, reference_text=None):
             event = next(e for e in unit["audio"] if e["record"] == part["record"])
             timing = dialogue_layout.timing(part, shot, event.get("timing_basis") == "recording") if not current_format and unit.get("dialogue_layout") == dialogue_layout.LEGACY_POLICY else ""
             delivery = dialogue_layout.delivery_text(part, event) if structured_format else ""
-            parts.append(convert("@" + chars[event["character_id"]] + " ") + event["voice"] + timing + delivery + '：“' + part["text"] + '”')
+            parts.append(convert(reference_name(state, event["character_id"], chars)) + event["voice"] + timing + delivery + '：“' + part["text"] + '”')
         for link in shot.get("dialogue_continuations", []):
             event = next(e for e in unit["audio"] if e["record"] == link["record"])
             chunks = [p for s in unit["shots"] for p in s.get("dialogue_parts", []) if p["record"] == link["record"]]
             chunk = chunks[link["segment"]]
-            parts.append(convert("@" + chars[event["character_id"]] + " ") +
+            parts.append(convert(reference_name(state, event["character_id"], chars)) +
                          f'同句续声至{dialogue_layout.clock(chunk["end"])}秒。')
         speech = (" " + " ".join(parts)) if parts else ""
         body = convert(asset_text(state, unit, shot["text"])[0])
@@ -819,8 +859,8 @@ def render_unit(state, unit, reference_text=None):
             if body[-1:] not in ("。", "！", "？", "!", "?", "；", ";"):
                 body += "。"
             focus = shot.get("focus", [])
-            focal_names = [catalog[aid] for aid in focus] or [catalog[scene_asset_ids(state, [shot["scene_id"]])[0]]]
-            focal = "、".join(convert("@" + name + " ") for name in focal_names)
+            focal_ids = focus or [scene_asset_ids(state, [shot["scene_id"]])[0]]
+            focal = "、".join(convert(reference_name(state, aid, catalog)) for aid in focal_ids)
             sounds = [convert(asset_text(state, unit, shot[field].strip().rstrip("。"))[0])
                       for field in ("sound_foreground", "sound_environment")
                       if shot.get(field, "").strip().rstrip("。") not in ("", "无")]
@@ -841,11 +881,13 @@ def render_unit(state, unit, reference_text=None):
     return "\n".join(lines)
 
 
-def validate_output_path(state, project, output):
+def validate_output_path(state, project, output, batch_scope=None):
     output = Path(output).resolve()
     project = Path(project).resolve()
     protected = [Path(x["path"]).resolve() for x in state["files"].values()]
     protected.extend((project / n).resolve() for n in ("session.json", "video-style.txt"))
+    scope = batch_naming.scope_for(project, state.get("batch_scope"), batch_scope)
+    protected.extend(scope / n for n in (batch_naming.REGISTRY, ".batch-names.lock"))
     directories = [ROOT.resolve(), (project / "canvas").resolve(), (project / "scenes").resolve()]
     if "source" in state["files"]:
         directories.append((Path(state["files"]["source"]["path"]).resolve().parent / "scenes").resolve())
@@ -857,12 +899,14 @@ def validate_output_path(state, project, output):
 def render_receipt(state, receipt, project=None):
     if project is not None:
         validate_output_path(state, project, receipt["output"])
+    if receipt.get("batch_scope"):
+        batch_naming.recover(receipt["batch_scope"])
     display_format = receipt.get("display_format")
-    require(display_format in (None, RECEIPT_DISPLAY_FORMAT), "未知的交付展示格式")
+    require(display_format in (None, LEGACY_RECEIPT_DISPLAY_FORMAT, RECEIPT_DISPLAY_FORMAT), "未知的交付展示格式")
     rendered = []
     for number, unit in enumerate(receipt["units"], 1):
         text = render_unit(state, unit)
-        if display_format == RECEIPT_DISPLAY_FORMAT:
+        if display_format == LEGACY_RECEIPT_DISPLAY_FORMAT:
             text = f"{number:02d} - " + text
         rendered.append(text)
     atomic_text(receipt["output"], "\n\n".join(rendered) + "\n")
@@ -895,39 +939,69 @@ def commit(args, state):
         require(old_receipt["request_hash"] == request_hash, "request_id已用于不同请求；请使用新ID")
         render_receipt(state, old_receipt, args.project)
         return {"status": "already_committed", "output": old_receipt["output"], "ids": [u["id"] for u in old_receipt["units"]],
+                "names": [unit_name(u) for u in old_receipt["units"]],
                 "canvas_sync": sync_canvas_replacements(args.project, old_receipt), **receipt_summary(old_receipt)}
-    output = validate_output_path(state, args.project, args.output)
+    scope = None
+    if request["mode"] == "append":
+        scope = batch_naming.scope_for(args.project, state.get("batch_scope"), getattr(args, "batch_scope", None))
+        require(scope != ROOT.resolve() and ROOT.resolve() not in scope.parents,
+                "批次登记不能保存到Skill安装目录")
+        require(not state.get("batch_scope") or (scope / batch_naming.REGISTRY).is_file(),
+                "已绑定的批次登记丢失；请恢复原登记，不能重新从A开始")
+    output = validate_output_path(state, args.project, args.output, scope)
     require(not output.exists(), "交付文件已存在；请使用新文件名以保留旧版本")
     warnings = validate(state, request)
+    request = resolved_request(state, request)
     style = (args.project / "video-style.txt").read_text(encoding="utf-8-sig").strip()
-    units = copy.deepcopy(request["units"])
-    scenes = {s["id"]: s for s in state["ledger"]["scenes"]}
-    for unit in units:
-        unit["style"] = style
+    allocation = (batch_naming.allocate(scope, args.project, request["request_id"], request_hash)
+                  if scope is not None else nullcontext(None))
+    with allocation as batch_label:
+        session_path = Path(args.project) / "session.json"
+        if session_path.is_file():
+            require(read_json(session_path).get("revision") == state.get("revision"),
+                    "项目状态已被另一提交更新；请重新读取后重试")
+        working = copy.deepcopy(state)
+        units = copy.deepcopy(request["units"])
+        scenes = {s["id"]: s for s in working["ledger"]["scenes"]}
+        for index, unit in enumerate(units, 1):
+            unit["style"] = style
+            unit["black_reference_mode"] = BLACK_REFERENCE_MODE
+            if request["mode"] == "append":
+                main = unit["main_scene"]
+                number = working["next_numbers"].get(main, 1)
+                prior = next((u for u in reversed(working["units"]) if u["span"][1] == unit["span"][0]), None)
+                unit.update(id=f'场景{scenes[main]["number"]}-分镜{number}', version=1,
+                            batch_id=request["request_id"], previous_versions=[], predecessor=prior["id"] if prior else None,
+                            batch_label=batch_label, batch_index=index)
+                unit["display_name"] = f'{batch_label}{index:02d}-{unit["id"]}'
+                working["next_numbers"][main] = number + 1
+                working["units"].append(unit)
+            else:
+                old = next(u for u in working["units"] if u["id"] == unit["id"])
+                unit.update(version=old["version"] + 1, batch_id=old["batch_id"], predecessor=old.get("predecessor"),
+                            previous_versions=old.get("previous_versions", []) + [{k: v for k, v in old.items() if k != "previous_versions"}])
+                for field in ("display_name", "batch_label", "batch_index"):
+                    unit.pop(field, None)
+                    if field in old:
+                        unit[field] = old[field]
+                working["units"][working["units"].index(old)] = unit
         if request["mode"] == "append":
-            main = unit["main_scene"]
-            number = state["next_numbers"].get(main, 1)
-            prior = next((u for u in reversed(state["units"]) if u["span"][1] == unit["span"][0]), None)
-            unit.update(id=f'场景{scenes[main]["number"]}-分镜{number}', version=1,
-                        batch_id=request["request_id"], previous_versions=[], predecessor=prior["id"] if prior else None)
-            state["next_numbers"][main] = number + 1
-            state["units"].append(unit)
-        else:
-            old = next(u for u in state["units"] if u["id"] == unit["id"])
-            unit.update(version=old["version"] + 1, batch_id=old["batch_id"], predecessor=old.get("predecessor"),
-                        previous_versions=old.get("previous_versions", []) + [{k: v for k, v in old.items() if k != "previous_versions"}])
-            state["units"][state["units"].index(old)] = unit
-    if request["mode"] == "append":
-        state["ranges"].append({"span": request["span"], "batch_id": request["request_id"],
-                                "confirmed": bool(request.get("range_confirmation"))})
-    receipt = {"request_id": request["request_id"], "request_hash": request_hash, "mode": request["mode"],
-               "output": str(output), "units": copy.deepcopy(units), "display_format": RECEIPT_DISPLAY_FORMAT}
-    state["receipts"].append(receipt)
-    state["phase"] = "nodes_choice"
-    save(args.project, state)
+            working["ranges"].append({"span": request["span"], "batch_id": request["request_id"],
+                                     "confirmed": bool(request.get("range_confirmation")), "batch_label": batch_label})
+            working["batch_scope"] = str(scope)
+        receipt = {"request_id": request["request_id"], "request_hash": request_hash, "mode": request["mode"],
+                   "output": str(output), "units": copy.deepcopy(units), "display_format": RECEIPT_DISPLAY_FORMAT}
+        if scope is not None:
+            receipt.update(batch_scope=str(scope), batch_label=batch_label)
+        working["receipts"].append(receipt)
+        working["phase"] = "nodes_choice"
+        save(args.project, working)
+        state.clear()
+        state.update(working)
     # State is authoritative. A failed filesystem delivery can be recovered with render.
     render_receipt(state, receipt, args.project)
-    return {"status": "committed", "output": str(output), "ids": [u["id"] for u in units], "warnings": warnings,
+    return {"status": "committed", "output": str(output), "ids": [u["id"] for u in units],
+            "names": [unit_name(u) for u in units], "warnings": warnings,
             "canvas_sync": sync_canvas_replacements(args.project, receipt), **receipt_summary(receipt)}
 
 
@@ -963,6 +1037,7 @@ def main():
                 p.add_argument("--partial", action="store_true")
             else:
                 p.add_argument("--output", type=Path, required=True)
+                p.add_argument("--batch-scope", type=Path, help="同一对话共享的批次登记目录；自定义项目跨项目共享时指定")
         elif command == "render":
             p.add_argument("--request-id", required=True)
     args = parser.parse_args()
@@ -982,6 +1057,9 @@ def main():
             elif args.command == "status":
                 result = {k: state[k] for k in ("phase", "revision", "entry", "ranges", "next_numbers")}
                 result["units"] = [{k: u[k] for k in ("id", "version", "span", "duration", "start_state", "end_state")} for u in state["units"]]
+                for item, unit in zip(result["units"], state["units"]):
+                    item["name"] = unit_name(unit)
+                result["batch_scope"] = state.get("batch_scope")
             elif args.command == "locate":
                 result = locate(args, state)
             elif args.command == "range":

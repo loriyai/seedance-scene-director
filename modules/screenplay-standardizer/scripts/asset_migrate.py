@@ -299,7 +299,7 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
                     else:
                         pending.append({"kind": "资产事实证据或出现关系待核", "asset_id": item["id"], "fact": fact})
                 item[field] = migrated
-            if category == "props" and "visible_uses" in item:
+            if category in ("characters", "props") and "visible_uses" in item:
                 uses = []
                 for use in item["visible_uses"]:
                     fact = {"text": "可见使用", "evidence": use["evidence"],
@@ -307,7 +307,8 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
                             "scene_ids": [use["scene_id"]], "attribution": "可见使用审阅"}
                     revised = migrate_fact(fact, old_by_id, lineage, new_by_number,
                                            old_paragraphs, new_paragraphs, new_index)
-                    if revised and len(revised["scene_ids"]) == 1 and item["id"] in new_by_id[revised["scene_ids"][0]]["prop_ids"]:
+                    linked_field = "character_ids" if category == "characters" else "prop_ids"
+                    if revised and len(revised["scene_ids"]) == 1 and item["id"] in new_by_id[revised["scene_ids"][0]][linked_field]:
                         moved = copy.deepcopy(use)
                         moved["scene_id"] = revised["scene_ids"][0]
                         moved["source_paragraphs"] = revised["source_paragraphs"]
@@ -315,10 +316,17 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
                             moved["event_id"] = use["scene_id"] + ":" + use["event_id"]
                         uses.append(moved)
                     else:
-                        pending.append({"kind": "道具独立可见使用待核", "asset_id": item["id"], "old_use": copy.deepcopy(use)})
+                        pending.append({"kind": "群像独立可见出场待核" if category == "characters" else "道具独立可见使用待核",
+                                        "asset_id": item["id"], "old_use": copy.deepcopy(use)})
                 item["visible_uses"] = uses
-                if len(uses) < 2 and old.get("asset_policy"):
+                if category == "props" and len(uses) < 2 and old.get("asset_policy"):
                     pending.append({"kind": "主要道具复用门槛待核", "asset_id": item["id"], "remaining_visible_uses": len(uses)})
+                if category == "characters" and item.get("visual_mode") == "image_asset" and len(uses) < 2:
+                    pending.append({"kind": "群像图片复用门槛待核", "asset_id": item["id"], "remaining_visible_uses": len(uses)})
+            if category == "characters" and item.get("extraction_review", {}).get("kind") == "background_group":
+                if item["extraction_review"].get("source_digest") != digest(new_paragraphs):
+                    pending.append({"kind": "群像全剧筛选待复核", "asset_id": item["id"],
+                                    "action": "复核全剧出场与身份后更新群像审阅，不自动切换图片资产模式"})
             if category == 'characters' and item.get('appearance'):
                 old_anchor = item['appearance']['active_from']
                 for field in ('active_from', 'active_until'):
@@ -348,7 +356,7 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
     result = {"schema_version": 2, "source_digest": digest(new_paragraphs), "scenes": scenes,
               "characters": characters, "locations": locations, "props": props,
               "retired_ids": sorted(retired), "inactive_assets": inactive, "pending_reviews": pending}
-    for field in ("asset_policy", "image_design_version", "visual_style", "identity_anchors"):
+    for field in ("asset_policy", "group_policy", "image_design_version", "visual_style", "identity_anchors"):
         if field in old:
             result[field] = copy.deepcopy(old[field])
     if old.get("schema_version") == 3:

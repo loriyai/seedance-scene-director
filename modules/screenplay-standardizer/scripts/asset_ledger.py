@@ -10,8 +10,9 @@ import re
 import tempfile
 from pathlib import Path
 
-from asset_visual_design import (PROP_POLICY, apply_design, validate_prop_policy,
-                                 validate_visual_design)
+from asset_visual_design import (PROP_POLICY, GROUP_POLICY, apply_design, apply_group_review,
+                                 validate_prop_policy, validate_group_policy,
+                                 validate_visual_design, visual_assets)
 
 
 HEADING = re.compile(r"场景(\d+)(?=-(?:日|夜)-(?:内|外)-|：(?:日|夜)·(?:内|外)·)[：-](日|夜)[·-](内|外)[·-](.+)")
@@ -165,6 +166,11 @@ def normalize_assets(data):
                     for value in item.get(field, []):
                         if value not in target.setdefault(field, []):
                             target[field].append(value)
+                if category == 'characters' and (result.get('group_policy') or 'visual_mode' in target or 'visual_mode' in item):
+                    # Review the merged full-script group once; a per-scene
+                    # decision cannot silently become its final asset policy.
+                    target['visual_mode'] = 'prompt_only'
+                    target.pop('extraction_review', None)
             else:
                 output.append(item)
                 if key is not None:
@@ -433,6 +439,7 @@ def validate(script: list[dict], paragraphs: list[str], data: dict) -> None:
         validate_scene_assets(data, paragraphs, scenes_by_id, locations)
     reference_preflight(data)
     validate_prop_policy(data, paragraphs, fact_list)
+    validate_group_policy(data, paragraphs, fact_list, script)
     validate_visual_design(data)
 
 
@@ -722,6 +729,9 @@ def initialize(script_path: Path, workdir: Path, output: Path) -> None:
                     "source_entry": entry, "aliases": [],
                     "visual_facts": [], "personality_facts": [],
                 })
+                if role_name.endswith('-群像'):
+                    # This is a draft until the author reviews all occurrences.
+                    characters[-1]['visual_mode'] = 'prompt_only'
             linked.append(character_ids[key])
         scenes.append({
             "id": f"SC{base['number']:04d}", "number": base["number"],
@@ -731,7 +741,7 @@ def initialize(script_path: Path, workdir: Path, output: Path) -> None:
             "time_basis": {"kind": "待核", "source_paragraphs": []},
         })
     data = {
-        "schema_version": 3, "asset_policy": PROP_POLICY,
+        "schema_version": 3, "asset_policy": PROP_POLICY, "group_policy": GROUP_POLICY,
         "source_digest": digest(paragraphs), "scene_assets": [],
         "scenes": scenes, "characters": characters, "locations": locations,
         "props": [], "retired_ids": [], "inactive_assets": {"characters": []}, "pending_reviews": [],
@@ -773,9 +783,9 @@ def render(script_path: Path, source_path: Path, ledger_path: Path, output: Path
     props = {item["id"]: item for item in data["props"]}
     scene_assets = {item["id"]: item for item in data.get("scene_assets", [])}
     lines = ["角色列表"]
-    for number, item in enumerate(data["characters"], 1):
+    for number, item in enumerate(visual_assets(data, "characters"), 1):
         features = "、".join(visual_text(item["visual_facts"])) or "外观未明示"
-        lines.append(f"{number:02d} - {item['name']}：" + (item["image_prompt"] if item.get("image_prompt") else features + "。"))
+        lines.append(f"角色{number:02d} - {item['name']}：" + (item["image_prompt"] if item.get("image_prompt") else features + "。"))
         if item.get('production_design') and not item.get("image_prompt"):
             lines.append('  制作设计：' + '、'.join(visual_text(item['production_design'])) + '。')
         numbers = sorted({scene["number"] for scene in data["scenes"] if item["id"] in scene["character_ids"]})
@@ -787,7 +797,7 @@ def render(script_path: Path, source_path: Path, ledger_path: Path, output: Path
         if data["schema_version"] == 3:
             elements = visual_text(set_visual_facts(scene, locations, scene_assets))
             description = scene.get("image_prompt")
-            lines.append(f"{number:02d} - {scene['name']}" + ("：" + description if description else f"｜关键元素：{'、'.join(dict.fromkeys(elements)) or '未明示'}。"))
+            lines.append(f"场景{number:02d} - {scene['name']}" + ("：" + description if description else f"｜关键元素：{'、'.join(dict.fromkeys(elements)) or '未明示'}。"))
             numbers = sorted(s["number"] for s in data["scenes"] if s["scene_asset_id"] == scene["id"])
             lines.append("  使用的场次：" + ("，".join(f"场景{n}" for n in numbers) or "无（基础布景供版本继承）") + "。")
             continue
@@ -799,12 +809,12 @@ def render(script_path: Path, source_path: Path, ledger_path: Path, output: Path
         elements = list(dict.fromkeys(elements))
         if not elements:
             elements = [script[scene["number"] - 1]["location_name"]]
-        lines.append(f"{number:02d} - {scene['heading']}｜氛围：{'、'.join(atmosphere) or '未明示'}；关键元素：{'、'.join(elements)}。")
+        lines.append(f"场景{number:02d} - {scene['heading']}｜氛围：{'、'.join(atmosphere) or '未明示'}；关键元素：{'、'.join(elements)}。")
 
     lines.extend(["", "主要道具列表"])
     for number, item in enumerate(data["props"], 1):
         features = "、".join(visual_text(item["visual_facts"])) or "外形未明示"
-        lines.append(f"{number:02d} - {item['name']}：" + (item["image_prompt"] if item.get("image_prompt") else features + "。"))
+        lines.append(f"道具{number:02d} - {item['name']}：" + (item["image_prompt"] if item.get("image_prompt") else features + "。"))
         numbers = sorted({scene["number"] for scene in data["scenes"] if item["id"] in scene["prop_ids"]})
         lines.append("  使用的场次：" + ("，".join(f"场景{n}" for n in numbers) or "无") + "。")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -833,6 +843,8 @@ def main() -> None:
     normalize.add_argument('ledger', type=Path)
     normalize.add_argument('--output', type=Path, required=True)
     normalize.add_argument('--report', type=Path, required=True)
+    normalize.add_argument('--group-review', type=Path, help='对normalize后全部群像的显式筛选审阅JSON')
+    normalize.add_argument('--source', type=Path, help='--group-review时必需，校验原文版本与独立出场证据')
     view = commands.add_parser("render", help="验证台账并生成易读资产 TXT")
     view.add_argument("script", type=Path)
     view.add_argument("source", type=Path)
@@ -854,6 +866,16 @@ def main() -> None:
             if args.output.resolve() == args.report.resolve() or args.output.exists() or args.report.exists():
                 raise ValueError('归一化输出/报告须为不同的新文件；不覆盖已绑定台账或映射')
             data, report = normalize_assets(json.loads(args.ledger.read_text(encoding='utf-8-sig')))
+            if args.group_review:
+                if not args.source:
+                    raise ValueError('--group-review须提供--source校验原文证据')
+                paragraphs = source_paragraphs(args.source)
+                if data.get('source_digest') != digest(paragraphs):
+                    raise ValueError('群像审阅原文版本与台账不匹配')
+                data = apply_group_review(data, json.loads(args.group_review.read_text(encoding='utf-8-sig')))
+                validate_group_policy(data, paragraphs, fact_list)
+                report['group_reviews'] = [{'id': item['id'], 'visual_mode': item['visual_mode']}
+                                           for item in data['characters'] if 'visual_mode' in item]
             for path, value in ((args.output, data), (args.report, report)):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')

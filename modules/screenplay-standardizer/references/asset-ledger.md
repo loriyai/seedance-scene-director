@@ -4,9 +4,10 @@
 
 ```text
 python scripts/asset_ledger.py init <standard-script.txt> <task-work-dir> --output <asset-ledger.json>
-python scripts/asset_ledger.py build-scenes <identity-and-time-reviewed-ledger.json> --source <task-work-dir>/source.json --output <sets-draft.json>
-python scripts/asset_ledger.py normalize <new-unbound-ledger.json> --output <normalized-ledger.json> --report <naming-audit.json>
-python scripts/asset_ledger.py design <standard-script.txt> <task-work-dir>/source.json <normalized-ledger.json> <asset-design.json> --style-file <project>/video-style.txt --output <designed-ledger.json> --catalog-output <asset-catalog.txt>
+python scripts/asset_ledger.py normalize <identity-and-time-reviewed-ledger.json> --output <normalized-ledger.json> --report <naming-audit.json>
+python scripts/asset_ledger.py build-scenes <normalized-ledger.json> --source <task-work-dir>/source.json --output <sets-draft.json>
+python scripts/asset_ledger.py normalize <sets-draft.json> --group-review <group-review.json> --source <task-work-dir>/source.json --output <group-reviewed-ledger.json> --report <group-review-report.json>
+python scripts/asset_ledger.py design <standard-script.txt> <task-work-dir>/source.json <group-reviewed-ledger.json> <asset-design.json> --style-file <project>/video-style.txt --output <designed-ledger.json> --catalog-output <asset-catalog.txt>
 python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/source.json <asset-ledger.json> --output <asset-catalog.txt>
 ```
 
@@ -16,6 +17,7 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
 {
   "schema_version": 3,
   "asset_policy": "visible-reuse-v1",
+  "group_policy": "visible-reuse-v1",
   "source_digest": "由 init 计算的原文段落摘要",
   "scenes": [
     {
@@ -53,7 +55,7 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
 }
 ```
 
-`init` 只建立场次、人物和待核地点索引，scene_assets为空且scene_asset_id为null，不自动提取资产事实或主要道具。地点按场景先分配独立 ID，核实是同一地点后再合并；明确姓名的角色只按完整人物条目初步归并。`卢筱筱-基础形象` 与 `卢筱筱-黑色裙子` 分别建立稳定 ID；同一完整条目在多场出现且身份明确时复用 ID。泛称有台词角色先按身份核实；群像草稿直接加地点后缀，在地点核实后normalize按同地点同原条目/形象复用，不保留逐SC重复资产。群像只用于无姓名、无台词且原文明示阵营、身份、人设或职业的背景人物。若相同条目指向不同实体，拆成不同 ID，并用逐场关联指向各自实体。新 ID 只追加，废弃的 ID 放入 `retired_ids`，不回收。场景的 `number`、`heading` 可随剧本修改；`id` 保持稳定。
+`init` 只建立场次、人物和待核地点索引，scene_assets为空且scene_asset_id为null，不自动提取资产事实或主要道具。地点按场景先分配独立 ID，核实是同一地点后再合并；明确姓名的角色只按完整人物条目初步归并。`卢筱筱-基础形象` 与 `卢筱筱-黑色裙子` 分别建立稳定 ID；同一完整条目在多场出现且身份明确时复用 ID。泛称有台词角色先按身份核实；群像草稿直接加地点后缀，在地点核实后normalize按同地点同原条目/形象归并候选，再审阅图片筛选，不逐SC建图。群像只用于无姓名、无台词且原文明示阵营、身份、人设或职业的背景人物。新init的群像暂记visual_mode="prompt_only"但未完成审阅，不能直接交付；最终模式须依据全剧证据确认。若相同条目指向不同实体，拆成不同 ID，并用逐场关联指向各自实体。新 ID 只追加，废弃的 ID 放入 `retired_ids`，不回收。场景的 `number`、`heading` 可随剧本修改；`id` 保持稳定。
 
 原文用词与制作名称分开：人物source_entry对应人物行完整条目，未填则兼容以name匹配；人物name是唯一制作名称，可加入世次、当前身份、形象及地点限定；场景 `heading` 对应完整标题；地点主名称对应至少一个关联场景标题中的地点字样，其他已确认同一地点的标题字样可放入 `aliases`；道具source_name须原样出现在至少一个关联场景正文，每场出现source_name或aliases；未填兼容以name匹配。name用于唯一图片引用，可使用有依据的版本限定，例如“惊堂木-京城茶馆”；不把制作名写进原台词，不把剧情说明当外形事实。
 
@@ -96,9 +98,48 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
 
 event_id是同场独立可见事件标识，不是镜头号。每条evidence须唯一定位关联场内连续原文段落；同(scene_id,event_id)不重复，证据范围不重叠，至少两条。source_paragraphs连续、按顺序且无重复。程序不做关键词计数，不自动发现事件，也不能理解使用是否可见；作者逐条核实。extraction_review.kind只能为special_reusable；普通日用品、家具、穿戴、临时物件均不成立。手机、水杯等日用品成为特殊信物时另填special_features说明可辨形制，但仍须2次独立可见使用。程序对明确桌床等名称做辅助拒绝，对部分日用品要求特殊说明，不能覆盖中文全部语义，不能通过改kind、改名或泛泛理由绕过审阅。
 
+## 群像图片筛选
+
+人物行与characters/CHAR是完整剧情索引；是否制作图片由群像visual_mode决定。新台账group_policy="visible-reuse-v1"要求每个群像完成全剧审阅，至少2次独立可见出场并有具体外观一致性需求才取image_asset；其余取prompt_only。具名角色、有独立台词的匿名角色以及SET/PROP不能用prompt_only规避图片规则。旧台账无group_policy且群像无visual_mode时沿用原图片资产行为，不自动筛除；显式填写模式即接受此校验。
+
+先normalize同LOC、同称谓、同形象的候选，再按完整剧本登记visible_uses。一次事件切成多镜、不同文句重复提名或对白提及不累计；跨场次的同一连续事件仍只算一次，同场的真实独立再次出场可以累计。群像图片复用只固定制作外观，不据此认定是同一批实体人物。程序校验连续原文证据、唯一定位、事件与证据不重复，背景身份、出场是否独立/实际可见及一致性必要性由作者审阅。
+
+每个群像必填extraction_review：kind="background_group"、reviewed_full_script=true、source_digest与台账当前摘要一致、identity_basis说明原文明示群体称谓且无姓名/独立台词。image_asset另填consistency_reason并登记至少2条visible_uses；prompt_only另填exclusion_reason，保留至少1条可见出场证据。未达两次不能靠泛泛一致性理由提取；多次但无需固定外观仍可prompt_only。后者保留source_entry、事实、CHAR和逐场character_ids，不含visual_design/image_prompt等生图派生字段；分镜保留人物与动作，渲染普通名称，不输出@引用，不生成图片、资产条目、画布节点或缺图报告项。
+
+可直接在normalize后的候选JSON填写上述字段，或用独立审阅JSON：
+
+```json
+{
+  "groups": [
+    {
+      "character_id": "CHAR0002",
+      "visual_mode": "prompt_only",
+      "extraction_review": {
+        "kind": "background_group",
+        "reviewed_full_script": true,
+        "source_digest": "当前台账source_digest",
+        "identity_basis": "原文明示围观村民，无姓名和独立台词",
+        "exclusion_reason": "全剧只有一次围观事件，在镜头文字中描述即可"
+      },
+      "visible_uses": [
+        {"scene_id": "SC0001", "event_id": "门前围观", "evidence": "村民站在门前围观", "source_paragraphs": [3]}
+      ]
+    }
+  ]
+}
+```
+
+```text
+python scripts/asset_ledger.py normalize <sets-draft.json> --group-review <group-review.json> --source <source.json> --output <group-reviewed-ledger.json> --report <group-review-report.json>
+```
+
+groups须覆盖归并后全部群像CHAR，不填非群像；--source必需且须为同一原文摘要。命令先执行命名归并，再应用审阅，保留原输入；若尚不知最终ID，先不带审阅参数normalize并读取redirects。合并前的群像筛选决定不能自动代表合并后的全剧群像，合并后须重审；可见证据会保留供审阅。design/render及bind再次校验，发现群像称谓的独立台词时阻止按背景群像处理。改稿迁移保留模式和证据、只迁移可唯一定位的出场；全文改变或不足复用门槛加入待核项，不自动升降级、删图或删除节点。
+
+分类TXT按实际图片资产顺序输出角色01、场景01、道具01，三类分别计数，超过99自然为100；prompt_only不占号。编号不进入name、ID、图片文件名、节点名或引用。
+
 ## 制作设计与图片提示词
 
-原文visual_facts和personality_facts保持事实及出处，未知事实仍留空；完整美术方案另存visual_design，不写回事实字段。生成者结合剧本约束和[资产图片设计规范](../../../references/asset-image-design.md)写设计JSON，脚本只校验并编译，不设计外观、不调用生图模型、不改变ID/名称/形象启用。design只接受已核实schema 3台账，旧schema 2须按原显式迁移流程处理；旧schema 3可在用户授权后显式执行design，新政策字段不自动添加。normalize先于design执行。
+原文visual_facts和personality_facts保持事实及出处，未知事实仍留空；完整美术方案另存visual_design，不写回事实字段。生成者结合剧本约束和[资产图片设计规范](../../../references/asset-image-design.md)写设计JSON，脚本只校验并编译，不设计外观、不调用生图模型、不改变ID/名称/形象启用。design覆盖全部图片CHAR/SET/PROP，排除prompt_only群像；其旧生图派生字段仅在显式design时清除。design只接受已核实schema 3台账，旧schema 2须按原显式迁移流程处理；旧schema 3可在用户授权后显式执行design，新政策字段不自动添加。normalize与群像筛选先于design执行。
 
 输入design JSON必须覆盖全部现用CHAR、SET、PROP；即使某基础SET只供版本继承也须设计。设计数组不增加或删除资产。每项attribution固定“制作设计”，basis记简短设计依据，reviewed_source_facts=true表示作者已审阅所有原文明示约束，不代表程序能理解或自动修正语义冲突。
 
@@ -159,7 +200,7 @@ python scripts/asset_migrate.py <old-ledger.json> <old-source.json> <new-script.
 
 scenes保留全部剧情场次及heading，不删场、不合并叙事；scene_assets存储真正要创建节点的布景资产。先结合原文的所属主体、建筑、楼层、具体空间核实LOC身份。别名和同名不等于同一物理空间；确认同一实体才合并LOC并重指场次，废弃LOC ID写入retired_ids。填写identity_status="confirmed"和非空identity_basis说明核实依据；无法确认保持pending，最终render及bind阻止通过。不同地点的泛称相同时，用有原文依据的所属主体或空间限定区分布景name，禁止编造地点。
 
-build-scenes是确定性索引脚本：按已确认LOC ID建立每个地点唯一的base SET，再依据人工审阅登记的时间层及原样基准建立或复用SET，填写各场scene_asset_id；不按名称字符串自动合并、不扫描全文猜测跳时、不提取或杜撰视觉事实。无时间层元数据的schema 3仍按既有base/decor规则处理；已有SET ID及有效关联保留，新增ID高于现用及废弃SET。旧SET关联与新时间层不一致时报告映射/绑定迁移需求，不静默覆盖。输出为新文件，再补充原文事实并完整render校验。身份待核、重复基础布景、无效关联均阻止后续阶段。
+build-scenes是确定性索引脚本：先确认并合并LOC、登记时间层及原样基准，对新台账normalize消除逐场init产生的同名群像/道具候选，再调用build-scenes；该命令执行完整制作名称预检，不能带着未归并的重复CHAR名称进入。它按已确认LOC ID建立每个地点唯一的base SET，再依据人工审阅登记的时间层及原样基准建立或复用SET，填写各场scene_asset_id；不按名称字符串自动合并、不扫描全文猜测跳时、不提取或杜撰视觉事实。无时间层元数据的schema 3仍按既有base/decor规则处理；已有SET ID及有效关联保留，新增ID高于现用及废弃SET。旧SET关联与新时间层不一致时报告映射/绑定迁移需求，不静默覆盖。输出为新文件，再补充原文事实、完成群像筛选与美术设计并完整render校验。身份待核、重复基础布景、无效关联均阻止后续阶段。
 
 日夜、天气、光照、取景方向、场次号与排序仅属于SC或分镜，不能作为增加SET的理由。明示真实布景变化可建立少量版本：variant="decor"，parent_id指向同LOC基础SET，name为“地点-有依据的布景状态”，visual_facts须有原文证据并关联确实使用该版本的SC。明示大跨度跳时另用temporal版本，规则见下节。同一视觉状态及同一时间层复用对应SET，不逐场建立新版本；基础布景与LOC事实只承载所有版本共用的固定元素，decor/temporal分类描述继承这些共性，再追加本版本事实。temporal的parent_id可指向同LOC的base、decor或temporal；这是版本承接关系，不表示前一版婚堂、废墟或其他非共性状态延续。已移除物件或已改变状态必须从共用字段移出，分别登记于实际适用的版本，避免被继承至无此元素的版本。现有schema不含结构化删除/覆盖字段，程序不猜测自由中文描述中的删除语义；共用性及移除关系须人工核对。程序验证结构、同LOC及无循环parent链和证据出处，语义上是否真实改变布景仍须人工核实。
 

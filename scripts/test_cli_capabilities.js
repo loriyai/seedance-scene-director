@@ -7,7 +7,7 @@ const vm = require("vm");
 
 const source = fs.readFileSync(path.join(__dirname, "ensure-cli.js"), "utf8");
 const requiredSemantic = [
-  "get_snapshot", "get_permissions", "create_biz_node", "update_node_data", "delete_nodes", "delete_edges",
+  "get_snapshot", "get_permissions", "create_biz_node", "update_node_data", "delete_nodes", "create_edge", "delete_edges",
   "xyq.generation.update_prompt", "xyq.role.updateDescription",
   "xyq.scene.updateDescription", "xyq.role.updateAppearance",
 ];
@@ -69,4 +69,4 @@ for (const missing of requiredSemantic) {
 const base = fixture([]);
 assert.strictEqual(base.ensureCLI().cli_path, cliPath);
 assert.deepStrictEqual(base.calls.filter((call) => call.args.includes("--help")).map((call) => call.args.slice(0, -1).join(" ")), ["status", "login"]);
-console.log("CLI capability regression checks passed (11 cases, offline mock).");
+console.log("CLI capability regression checks passed (12 cases, offline mock).");

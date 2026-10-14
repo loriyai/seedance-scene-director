@@ -362,6 +362,31 @@ def prompt_references_satisfied(doc, node_id, prompt):
     return True
 
 
+def edge_only_black(unit):
+    return unit.get("black_reference_mode") == "edge-only-v1"
+
+
+def reference_edge(doc, source, target):
+    edges = doc["assets"][doc["rootCanvasId"]]["content"].get("edges", {})
+    return next((edge for edge in edges.values() if edge.get("source") == source
+                 and edge.get("target") == target and edge.get("type") == "reference"), None)
+
+
+def black_prompt_absent(prompt, source):
+    return not re.search(r"@黑幕(?=\s|$)", prompt) and source not in node_asset_ids(prompt)
+
+
+def video_references_satisfied(doc, node_id, item):
+    if not prompt_references_satisfied(doc, node_id, item["prompt"]):
+        return False
+    if edge_only_black(item) and item.get("references_bound"):
+        source = item.get("black_node_id")
+        return (source in nodes(doc) and kind_of(nodes(doc)[source]) == item.get("black_node_kind")
+                and name_of(doc, source) == "黑幕" and black_prompt_absent(item["prompt"], source)
+                and reference_edge(doc, source, node_id) is not None)
+    return True
+
+
 def repair_role_reference_rows(project, cli, state, doc, node_id, prompt):
     """Refresh only an old empty-role edge after that role receives its media."""
     edges = doc["assets"][doc["rootCanvasId"]]["content"].get("edges", {})
@@ -404,6 +429,12 @@ def target_satisfied(doc, target):
     if action == "reference_edges_absent":
         edges = doc["assets"][doc["rootCanvasId"]]["content"].get("edges", {})
         return all(edge_id not in edges for edge_id in target["edge_ids"])
+    if action == "reference_edge":
+        edge = doc["assets"][doc["rootCanvasId"]]["content"].get("edges", {}).get(target["edge_id"], {})
+        source = target["source"]
+        return (source in nodes(doc) and kind_of(nodes(doc)[source]) == target["source_kind"]
+                and name_of(doc, source) == "黑幕" and edge.get("source") == source
+                and edge.get("target") == node_id and edge.get("type") == "reference")
     if action == "patch":
         return all(content(doc, node_id).get(k) == v for k, v in target["patch"].items())
     if action == "rename":
@@ -545,7 +576,7 @@ def write_video(project, cli, state, doc, item, node_id, context, create=None, r
                         {"action": "duration", "node_id": node_id, "value": item["settings"]["durationMs"]}]
     receipt = {"id": uuid.uuid4().hex, "key": item["key"], "node_id": node_id,
                "status": "writing", "steps": [], "targets": copy.deepcopy(targets),
-               "references_only": references_only}
+               "reference_targets": [], "references_only": references_only}
     receipt_path = Path(project) / "canvas" / "video-write-receipts" / (receipt["id"] + ".json")
     mapping = state["mappings"][item["key"]]
     mapping["video_receipt_id"] = receipt["id"]
@@ -588,6 +619,25 @@ def write_video(project, cli, state, doc, item, node_id, context, create=None, r
                 write_acknowledged(project, cli, state, "update_node_data",
                                    {"id": node_id, "patch": {"generation": generation}},
                                    [{"action": "duration", "node_id": node_id, "value": duration}], receipt)
+        if edge_only_black(item) and item.get("references_bound") and item.get("black_node_id"):
+            source = item["black_node_id"]
+            d.require(black_prompt_absent(item["prompt"], source), "独立黑幕引用不能出现在提示词正文中")
+            edge = reference_edge(doc, source, node_id)
+            if edge is None:
+                # An edge ID is a Canvas edge identity, not an allocated asset ID.
+                # Journal its exact identity before sending; unknown ACKs never replay.
+                edge = {"id": "edge-black-" + uuid.uuid4().hex, "type": "reference",
+                        "source": source, "target": node_id, "sourceHandle": "right", "targetHandle": "left"}
+                edge_target = {"action": "reference_edge", "node_id": node_id, "source": source,
+                               "source_kind": item["black_node_kind"], "edge_id": edge["id"]}
+                mapping["black_reference_edge_id"] = edge["id"]
+                receipt["reference_targets"].append(edge_target)
+                d.write_json(receipt_path, receipt)
+                save(project, state)
+                write_acknowledged(project, cli, state, "create_edge", {"edge": edge}, [edge_target], receipt)
+            else:
+                mapping["black_reference_edge_id"] = edge["id"]
+                save(project, state)
         if prompt_of(doc, node_id) != item["prompt"] or not prompt_references_satisfied(doc, node_id, item["prompt"]):
             doc = repair_role_reference_rows(project, cli, state, doc, node_id, item["prompt"])
             context["doc"] = doc
@@ -602,7 +652,8 @@ def write_video(project, cli, state, doc, item, node_id, context, create=None, r
             doc = document(cli, state["binding"])
             context["doc"] = doc
             core_verified = all(target_satisfied(doc, target) for target in targets)
-            references_verified = (core_verified and prompt_references_satisfied(doc, node_id, item["prompt"])
+            references_verified = (core_verified and video_references_satisfied(doc, node_id, item)
+                                   and all(target_satisfied(doc, target) for target in receipt["reference_targets"])
                                    and not item.get("unresolved_references"))
             if core_verified and references_verified:
                 break
@@ -614,7 +665,8 @@ def write_video(project, cli, state, doc, item, node_id, context, create=None, r
                                  **{field: observed.get(field) for field in names},
                                  "durationMs": (observed.get("generation") or {}).get("durationMs"),
                                  "prompt_hash": digest(prompt_of(doc, node_id)) if node_id in nodes(doc) else None},
-                       checks=[{"action": target["action"], "matched": target_satisfied(doc, target)} for target in targets])
+                       checks=[{"action": target["action"], "matched": target_satisfied(doc, target)}
+                               for target in [*targets, *receipt["reference_targets"]]])
         if not core_verified:
             entry.update(status="uncertain", error="视频统一回读未通过")
             save(project, state)
@@ -623,7 +675,9 @@ def write_video(project, cli, state, doc, item, node_id, context, create=None, r
         after = {node_id: fingerprint(doc, node_id)}
         for operation in state["journal"]:
             if operation.get("video_receipt_id") == receipt["id"]:
-                operation.update(status="verified", after=after)
+                edge_failed = operation.get("command") == "create_edge" and not all(
+                    target_satisfied(doc, target) for target in operation["targets"])
+                operation.update(status="partial" if edge_failed else "verified", after=after)
         receipt["status"] = "verified" if references_verified else "partial"
         mapping["video_write_receipt"] = str(receipt_path)
         save(project, state)
@@ -644,7 +698,8 @@ def write_video(project, cli, state, doc, item, node_id, context, create=None, r
 def desired_assets(session):
     d.require(session["ledger"].get("schema_version") == 3, "旧台账须先审计并审核保留/修改/合并/删除方案，再升级绑定；不再按场次创建场景节点")
     d.reference_catalog(session)
-    return ([{"key": c["id"], "name": c["name"], "kind": "role"} for c in session["ledger"]["characters"]]
+    return ([{"key": c["id"], "name": c["name"], "kind": "role"} for c in session["ledger"]["characters"]
+             if c.get("visual_mode") != "prompt_only"]
             + [{"key": s["id"], "name": s["name"], "kind": "scene"} for s in session["ledger"]["scene_assets"]]
             + [{"key": p["id"], "name": p["name"], "kind": "image"} for p in session["ledger"]["props"]])
 
@@ -652,7 +707,7 @@ def desired_assets(session):
 def selected_units(session, request_id=None, ids=None):
     current = {u["id"]: u for u in session["units"]}
     if ids:
-        wanted = ids
+        wanted = [d.resolve_unit_id(session, value) for value in ids]
     else:
         receipts = session["receipts"]
         d.require(receipts, "尚无已提交分镜")
@@ -813,6 +868,8 @@ def reconcile_black_video(project, cli, state, doc, decisions=None, preview=Fals
 def reference_map(session, state, doc, asset_ids=None, blocked_assets=()):
     node_map = nodes(doc) if doc else {}
     names = d.reference_catalog(session, asset_ids)
+    prompt_only = {item["id"] for item in session["ledger"]["characters"] if item.get("visual_mode") == "prompt_only"}
+    names = {key: name for key, name in names.items() if key not in prompt_only}
     kinds = {item["id"]: kind for category, kind in (("characters", "role"), ("scene_assets", "scene"), ("props", "image"))
              for item in session["ledger"].get(category, [])}
     resolved, pending = {}, []
@@ -866,7 +923,8 @@ def desired_videos(session, state, doc, units, bind_references=False, failures=N
         black, black_kind, black_issue = black_reference(state, doc, unit["id"])
         if flags[unit["id"]]:
             if black_issue is None:
-                unit_refs["黑幕"] = "<node-asset>" + black + "</node-asset>"
+                if not edge_only_black(unit):
+                    unit_refs["黑幕"] = "<node-asset>" + black + "</node-asset>"
                 if not reference_ready(doc, black):
                     black_issue = {"reason": "missing_video" if black_kind == "video" else "missing_image"}
             if black_issue is not None:
@@ -875,18 +933,20 @@ def desired_videos(session, state, doc, units, bind_references=False, failures=N
         convert = reference_renderer(unit_refs, [*d.reference_catalog(session).values(), "黑幕"])
         try:
             prompt = d.render_unit(session, unit, reference_text=convert if flags[unit["id"]] else None)
+            if edge_only_black(unit):
+                d.require(black_prompt_absent(prompt, black), "独立黑幕引用不能出现在提示词正文中")
         except (ValueError, KeyError, TypeError) as exc:
             if failures is None:
                 raise
             failures.append({"key": unit["id"], "reason": "prompt_encoding_failed", "message": safe_message(exc)})
             continue
         reference_keys = set(unit_asset_ids(session, unit))
-        if "@黑幕" in prompt or unit_refs.get("黑幕") and unit_refs["黑幕"] in prompt:
+        if edge_only_black(unit) or "@黑幕" in prompt or unit_refs.get("黑幕") and unit_refs["黑幕"] in prompt:
             reference_keys.add("BLACK")
-        wanted.append({"key": unit["id"], "name": unit["id"], "kind": "video", "version": unit["version"],
+        wanted.append({"key": unit["id"], "name": unit.get("display_name", unit["id"]), "kind": "video", "version": unit["version"],
                        "duration": unit["duration"], "prompt": prompt, "references_bound": flags[unit["id"]],
                        "reference_keys": sorted(reference_keys), "black_node_id": black if black_issue is None or black_issue.get("reason") in ("missing_image", "missing_video") else None,
-                       "black_node_kind": black_kind})
+                       "black_node_kind": black_kind, "black_reference_mode": unit.get("black_reference_mode")})
     used = set().union(*(set(item["reference_keys"]) for item in wanted)) if wanted else set()
     return wanted, [p for p in pending if p["key"] in used]
 
@@ -900,7 +960,8 @@ def unit_asset_ids(session, unit):
             "label", "transition", "sound_foreground", "sound_environment"))
     for field in fields:
         mentioned.update(d.asset_text(session, unit, field)[1])
-    return mentioned
+    prompt_only = {item["id"] for item in session["ledger"]["characters"] if item.get("visual_mode") == "prompt_only"}
+    return mentioned - prompt_only
 
 
 def image_reference_units(session, state, key):
@@ -1224,7 +1285,10 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
         fresh = document(cli, state["binding"])
         if node_id and fingerprint(fresh, node_id) != fingerprint(doc, node_id):
             fail("CONCURRENT_EDIT", "画布节点在操作期间发生变化，已停止。", key=key, node_id=node_id)
-        for source in node_asset_ids(item.get("prompt", "")):
+        reference_sources = set(node_asset_ids(item.get("prompt", "")))
+        if edge_only_black(item) and item.get("references_bound") and item.get("black_node_id"):
+            reference_sources.add(item["black_node_id"])
+        for source in reference_sources:
             if (source not in nodes(fresh) or source not in nodes(doc)
                     or kind_of(nodes(fresh)[source]) != kind_of(nodes(doc)[source])
                     or name_of(fresh, source) != name_of(doc, source)):
@@ -1311,7 +1375,7 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
         if "prompt" in item:
             text_verified = prompt_of(doc, node_id) == item["prompt"]
             d.require(text_verified, "提示词文字回读尚未通过，不能标记同步完成")
-            references_verified = prompt_references_satisfied(doc, node_id, item["prompt"])
+            references_verified = video_references_satisfied(doc, node_id, item)
             unit_pending = [row for row in pending if row["key"] in item["reference_keys"] and (not row.get("unit_ids") or key in row["unit_ids"])]
             unresolved = any(row.get("reason") not in ("missing_image", "missing_video") for row in unit_pending)
             references_verified = references_verified and not unresolved

@@ -13,7 +13,7 @@ const REQUIRED_CANVAS_NATIVE_COMMANDS = [
   "canvas get", "canvas allocate", "canvas upload",
 ];
 const REQUIRED_CANVAS_COMMANDS = [
-  "get_snapshot", "get_permissions", "create_biz_node", "update_node_data", "delete_nodes", "delete_edges",
+  "get_snapshot", "get_permissions", "create_biz_node", "update_node_data", "delete_nodes", "create_edge", "delete_edges",
   "xyq.generation.update_prompt", "xyq.role.updateDescription",
   "xyq.scene.updateDescription", "xyq.role.updateAppearance",
 ];

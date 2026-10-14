@@ -14,6 +14,7 @@ REASONS = {
     "node_type_changed": "节点类型不一致",
     "video_missing": "视频节点尚未完成创建或同步",
     "reference_not_encoded": "提示词中未建立该资产的节点引用",
+    "black_prompt_present": "独立引用的黑幕仍出现在提示词中",
     "reference_edge_missing": "节点引用连线未建立",
     "role_media_reference_missing": "角色图片引用记录尚未刷新",
     "reference_failed": "节点引用回读未通过",
@@ -101,7 +102,12 @@ def collect_issues(session, state, doc, units, failures=()):
             source = black_by_unit[unit["id"]] if key == "BLACK" else state.get("mappings", {}).get(key, {}).get("node_id")
             if source not in nodes:
                 continue  # The missing node was recorded above.
-            if source not in tagged:
+            hidden_black = key == "BLACK" and c.edge_only_black(unit)
+            if hidden_black and not c.black_prompt_absent(prompt, source):
+                add(key, "black_prompt_present", source, [unit["id"]], video_node_id=target,
+                    kind=c.kind_of(nodes[source]))
+                specific_failures += 1
+            if source not in tagged and not hidden_black:
                 add(key, "reference_not_encoded", source, [unit["id"]], video_node_id=target,
                     **({"kind": c.kind_of(nodes[source])} if key == "BLACK" else {}))
                 specific_failures += 1
@@ -150,6 +156,8 @@ def write_reference_report(project, session, state, doc, units, failures=(), out
     missing_images = [issue for issue in issues if issue["reason"] == "missing_image"]
     missing_videos = [issue for issue in issues if issue["reason"] == "missing_video"]
     other = [issue for issue in issues if issue["reason"] not in ("missing_image", "missing_video")]
+    unit_names = {unit["id"]: unit.get("display_name", unit["id"]) for unit in session.get("units", units)}
+    display_units = lambda ids: "，".join(unit_names.get(uid, uid) for uid in ids)
     if output is None:
         receipt_output = next((r.get("output") for r in reversed(session.get("receipts", [])) if r.get("output")), None)
         directory = Path(receipt_output).resolve().parent if receipt_output else project / "reports"
@@ -162,19 +170,19 @@ def write_reference_report(project, session, state, doc, units, failures=(), out
     d.require(d.ROOT != output and d.ROOT not in output.parents and output.parent != (project / "canvas").resolve(),
               "用户检查报告不能写入Skill或画布后台状态目录")
     lines = ["小云雀资产与引用检查记录", "画布ID：" + str(state.get("binding", {}).get("canvas_id", "未绑定")),
-             "本次分镜：" + ("，".join(u["id"] for u in units) or "无"), "",
+             "本次分镜：" + (display_units(u["id"] for u in units) or "无"), "",
              "缺少图片的资产节点：" + str(len(missing_images)) + "项"]
     for issue in missing_images:
         kind = "黑幕图片节点" if issue["key"] == "BLACK" else KIND_NAMES.get(issue["kind"], issue["kind"])
         image = "黑幕图片" if issue["key"] == "BLACK" else "按完整资产名称命名的" + ("主图" if issue["kind"] in ("role", "scene") else "图片")
         lines.append("- 资产：" + issue["name"] + "；类型：" + kind + "；节点ID：" + str(issue["node_id"] or "未建立")
-                     + "；需要补充：" + image + "；涉及分镜：" + ("，".join(issue["unit_ids"]) or "本次未使用") + "。")
+                     + "；需要补充：" + image + "；涉及分镜：" + (display_units(issue["unit_ids"]) or "本次未使用") + "。")
     if not missing_images:
         lines.append("无。")
     lines += ["", "黑幕视频素材待补：" + str(len(missing_videos)) + "项"]
     for issue in missing_videos:
         lines.append("- 资产：黑幕；类型：黑幕视频节点；节点ID：" + str(issue["node_id"] or "未建立")
-                     + "；需要补充：黑幕视频素材；涉及分镜：" + ("，".join(issue["unit_ids"]) or "无") + "。")
+                     + "；需要补充：黑幕视频素材；涉及分镜：" + (display_units(issue["unit_ids"]) or "无") + "。")
     if not missing_videos:
         lines.append("无。")
     lines += ["", "节点或引用待处理：" + str(len(other)) + "项"]
@@ -182,8 +190,9 @@ def write_reference_report(project, session, state, doc, units, failures=(), out
         details = REASONS.get(issue["reason"], issue["reason"])
         if issue.get("message"):
             details += "：" + c.safe_message(issue["message"])
-        lines.append("- 资产或分镜：" + issue["name"] + "；节点ID：" + str(issue["node_id"] or "未建立")
-                     + "；涉及分镜：" + ("，".join(issue["unit_ids"]) or "无") + "；原因：" + details + "。")
+        name = unit_names.get(issue["key"], issue["name"])
+        lines.append("- 资产或分镜：" + name + "；节点ID：" + str(issue["node_id"] or "未建立")
+                     + "；涉及分镜：" + (display_units(issue["unit_ids"]) or "无") + "；原因：" + details + "。")
     if not other:
         lines.append("无。")
     lines += ["", "可手动补充上述图片，或明确要求按完整资产名称匹配本地图片上传；补图后刷新引用并重新检查。",

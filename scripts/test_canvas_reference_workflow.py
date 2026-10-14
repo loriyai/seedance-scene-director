@@ -63,6 +63,11 @@ class WorkflowCLI:
             for edge_id in value["ids"]:
                 edges.pop(edge_id, None)
             return {}
+        if name == "create_edge":
+            edge = value["edge"]
+            if edge["target"] not in self.omit_edges_for:
+                self.doc["assets"]["ROOT"]["content"]["edges"][edge["id"]] = copy.deepcopy(edge)
+            return {}
         if name == "xyq.generation.update_prompt":
             target = value["nodeId"]
             if target in self.reject_prompts_for:

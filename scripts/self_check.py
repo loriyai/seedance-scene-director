@@ -525,12 +525,13 @@ class SkillChecks(unittest.TestCase):
         self.assertEqual(result['total_seconds'], 4)
         self.assertEqual(result['canvas_sync']['status'], 'not_bound')
         first = output.read_bytes()
-        self.assertTrue(first.startswith('01 - 场景1-分镜1（时长：4秒）\n'.encode('utf-8')))
+        self.assertTrue(first.startswith('A01-场景1-分镜1（时长：4秒）\n'.encode('utf-8')))
         self.assertEqual(state['receipts'][0]['display_format'], d.RECEIPT_DISPLAY_FORMAT)
         saved = d.read_json(self.work / 'session.json')
         self.assertEqual(saved['receipts'][0]['display_format'], d.RECEIPT_DISPLAY_FORMAT)
         self.assertEqual(state['units'][0]['id'], '场景1-分镜1')
-        self.assertEqual(first.decode('utf-8'), '01 - ' + d.render_unit(state, state['units'][0]) + '\n')
+        self.assertEqual(first.decode('utf-8'), d.render_unit(state, state['units'][0]) + '\n')
+        self.assertNotIn('@黑幕', first.decode('utf-8'))
         self.assertIn('人物站位：', first.decode('utf-8'))
         self.assertIn('（@陈默-基础形象 的中景；转场：硬切）', first.decode('utf-8'))
         self.assertNotIn('景别：', first.decode('utf-8'))
@@ -545,7 +546,7 @@ class SkillChecks(unittest.TestCase):
             units.append(unit)
         before = copy.deepcopy(units)
         output = self.work / 'numbered.txt'
-        receipt = {'units': units, 'output': str(output), 'display_format': d.RECEIPT_DISPLAY_FORMAT}
+        receipt = {'units': units, 'output': str(output), 'display_format': d.LEGACY_RECEIPT_DISPLAY_FORMAT}
         d.render_receipt(self.state, receipt, self.work)
         text = output.read_text(encoding='utf-8')
         self.assertTrue(text.startswith('01 - 场景1-分镜1（时长：4秒）\n'))
@@ -576,7 +577,7 @@ class SkillChecks(unittest.TestCase):
         self.assertEqual(output.read_bytes(), expected)
         self.assertEqual(receipt, before)
 
-    def test_selected_replace_numbers_new_file_and_preserves_old_receipt_and_id(self):
+    def test_selected_replace_preserves_legacy_name_old_receipt_and_id(self):
         state = copy.deepcopy(self.state)
         old = copy.deepcopy(self.unit)
         old.update(batch_id='old-batch', predecessor=None, previous_versions=[])
@@ -602,7 +603,8 @@ class SkillChecks(unittest.TestCase):
         self.assertEqual(state['next_numbers'], numbers)
         self.assertEqual(old_receipt, old_snapshot)
         self.assertEqual(state['receipts'][-1]['display_format'], d.RECEIPT_DISPLAY_FORMAT)
-        self.assertTrue(output.read_bytes().startswith('01 - 场景1-分镜1（时长：4秒）\n'.encode('utf-8')))
+        self.assertTrue(output.read_bytes().startswith('场景1-分镜1（时长：4秒）\n'.encode('utf-8')))
+        self.assertNotIn('@黑幕', output.read_text(encoding='utf-8'))
         d.render_receipt(state, old_receipt, self.work)
         self.assertEqual(old_output.read_bytes(), old_bytes)
 

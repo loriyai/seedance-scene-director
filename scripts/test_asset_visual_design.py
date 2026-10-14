@@ -295,9 +295,9 @@ class AssetVisualDesignTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             ledger.render(self.script, self.source, path, output)
         text = output.read_text(encoding="utf-8")
-        for category in design.ASSET_CATEGORIES:
+        for category, prefix in (("characters", "角色"), ("scene_assets", "场景"), ("props", "道具")):
             item = value[category][0]
-            self.assertIn("01 - " + item["name"] + "：" + item["image_prompt"], text)
+            self.assertIn(prefix + "01 - " + item["name"] + "：" + item["image_prompt"], text)
         self.assertIn("出现的场景：场景1，场景2。", text)
         self.assertIn("使用的场次：场景1，场景2。", text)
 
