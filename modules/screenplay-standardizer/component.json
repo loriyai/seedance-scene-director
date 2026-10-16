@@ -2,13 +2,14 @@
   "component": "screenplay-standardizer",
   "bundle_format": 1,
   "files": {
-    "INSTRUCTIONS.md": "db781dfb305e4c3d9e6c5599fea4ee2cc11e157dc4b7476e1fafb220979e77d9",
-    "references/asset-ledger.md": "285ccc88124668e0f0548338f9571cca85e0a6ff05decb2274cd0aab910490cb",
-    "references/review.md": "57e4969989856ef55c8a914a32829ead78b781789c040d654aa7d168e08c416b",
-    "scripts/asset_ledger.py": "ac198ea0ec8ff517701de929617b662fb570496f9750f391c413ee1e595b9748",
-    "scripts/asset_migrate.py": "07ba57f224e0e10d7535d956c83cdf5ddf2a0a46578b9eb1d04a045feca5f2a1",
-    "scripts/asset_visual_design.py": "4e252c606687e4913727cb2798030b12cd785051e63d13c7af940af45688f2a8",
+    "INSTRUCTIONS.md": "96f9e0c1878436647618148ba7cef2b7b37e32fd67be365fcc880140aa4ac228",
+    "references/asset-ledger.md": "429c091f8c150b5ed7bb40580055d96333a48007f29d032ecdf1521be7aff516",
+    "references/review.md": "c6e436e6863c61a2fd468fc9784cda2707c9fccc81dd608aaf9445f2f7915e5b",
+    "scripts/asset_ledger.py": "893a81c5f1873dddf575a9327bcdd2c02db5231abfdb5e3da6be1380a308f8a8",
+    "scripts/asset_migrate.py": "26afb05c7fb0ff4334b4aaf222709d7db71870adb6e49de7146805d96b04f853",
+    "scripts/asset_visual_design.py": "c79f548bfb0dde4fd46570d9585366ebafb26ceea6241a7d4e72f30220a4f4cc",
     "scripts/screenplay_io.py": "3130cb328c10c74e0a0fb944dbb02b55e49bbf9425bc8ceb8b0160700b267d33",
-    "scripts/screenplay_review.py": "f93c5a1915690a290320f4f7197ed0dc789f7c0b88e138e1bb4f2152550ac8ec"
+    "scripts/screenplay_review.py": "cdac36a421af1e23b572c846a279defb1a10e2ac02ed17c4364e078a12ccb505",
+    "scripts/character_variants.py": "5c39905960b977d8379edc77d04ee96cd5da0014edd89bbb9832320acfe870cc"
   }
 }

@@ -3,6 +3,7 @@ import re
 
 POLICY = 'semantic-v2'
 LEGACY_POLICY = 'semantic-v1'
+VOICE_POLICY = 'event-inheritance-v1'
 PUNCTUATION = '，、,。？！?!；;…—～~：:'
 TAILS = set('了呢吧啊呀哦嘛么啦呗哟喽的')
 DELIVERY_FIELDS = (('volume', '音量'), ('ending', '尾音'),
@@ -16,13 +17,10 @@ def require(ok, message):
 def compact(text):
     return ''.join(c for c in text if c.isalnum())
 
-def validate_delivery(unit, part):
-    """Validate only reliable structure; authors verify emotional/source meaning."""
-    if 'delivery' not in part:
-        return
+def validate_delivery_value(unit, value):
+    """Shared schema for event baselines and local transitions, never inference."""
     require(unit.get('output_format') == 'reference-v3' and unit.get('dialogue_layout') == POLICY,
             'delivery仅用于reference-v3与semantic-v2；旧交付不自动补标')
-    value = part['delivery']
     require(isinstance(value, dict) and bool(value), 'delivery须为非空对象；没有声音表现要求时省略')
     require(set(value) <= {key for key, _ in DELIVERY_FIELDS},
             'delivery只允许volume/ending/texture/articulation；语速来自audio.speed，停顿来自audio.pause')
@@ -32,17 +30,91 @@ def validate_delivery(unit, part):
                 and compact(cue) not in ('无', '同前', '同上'),
                 f'delivery.{field}须为具体单行中文声音描述，不含引号、括号或资产引用')
 
-def delivery_text(part, event):
+def validate_voice_policy(unit):
+    if 'voice_direction' in unit:
+        require(unit['voice_direction'] == VOICE_POLICY,
+                'voice_direction只支持event-inheritance-v1；旧交付省略以保留原渲染')
+        require(unit.get('output_format') == 'reference-v3' and unit.get('dialogue_layout') == POLICY,
+                'voice_direction须使用reference-v3与semantic-v2')
+    for event in unit.get('audio', []):
+        if 'delivery' in event:
+            require(unit.get('voice_direction') == VOICE_POLICY,
+                    'audio.delivery须显式启用voice_direction: event-inheritance-v1')
+            validate_delivery_value(unit, event['delivery'])
+
+def validate_delivery(unit, part):
+    """Validate reliable structure; review still checks source and timing basis."""
+    if 'delivery' in part:
+        validate_delivery_value(unit, part['delivery'])
+    modern = unit.get('voice_direction') == VOICE_POLICY
+    transition = 'delivery' in part or 'delivery_reset' in part
+    if 'delivery_reset' in part or 'transition_basis' in part:
+        require(modern, 'delivery_reset/transition_basis须启用event-inheritance-v1')
+    if not modern:
+        return
+    if 'delivery_reset' in part:
+        require(part['delivery_reset'] is True, 'delivery_reset只能为true；不重置时省略')
+        require('delivery' not in part, 'delivery_reset清除继承表现，不得同时填写delivery')
+    if transition:
+        basis = part.get('transition_basis')
+        require(isinstance(basis, str) and len(compact(basis)) >= 6
+                and re.search(r'[\u4e00-\u9fff]', basis)
+                and not any(c in basis for c in '\r\n@"\'“”‘’（）()[]{}')
+                and compact(basis) not in ('同前', '同上', '语气变化', '原文如此', '自然变化'),
+                '声音覆盖或重置须填具体单行transition_basis，说明原文转折及发生位置；整句基线填audio.delivery')
+    else:
+        require('transition_basis' not in part, 'transition_basis须对应delivery覆盖或delivery_reset')
+
+def effective_delivery(unit, part, event):
+    """A cue persists within one event; a cut alone never clears it."""
+    if unit.get('voice_direction') != VOICE_POLICY:
+        return part.get('delivery') or {}
+    value = dict(event.get('delivery') or {})
+    for shot in unit.get('shots', []):
+        for current in shot.get('dialogue_parts', []):
+            if current.get('record') != event['record']:
+                continue
+            if current.get('delivery_reset') is True:
+                value.clear()
+            value.update(current.get('delivery') or {})
+            if current is part:
+                return value
+    raise ValueError('声音表现解析的片段不属于当前单元声音事件')
+
+def delivery_text(part, event, unit=None):
     """Render outside the unchanged quote; pace has one source of truth."""
-    value = part.get('delivery')
-    if not value:
+    modern = unit is not None and unit.get('voice_direction') == VOICE_POLICY
+    value = effective_delivery(unit, part, event) if modern else part.get('delivery')
+    if not value and not (modern and event['speed'] != '常速'):
         return ''
+    value = value or {}
     cues = []
     if 'volume' in value:
         cues.append('音量：' + value['volume'].strip())
     cues.append('语速：' + SPEED_LABELS[event['speed']])
     cues.extend(label + '：' + value[key].strip() for key, label in DELIVERY_FIELDS[1:] if key in value)
     return '（' + '；'.join(cues) + '）'
+
+def voice_warnings(unit):
+    """Flag legacy partial annotation, without inventing missing directions."""
+    if unit.get('voice_direction') == VOICE_POLICY:
+        return []
+    warnings = []
+    for event in unit.get('audio', []):
+        parts = [p for shot in unit.get('shots', []) for p in shot.get('dialogue_parts', [])
+                 if p.get('record') == event['record']]
+        annotated = [i + 1 for i, part in enumerate(parts) if part.get('delivery')]
+        if not annotated or len(parts) < 2:
+            continue
+        if len(annotated) != len(parts):
+            warnings.append({'unit': unit.get('id', '当前单元'), 'record': event['record'],
+                             'kind': '跨镜声音表现可能漏续', 'annotated_parts': annotated,
+                             'detail': '同一声音事件仅部分片段有声音表现；复核原文是否持续，旧稿不自动补标。'})
+        elif any(part.get('delivery') != parts[0].get('delivery') for part in parts[1:]):
+            warnings.append({'unit': unit.get('id', '当前单元'), 'record': event['record'],
+                             'kind': '跨镜声音变化待复核',
+                             'detail': '同一句的局部表现不同；复核是否有原文转折，不能因切镜重置语气。'})
+    return warnings
 
 def pause_seconds(text):
     """Repeated punctuation is a single semantic pause."""
@@ -82,6 +154,7 @@ def attach(unit, plans=None):
 
 def validate(unit):
     require(unit.get('dialogue_layout') in (POLICY, LEGACY_POLICY), '须采用semantic-v2台词布局；禁止按镜时比例切字')
+    validate_voice_policy(unit)
     local = unit['dialogue_layout'] == POLICY
     events = {e['record']: e for e in unit['audio']}
     grouped = {rid: [] for rid in events}

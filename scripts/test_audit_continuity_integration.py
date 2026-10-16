@@ -164,7 +164,8 @@ class ContinuityRequestChecks(unittest.TestCase):
         request = self.request([self.unit(i) for i in range(3)])
         d.write_json(request_path, request)
         args = SimpleNamespace(project=self.project, request=request_path, output=output)
-        result = d.commit(args, self.state)
+        from test_review_support import approve_fixture
+        result = d.commit(approve_fixture(args, self.state), self.state)
         self.assertEqual(result['status'], 'committed')
         saved = d.read_json(self.project / 'session.json')
         self.assertEqual(len(saved['units']), 3)

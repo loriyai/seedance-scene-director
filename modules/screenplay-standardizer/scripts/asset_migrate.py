@@ -6,6 +6,7 @@ import copy
 import json
 import re
 from pathlib import Path
+from character_variants import scene_character_ids
 
 from asset_ledger import HEADING, GENERIC_ROLE, digest, fact_list, parse_script, scene_ranges, source_paragraphs, split_cast_entry
 from asset_visual_design import (PROP_POLICY, GROUP_POLICY, group_minimum_visible_uses, is_group,
@@ -260,6 +261,8 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
         if char_id not in char_by_id or not isinstance(name, str) or not name.strip():
             raise ValueError(f"人物改名映射无效：{char_id}")
         item = char_by_id[char_id]
+        if 'appearance_variant' in item:
+            raise ValueError('佩戴版本不能独立改名为另一个原人物；请映射base_asset_id对应的原人物后重新审阅形象')
         source_speaker, _ = split_cast_entry(name)
         item['source_entry'] = name
         if 'source_speaker' in item:
@@ -293,7 +296,7 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
             options = {ref for scene in prior for ref in scene["character_ids"] if char_by_id[ref].get("source_entry", char_by_id[ref]["name"]) == name}
             generic = bool(GENERIC_ROLE.match(role_name) or role_name.endswith("-群像"))
             if not options and not generic:
-                options = {item["id"] for item in characters if item.get("source_entry", item["name"]) == name}
+                options = {item["id"] for item in characters if 'appearance_variant' not in item and item.get("source_entry", item["name"]) == name}
             if len(options) == 1:
                 linked.append(next(iter(options)))
             else:
@@ -326,6 +329,34 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
         for ref in range(start, end + 1):
             index.setdefault(compact(new_paragraphs[ref - 1]), []).append(ref)
         new_index[scene["number"]] = index
+    # Source casts remain exact. Same-person visual alternatives travel in a
+    # separate map, never compete as candidates for the source character slot.
+    for scene in scenes:
+        prior = [old_by_id[sid] for sid in incoming[scene['number']]]
+        tracks = [track for previous in prior for track in previous.get('character_appearances', [])]
+        if not tracks:
+            continue
+        if len(prior) != 1 or len(lineage[prior[0]['id']]) != 1:
+            pending.append({'kind': '佩戴形象场次轨迹待核', 'scene_id': scene['id'],
+                            'old_tracks': copy.deepcopy(tracks)})
+            continue
+        scene['character_appearances'] = copy.deepcopy(tracks)
+        for track in scene['character_appearances']:
+            proofs = [track['initial_evidence'], *track['transitions']]
+            for proof in proofs:
+                fact = {'text': '形象状态', 'evidence': proof['evidence'],
+                        'source_paragraphs': proof['source_paragraphs'],
+                        'scene_ids': [prior[0]['id']], 'attribution': '形象审阅'}
+                moved = migrate_fact(fact, old_by_id, lineage, new_by_number,
+                                     old_paragraphs, new_paragraphs, new_index)
+                if moved and moved['scene_ids'] == [scene['id']]:
+                    proof['source_paragraphs'] = moved['source_paragraphs']
+                else:
+                    pending.append({'kind': '佩戴形象事件证据待核', 'scene_id': scene['id'],
+                                    'base_asset_id': track['base_asset_id'], 'old_evidence': copy.deepcopy(proof)})
+            if track['base_asset_id'] not in scene['character_ids']:
+                pending.append({'kind': '佩戴形象原人物关联待核', 'scene_id': scene['id'],
+                                'base_asset_id': track['base_asset_id']})
     for old_scene in old_scenes:
         if not lineage[old_scene["id"]]:
             pending.append({"kind": "旧场景删除待核", "scene_id": old_scene["id"], "heading": old_scene["heading"],
@@ -372,7 +403,8 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
                     revised = migrate_fact(fact, old_by_id, lineage, new_by_number, old_paragraphs, new_paragraphs, new_index)
                     field_name = {"characters": "character_ids", "locations": "location_id", "props": "prop_ids"}[category]
                     linked = bool(revised) and all(item["id"] in (
-                        [new_by_id[sid][field_name]] if category == "locations" else new_by_id[sid][field_name]
+                        [new_by_id[sid][field_name]] if category == "locations" else
+                        scene_character_ids(new_by_id[sid]) if category == "characters" else new_by_id[sid][field_name]
                     ) for sid in revised["scene_ids"])
                     if revised and linked:
                         migrated.append(revised)
@@ -426,8 +458,20 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
                 target = new_by_id.get(item['appearance']['active_from'])
                 if not anchor or not target or old_paragraphs[anchor['source_range'][0]-1:anchor['source_range'][1]] != new_paragraphs[target['source_range'][0]-1:target['source_range'][1]]:
                     pending.append({'kind': '形象启用依据待核', 'asset_id': item['id']})
-    used_characters = {ref for scene in scenes for ref in scene["character_ids"]}
+    used_characters = {ref for scene in scenes for ref in scene_character_ids(scene)}
     for item in list(characters):
+        if 'appearance_variant' in item:
+            base = char_by_id.get(item['appearance_variant']['base_asset_id'])
+            if base:
+                item['source_entry'] = base.get('source_entry', base['name'])
+                if 'source_speaker' in base:
+                    item['source_speaker'] = base['source_speaker']
+                else:
+                    item.pop('source_speaker', None)
+            if item['id'] not in used_characters or old.get('source_digest') != digest(new_paragraphs) or name_map:
+                pending.append({'kind': '佩戴形象审阅待更新', 'asset_id': item['id'],
+                                'action': '保留ID、原轨迹和旧审阅摘要，重新核实原人物及事件后运行variants；不能直接刷新摘要'})
+            continue
         if item["id"] not in used_characters:
             characters.remove(item)
             stored = copy.deepcopy(item)
@@ -440,7 +484,7 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
     result = {"schema_version": 2, "source_digest": digest(new_paragraphs), "scenes": scenes,
               "characters": characters, "locations": locations, "props": props,
               "retired_ids": sorted(retired), "inactive_assets": inactive, "pending_reviews": pending}
-    for field in ("asset_policy", "group_policy", "image_design_version", "visual_style", "identity_anchors"):
+    for field in ("asset_policy", "group_policy", "character_variant_policy", "image_design_version", "visual_style", "identity_anchors"):
         if field in old:
             result[field] = copy.deepcopy(old[field])
     if old.get("schema_version") == 3:

@@ -79,6 +79,8 @@ def collect_issues(session, state, doc, units, failures=()):
             add(item["key"], "missing_image", nid)
     black_by_unit = {}
     for unit in units:
+        if c.no_black(unit):
+            continue
         black, kind, issue = c.black_reference(state, doc, unit["id"])
         black_by_unit[unit["id"]] = black
         if issue is not None:
@@ -96,7 +98,7 @@ def collect_issues(session, state, doc, units, failures=()):
         prompt = c.prompt_of(doc, target)
         tagged = set(c.node_asset_ids(prompt))
         draft = c.content(doc, target).get("generation", {}).get("references", [])
-        keys = sorted(c.unit_asset_ids(session, unit)) + ["BLACK"]
+        keys = sorted(c.unit_asset_ids(session, unit)) + ([] if c.no_black(unit) else ["BLACK"])
         specific_failures = 0
         for key in keys:
             source = black_by_unit[unit["id"]] if key == "BLACK" else state.get("mappings", {}).get(key, {}).get("node_id")

@@ -13,11 +13,15 @@ python <skill>/scripts/canvas.py bind --project <project> --target <画布链接
 python <skill>/scripts/canvas.py status --project <project>
 ```
 
-`setup`检测现有官方CLI及本Skill实际调用的命令，缺少时用包内`ensure-cli.js`安装到官方CLI缓存；不每次安装或升级。必要原生命令为status/login、canvas get/allocate/upload；必要语义命令覆盖快照、权限、节点创建/更新/删除、独立引用连线的create_edge、精确删除引用边的delete_edges、提示词写入、角色/场景描述及角色主图更新。create_checkpoint只在权限支持时使用，保持可选；不探测本Skill不调用的模型列表/描述、生图、生视频、超分、擦字幕、积分、query-result、logout或canvas create/apply。`auth --login`先检查status，已有登录不重复打开授权页。首次提示用户完成浏览器授权；CLI自行保存安全凭据。配置文件只保存CLI/Node路径、版本和公开账号标识，禁止保存密钥、完整status、认证环境变量或浏览器存储。CLI报401/403时先判断账号/权限；仅确认浏览器凭据过期或撤销后使用`auth --login --force`，不将force作为常规操作。
+`setup`检测现有官方CLI及本Skill实际调用的命令，缺少时用包内`ensure-cli.js`安装到官方CLI缓存；不每次安装或升级。必要原生命令为status/login、canvas get/allocate/upload；必要语义命令覆盖快照、权限、节点创建/更新/删除、精确删除引用边的delete_edges（create_edge仅历史黑幕模式需要，不作为新流程安装前提）、提示词写入、角色/场景描述及角色主图更新。create_checkpoint只在权限支持时使用，保持可选；不探测本Skill不调用的模型列表/描述、生图、生视频、超分、擦字幕、积分、query-result、logout或canvas create/apply。`auth --login`先检查status，已有登录不重复打开授权页。首次提示用户完成浏览器授权；CLI自行保存安全凭据。配置文件只保存CLI/Node路径、版本和公开账号标识，禁止保存密钥、完整status、认证环境变量或浏览器存储。CLI报401/403时先判断账号/权限；仅确认浏览器凭据过期或撤销后使用`auth --login --force`，不将force作为常规操作。
 
 链接支持`https://xyq.jianying.com/novel/detail/canvas?projectId=...&canvasId=...`，以及含`overviewPippitAssetId`的链接。后者通过官方CLI读取overview解析实际canvas ID，不能把overview或project ID直接当canvas ID；无法唯一解析时请用户提供实际画布ID。所有远端ID保持字符串。绑定校验个人canvas类型与编辑权限；没有指定目标时询问画布链接，不自行新建画布。
 
 明确切换目标后用`bind ... --switch`，原绑定及映射归档。当前有效连接保存在`canvas/connection.json`，绑定、节点映射、操作日志及待同步项保存在`canvas/state.json`。每次实际操作核对当前CLI账号，账号变化先恢复或重新绑定，不跨账号复用映射。
+
+## 新批次无黑幕策略
+
+新提交/选定替换单元由director.commit固定 `black_reference_mode: none-v1`。videos资产盘点仅处理人物、布景和道具；不解析、获取、新建或改名黑幕节点，不新增黑幕reference边，不查询黑幕素材，也不把缺黑幕列为待处理。资产正式标签、时长、逐步ACK、最终回读均保留。已有黑幕及其连线不删除。以下涉及黑幕的说明和命令只用于历史receipt明确保留的旧模式兼容，不是新制作步骤；运行中的冻结任务按原版本继续，安装不迁移任务。
 
 ## 资产与视频节点
 
@@ -46,7 +50,7 @@ python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind videos 
 1. 创建video业务节点，立即保存CLI分配的真实节点ID和本步官方确认；此时不要求默认name/title/caption已等于最终分镜编号。
 2. 在该真实ID上改名，name/title/caption逐字设为已提交单元display_name（旧单元无此字段时为原ID）。
 3. 仅设置generation.durationMs，数值为单元duration秒乘1000；嵌套generation从最新内容合并，保留modelKey、resolution、prompt、references、比例及其他配置，不修改已有媒体的实际durationMs。
-4. 对edge-only-v1单元先按真实黑幕源节点和目标节点检查或建立独立reference连线，记录本次连线写入的官方确认；再从当前有效单元渲染完整提示词，以真实节点ID编码其他资产引用，通过官方提示词命令写入。正文不含黑幕标签，连线子步骤失败或ACK不明须停止后续写入并沿同一真实ID核对续接。
+4. 新none-v1直接写入已编码图片资产引用的提示词；对历史edge-only-v1单元先按真实黑幕源节点和目标节点检查或建立独立reference连线，记录本次连线写入的官方确认；再从当前有效单元渲染完整提示词，以真实节点ID编码其他资产引用，通过官方提示词命令写入。正文不含黑幕标签，连线子步骤失败或ACK不明须停止后续写入并沿同一真实ID核对续接。
 
 每步记录命令和官方确认；四步全部获得确认后统一读取目标视频，核对name/title/caption、generation.durationMs、完整generation.prompt、真实节点标签及reference连线，并按下文引用规则核对适用媒体引用条目。单节点JSON回执保存于`canvas/video-write-receipts/`，记录真实节点ID、各步骤确认和名称、时长、提示词、引用的核对结果。最终全部核对通过才保存整节点完成回执；核心名称、时长或提示词未通过时返回`UNCERTAIN_WRITE`并保存`uncertain`回执，核心字段通过但引用尚未通过时保存`partial`回执，不标整节点完成。缺图片单独记录待补，不因缺图片判定节点引用失败。各步骤确认不能代替整节点回执。创建阶段不做最终名称回读门槛，最终名称检查在改名、时长和提示词都完成后执行。复用已有视频跳过已确认的创建步骤，在同一真实ID上续接其余步骤。
 
@@ -67,7 +71,7 @@ python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind videos 
 
 选择文件只能根据用户的实际选择填写；不自动填覆盖。候选或摘要变化重新核对。多个候选不能默认取第一个，用户选定后使用该候选真实ID及本次fingerprint继续。已有映射正常复用；直接`assets`中绑定节点被删或类型变化时说明实际情况，由用户决定恢复/重绑。用户明确要求重建缺失节点时，在该资产选择中填写`{"recreate_missing":"查询确认已缺失的原节点ID"}`；若出现同名候选仍需明确reuse。显式`videos`的资产准备已获自动唯一匹配和补建缺失节点授权，无需逐项确认，但不因此自动填任何云端覆盖选择。资产引用准备保留当前主图及形象/视角名称；直接改写资产名称、描述或默认形象/视角，以及视频节点名称、提示词或参数时，仍检查各自保存基线并处理实际冲突。
 
-大批量操作在浏览器授权支持时先建检查点。每个节点串行处理：后台资产按小组申请ID、逐条记录ACK并整组回读全部目标字段，写入失败或未知ACK时先读取画布，能核对目标已生效则继续，否则返回`UNCERTAIN_WRITE`并停止；视频按创建、改名、时长、正式引用提示词四步取得官方确认后统一回读。ID由CLI真实分配并在创建前保存，可恢复进程在已确认步骤之间中断的情况。视频步骤收到实际拒绝、未知或无法确认的官方ACK，立即停止后续写入并保留真实ID、命令确认和步骤进度；先读取画布核对远端状态，按官方支持的恢复流程解决未确认步骤，再在同一真实节点ID上续接，不重新创建。未确认状态仍无法核对时返回`UNCERTAIN_WRITE`，不得把该节点或整个批次标为完成。不要删除CLI隔离的未确认事务或换request ID盲目重放。项目`operation.lock`及系统临时目录中对应账号/画布摘要的`seedance-canvas-*.lock`只在确认旧进程已退出后才能移除；不批量清理其他项目的锁。`status`可在未知写入后读取节点与未确认操作列表。
+大批量操作在浏览器授权支持时先建检查点。每个节点串行处理：后台资产按小组申请ID、逐条记录ACK并整组回读全部目标字段，创建后有限核对业务资产就绪；明确拒绝记`rejected`，未知ACK记`uncertain`。允许有限重试的拒绝及旧版误分类日志恢复严格按[后台队列的资产恢复规则](canvas-jobs.md#资产就绪拒绝与恢复)执行；未知结果无法核对时返回`UNCERTAIN_WRITE`并停止，不当普通失败重试。视频按创建、改名、时长、正式引用提示词四步取得官方确认后统一回读。ID由CLI真实分配并在创建前保存，可恢复进程在已确认步骤之间中断的情况。视频步骤收到实际拒绝、未知或无法确认的官方ACK，立即停止后续写入并保留真实ID、命令确认和步骤进度；先读取画布核对远端状态，按官方支持的恢复流程解决未确认步骤，再在同一真实节点ID上续接，不重新创建。未确认状态仍无法核对时返回`UNCERTAIN_WRITE`，不得把该节点或整个批次标为完成。不要删除CLI隔离的未确认事务或换request ID盲目重放。项目`operation.lock`及系统临时目录中对应账号/画布摘要的`seedance-canvas-*.lock`只在确认旧进程已退出后才能移除；不批量清理其他项目的锁。`status`可在未知写入后读取节点与未确认操作列表。
 
 仅当用户明确授权重建并填写`recreate_missing=旧真实节点ID`，且当前snapshot确认该视频节点已不存在时，才将旧未确认日志保留为`superseded`并分配新ID；不重放旧写入，不删除历史或CLI隔离状态。
 

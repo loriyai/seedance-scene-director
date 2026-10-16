@@ -92,7 +92,9 @@ class AuditDirectorChecks(unittest.TestCase):
     def commit(self, request, output):
         path = self.project / 'request.json'
         d.write_json(path, request)
-        return d.commit(SimpleNamespace(project=self.project, request=path, output=output), self.state)
+        from test_review_support import approve_fixture
+        args = approve_fixture(SimpleNamespace(project=self.project, request=path, output=output), self.state)
+        return d.commit(args, self.state)
 
     def numeric_state(self, text):
         state = copy.deepcopy(self.state)
@@ -166,11 +168,16 @@ class AuditDirectorChecks(unittest.TestCase):
         self.assertEqual(d.validate_unit(self.state, unit, [0, 18]), [])
 
     def test_v3_requires_four_nonempty_single_line_photography_fields(self):
+        cases = [('missing', None), ('null', None), ('empty', ''), ('whitespace', ' '),
+                 ('boolean', False), ('newline', '摄影\n描述'), ('carriage_return', '摄影\r描述')]
         for field in d.PHOTOGRAPHY_FIELDS:
-            for value in (None, '', ' ', False, '摄影\n描述', '摄影\r描述'):
-                with self.subTest(field=field, value=value):
+            for name, value in cases:
+                with self.subTest(field=field, case=name):
                     unit = self.unit([0, 9])
-                    unit['shots'][0][field] = value
+                    if name == 'missing':
+                        unit['shots'][0].pop(field)
+                    else:
+                        unit['shots'][0][field] = value
                     with self.assertRaisesRegex(ValueError, field):
                         d.validate_unit(self.state, unit, [0, 9])
 
@@ -381,13 +388,15 @@ class AuditDialogueChecks(unittest.TestCase):
             dl.attach(unit, plans)
 
     def test_tail_and_punctuation_rejection_survive_human_basis(self):
-        for first, second in [('等等，', '了。'), ('救命', '！')]:
+        cases = [('等等，', '了。', '禁止孤立句尾语气词'),
+                 ('救命', '！', '禁止把纯标点分配成独立台词')]
+        for first, second, expected in cases:
             text = first + second
             unit, _ = self.sample()
             unit['audio'][0].update(text=text, units=len(dl.compact(text)))
             plans = {'L1': [{'text': first, 'start': 0, 'end': 2.8, 'breath_basis': '人工气口依据'},
                             {'text': second, 'start': 3, 'end': 6}]}
-            with self.subTest(text=text), self.assertRaisesRegex(ValueError, '孤立句尾|纯标点'):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, expected):
                 dl.attach(unit, plans)
 
 

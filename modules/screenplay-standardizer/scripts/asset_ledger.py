@@ -13,6 +13,8 @@ from pathlib import Path
 from asset_visual_design import (PROP_POLICY, GROUP_POLICY, apply_design, apply_group_review,
                                  validate_prop_policy, validate_group_policy,
                                  validate_visual_design, visual_assets)
+from character_variants import (apply_variant_review, scene_character_ids,
+                                validate_character_variants)
 
 
 HEADING = re.compile(r"场景(\d+)(?=-(?:日|夜)-(?:内|外)-|：(?:日|夜)·(?:内|外)·)[：-](日|夜)[·-](内|外)[·-](.+)")
@@ -151,6 +153,13 @@ def normalize_assets(data):
                 key = (entry, location['id'], qualifier, item.get('visual_version', 'base'))
                 if item.get('visual_version', 'base') != 'base':
                     item['name'] += '-' + item['visual_version']
+            elif category == 'characters':
+                # Display-only normalization for NEW unbound ledgers. Preserve
+                # source_entry and explicit identity/incarnation evidence.
+                item.setdefault('source_entry', old_name)
+                parts = old_name.split('-')
+                if len(parts) >= 3 and parts[1] == '今生':
+                    item['name'] = '-'.join([parts[0], *parts[2:]])
             elif category == 'props':
                 source_name = item.setdefault('source_name', old_name)
                 version = item.get('visual_version', 'base')
@@ -190,6 +199,10 @@ def normalize_assets(data):
         result[category] = output
     retired = result.setdefault('retired_ids', [])
     retired.extend(aid for aid in redirects if aid not in retired)
+    for item in result['characters']:
+        variant = item.get('appearance_variant', {})
+        if variant.get('prop_asset_id') in redirects:
+            variant['prop_asset_id'] = redirects[variant['prop_asset_id']]
     reference_preflight(result)
     return result, {'renamed': changes, 'redirects': redirects, 'merged_assets': archived}
 
@@ -363,7 +376,7 @@ def validate(script: list[dict], paragraphs: list[str], data: dict) -> None:
             for fact in facts + traits:
                 for scene_id in fact["scene_ids"]:
                     scene = scenes_by_id[scene_id]
-                    linked = scene[linked_field]
+                    linked = scene_character_ids(scene) if category == "characters" else scene[linked_field]
                     if item["id"] not in (linked if isinstance(linked, list) else [linked]):
                         raise ValueError(f"{item['id']} 的事实关联场景 {scene_id}，但资产未在该场出现")
     expected_start = 1
@@ -438,6 +451,7 @@ def validate(script: list[dict], paragraphs: list[str], data: dict) -> None:
     if data["schema_version"] == 3:
         validate_scene_assets(data, paragraphs, scenes_by_id, locations)
     reference_preflight(data)
+    validate_character_variants(data, paragraphs)
     validate_prop_policy(data, paragraphs, fact_list)
     validate_group_policy(data, paragraphs, fact_list, script)
     validate_visual_design(data)
@@ -790,7 +804,7 @@ def render(script_path: Path, source_path: Path, ledger_path: Path, output: Path
         lines.append(f"角色{number:02d} - {item['name']}：" + (item["image_prompt"] if item.get("image_prompt") else features + "。"))
         if item.get('production_design') and not item.get("image_prompt"):
             lines.append('  制作设计：' + '、'.join(visual_text(item['production_design'])) + '。')
-        numbers = sorted({scene["number"] for scene in data["scenes"] if item["id"] in scene["character_ids"]})
+        numbers = sorted({scene["number"] for scene in data["scenes"] if item["id"] in scene_character_ids(scene)})
         lines.append("  出现的场景：" + ("，".join(f"场景{number}" for number in numbers) or "无") + "。")
 
     lines.extend(["", "场景列表"])
@@ -852,6 +866,12 @@ def main() -> None:
     view.add_argument("source", type=Path)
     view.add_argument("ledger", type=Path)
     view.add_argument("--output", type=Path, required=True)
+    variants = commands.add_parser("variants", help="按已审原文登记同一人物的佩戴形象与同场切换，输出新草稿后重新design")
+    variants.add_argument("script", type=Path)
+    variants.add_argument("source", type=Path)
+    variants.add_argument("ledger", type=Path)
+    variants.add_argument("review_json", type=Path)
+    variants.add_argument("--output", type=Path, required=True)
     design = commands.add_parser("design", help="校验作者的制作设计JSON并确定性编译GPT-image-2资产提示词，不调用生图")
     design.add_argument("script", type=Path)
     design.add_argument("source", type=Path)
@@ -890,6 +910,25 @@ def main() -> None:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             print(f"已建立 {len(data['scene_assets'])} 个布景资产索引：{args.output}")
+        elif args.command == "variants":
+            if args.output.exists():
+                raise ValueError("形象审阅输出须为新文件，不覆盖已绑定台账")
+            paragraphs = source_paragraphs(args.source)
+            data = json.loads(args.ledger.read_text(encoding="utf-8-sig"))
+            result = apply_variant_review(data, json.loads(args.review_json.read_text(encoding="utf-8-sig")), paragraphs)
+            # Existing designs remain archived on the new draft. They are not
+            # silently recompiled or declared valid after adding appearances.
+            source_data = copy.deepcopy(result)
+            for field in ("image_design_version", "visual_style", "identity_anchors"):
+                source_data.pop(field, None)
+            for category in ("characters", "scene_assets", "props"):
+                for item in source_data.get(category, []):
+                    for field in ("visual_design", "image_prompt", "image_format", "image_design_digest"):
+                        item.pop(field, None)
+            validate(parse_script(args.script), paragraphs, source_data)
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            print(f"已保存佩戴形象审阅草稿：{args.output}；沿用原人物行及ID，须重新design并明确重绑定后用于新分镜")
         elif args.command == "design":
             outputs = [args.output] + ([args.catalog_output] if args.catalog_output else [])
             inputs = [args.script, args.source, args.ledger, args.design_json, args.style_file]

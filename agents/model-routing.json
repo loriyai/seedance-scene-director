@@ -7,43 +7,94 @@
     "change_current_chat": false
   },
   "profiles": {
-    "creative": {"model": "gpt-6.1-sol", "reasoning_effort": "high"},
-    "operations": {"model": "gpt-6.1-sol", "reasoning_effort": "medium"},
-    "specialist": {"model": "gpt-6-astra", "reasoning_effort": "high"}
+    "creative": {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "high"
+    },
+    "operations": {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "medium"
+    },
+    "specialist": {
+      "model": "gpt-6-astra",
+      "reasoning_effort": "high"
+    }
   },
   "stages": {
     "standardize": {
       "profile": "creative",
-      "references": ["modules/screenplay-standardizer/INSTRUCTIONS.md", "modules/screenplay-standardizer/references/review.md"]
+      "references": [
+        "modules/screenplay-standardizer/INSTRUCTIONS.md",
+        "modules/screenplay-standardizer/references/review.md"
+      ]
     },
     "assets": {
       "profile": "creative",
-      "references": ["modules/screenplay-standardizer/INSTRUCTIONS.md", "modules/screenplay-standardizer/references/asset-ledger.md"]
+      "references": [
+        "modules/screenplay-standardizer/INSTRUCTIONS.md",
+        "modules/screenplay-standardizer/references/asset-ledger.md"
+      ]
     },
     "design": {
       "profile": "creative",
-      "references": ["references/asset-image-design.md", "modules/screenplay-standardizer/references/asset-ledger.md"]
+      "references": [
+        "references/asset-image-design.md",
+        "modules/screenplay-standardizer/references/asset-ledger.md"
+      ]
     },
     "storyboard": {
       "profile": "creative",
-      "references": ["references/runtime.md", "references/cinematic-rules.md", "references/continuity-state.md", "references/performance-direction.md", "references/shot-options.md", "references/output-format.md"]
+      "references": [
+        "references/runtime.md",
+        "references/cinematic-rules.md",
+        "references/continuity-state.md",
+        "references/performance-direction.md",
+        "references/shot-options.md",
+        "references/output-format.md",
+        "references/scene-review-workflow.md"
+      ]
     },
     "revise": {
       "profile": "creative",
-      "references": ["references/runtime.md", "references/cinematic-rules.md", "references/continuity-state.md", "references/performance-direction.md", "references/shot-options.md", "references/output-format.md"]
+      "references": [
+        "references/runtime.md",
+        "references/cinematic-rules.md",
+        "references/continuity-state.md",
+        "references/performance-direction.md",
+        "references/shot-options.md",
+        "references/output-format.md",
+        "references/scene-review-workflow.md"
+      ]
     },
     "review": {
       "profile": "creative",
-      "references": ["references/runtime.md", "references/continuity-state.md", "references/cinematic-rules.md", "references/performance-direction.md", "references/output-format.md"]
+      "references": [
+        "references/runtime.md",
+        "references/continuity-state.md",
+        "references/cinematic-rules.md",
+        "references/performance-direction.md",
+        "references/output-format.md",
+        "references/scene-review-workflow.md"
+      ]
     },
     "sync": {
       "profile": "operations",
-      "references": ["references/canvas.md", "references/canvas-jobs.md"]
+      "references": [
+        "references/canvas.md",
+        "references/canvas-jobs.md"
+      ]
     }
   },
   "escalation": {
     "profile": "specialist",
-    "eligible_stages": ["standardize", "assets", "design", "storyboard", "revise", "review"],
+    "eligible_stages": [
+      "standardize",
+      "assets",
+      "design",
+      "storyboard",
+      "revise",
+      "review"
+    ],
     "max_attempts": 1,
     "require_reason": true
   },

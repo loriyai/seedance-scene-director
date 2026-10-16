@@ -50,7 +50,7 @@ class GroupContinuityPolicyTests(unittest.TestCase):
         self.assertIn("image_prompt", result["characters"][0])
         self.assertEqual(result["scenes"][0]["character_ids"], [group["id"], "CHAR0001"])
 
-    def test_reusable_one_event_still_fails_and_two_events_pass(self):
+    def test_reusable_one_event_and_renamed_duplicate_fail(self):
         group = self.add_group("reusable")
         with self.assertRaisesRegex(ValueError, "至少需要2次独立可见出场"):
             self.validate()

@@ -23,8 +23,10 @@ class BatchNamingChecks(unittest.TestCase):
         project = self.project if project is None else project
         path = project / 'request.json'
         d.write_json(path, request)
-        return d.commit(SimpleNamespace(project=project, request=path,
-                        output=project / 'outputs' / (request['request_id'] + '.txt'), batch_scope=scope), state)
+        from test_review_support import approve_fixture
+        args = SimpleNamespace(project=project, request=path,
+                        output=project / 'outputs' / (request['request_id'] + '.txt'), batch_scope=scope)
+        return d.commit(approve_fixture(args, state), state)
 
     def repeated(self, key):
         request = dict(self.request(), request_id=key)

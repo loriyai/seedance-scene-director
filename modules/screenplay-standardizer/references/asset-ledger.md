@@ -1,5 +1,13 @@
 # 资产台账结构
 
+## 发声群体资产
+
+仅在原文明示集合共同发声、且不能唯一展开为全部已知成员时，按独立集合人物保留CHAR与原集合称谓。新增`character_kind: speaking_ensemble`、`visual_mode: image_asset`及逐字对应标准台词标签的`source_speaker`；source_entry保留完整集合条目，不加背景群像的`-群像-`标记。该类型不参加背景群像筛选，不允许prompt_only，也不创建个人佩戴变体。原文能唯一确定全部成员时可沿用多声源标签，不为了工具格式强拆不确定集合或新增成员。
+
+`ensemble_review`含`kind: speaking_ensemble`、`reviewed_full_script: true`、当前`source_digest`及具体`identity_basis`、`speech_basis`、`consistency_reason`。`visible_uses`至少一项，使用现有scene_id/event_id/evidence/source_paragraphs结构，给出集合实际出场或共同发声的连续来源证据；图片参考需要实际可见的集合，纯音频且无视觉身份的声效另按声音信息处理，不虚构人脸。脚本核对证据、关联、当前摘要及对应场次确有集合台词标签；原文是否明确集合、成员边界及视觉需求由作者审阅。
+
+新制作采用gpt-image-2-v2的group_members与group_wardrobe多人参考板，同背景群像板保持16:9白底、每个样本只画一次正面全身、外貌可辨；不使用单人身份锚点及四视图。样本数不确定剧情人数或说话分工。原集合对白始终按原字词完整保存。更改集合身份审阅会使设计摘要过期，须重新核实并编译。此类型仅显式登记时启用，不改变旧台账、普通人物或原背景群像规则。
+
 后台主文件使用 UTF-8 JSON；分类视觉描述 TXT 由它生成。标准剧本的场景序号用于显示，`SC`（场次）、`LOC`（物理地点）、`SET`（布景）、`CHAR`、`PROP` ID 用于长期关联。首次建立台账可用 `asset_ledger.py init` 生成无事实的索引骨架；若已有台账，先用 `asset_migrate.py` 迁移并审核，不重新初始化或重编号。`init` 生成的 `time_basis: 待核` 是草稿，须逐场确认后才能渲染。
 
 ```text
@@ -63,7 +71,7 @@ python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/sour
 
 `init` 只建立场次、人物和待核地点索引，scene_assets为空且scene_asset_id为null，不自动提取资产事实或主要道具。地点按场景先分配独立 ID，核实是同一地点后再合并；明确姓名的角色只按完整人物条目初步归并。`卢筱筱-基础形象` 与 `卢筱筱-黑色裙子` 分别建立稳定 ID；同一完整条目在多场出现且身份明确时复用 ID。泛称有台词角色先按身份核实；群像草稿直接加地点后缀，在地点核实后normalize按同地点同原条目/形象归并候选，再审阅图片筛选，不逐SC建图。群像只用于无姓名、无台词且原文明示阵营、身份、人设或职业的背景人物。新init的群像暂记visual_mode="prompt_only"但未完成审阅，不能直接交付；最终模式须依据全剧证据确认。若相同条目指向不同实体，拆成不同 ID，并用逐场关联指向各自实体。新 ID 只追加，废弃的 ID 放入 `retired_ids`，不回收。场景的 `number`、`heading` 可随剧本修改；`id` 保持稳定。
 
-原文用词与制作名称分开：人物source_entry对应人物行完整条目，未填则兼容以name匹配；人物name是唯一制作名称，可加入世次、当前身份、形象及地点限定；场景 `heading` 对应完整标题；地点主名称对应至少一个关联场景标题中的地点字样，其他已确认同一地点的标题字样可放入 `aliases`；道具source_name须原样出现在至少一个关联场景正文，每场出现source_name或aliases；未填兼容以name匹配。name用于唯一图片引用，可使用有依据的版本限定，例如“惊堂木-京城茶馆”；不把制作名写进原台词，不把剧情说明当外形事实。
+原文用词与制作名称分开：人物source_entry对应人物行完整条目，未填则兼容以name匹配；人物name是唯一制作名称，今生省略“今生”段，如“卢筱筱-基础形象”；前世、明确第几世、不同身份、服装/年龄版本及必要地点限定仍保留。appearance.incarnation、identity、source_entry和来源证据不删；不能按戏份多少猜同一人物或合并不同世次。normalize仅在新未绑定台账中移除姓名后独立“今生”段，保留ID，重名时报错并要求按真实身份消歧，不自动合并。已有绑定台账不迁移；场景 `heading` 对应完整标题；地点主名称对应至少一个关联场景标题中的地点字样，其他已确认同一地点的标题字样可放入 `aliases`；道具source_name须原样出现在至少一个关联场景正文，每场出现source_name或aliases；未填兼容以name匹配。name用于唯一图片引用，可使用有依据的版本限定，例如“惊堂木-京城茶馆”；不把制作名写进原台词，不把剧情说明当外形事实。
 
 新项目heading统一为 `场景X-日/夜-内/外-地点`，例如 `场景1-日-内-昏暗房间`，实际名称不含选项斜杠，并通过文件名字符检查。读取兼容旧项目的冒号与间隔点标题，保持绑定剧本与台账场次标题一致；图片文件名使用scene_assets的name，不自动迁移旧项目。
 
@@ -275,6 +283,47 @@ groups须覆盖归并后全部群像CHAR，不填非群像；--source必需且�
 
 分类TXT按实际图片资产顺序输出角色01、场景01、道具01，三类分别计数，超过99自然为100；prompt_only不占号。编号不进入name、ID、图片文件名、节点名或引用。
 
+## 同一人物的佩戴形象与同场切换
+
+遮面显著改变头部轮廓、身份辨识或跨镜外观，或者承担戴上/摘下情节时，审阅后可建立独立佩戴图片CHAR。不会因出现“口罩”一词就自动建图，不设至少两次出场门槛；始终属于固定制服且无需区分佩戴前后的形象，可直接纳入已有造型设计。命名保留原身份、世次及服装限定，例如`阿明-白衬衫-戴猪猪头套`；分类TXT显示为`角色02 - 阿明-白衬衫-戴猪猪头套`，展示序号不进入name。
+
+仅显式执行以下命令启用`character_variant_policy: source-masked-v1`，旧台账及已交付回执不自动迁移。输入是作者审阅的完整JSON快照，输出新的待设计台账；保留已有设计供复核，须重新design及明确重绑定后用于新分镜，不改标准剧本、原人物行或既有画布。
+
+```text
+python scripts/asset_ledger.py variants <standard-script.txt> <source.json> <ledger.json> <appearance-review.json> --output <appearance-draft.json>
+```
+
+```json
+{
+  "policy": "source-masked-v1",
+  "source_digest": "当前原文摘要",
+  "reviewed": true,
+  "variants": [
+    {"id": "CHAR0002", "base_asset_id": "CHAR0001", "name": "阿明-白衬衫-戴猪猪头套", "label": "戴猪猪头套", "kind": "headgear", "design_basis": "完整遮头轮廓跨镜使用，需固定佩戴后的整体外观"}
+  ],
+  "scene_appearances": [
+    {"scene_id": "SC0001", "base_asset_id": "CHAR0001", "initial_asset_id": "CHAR0001",
+     "initial_evidence": {"source_paragraphs": [1], "evidence": "阿明未戴头套站在门口。", "basis": "原文明示未戴状态"},
+     "transitions": [
+       {"event_id": "wear", "from_asset_id": "CHAR0001", "to_asset_id": "CHAR0002", "source_paragraphs": [2], "evidence": "阿明戴上猪猪头套。", "basis": "本次戴上"},
+       {"event_id": "remove", "from_asset_id": "CHAR0002", "to_asset_id": "CHAR0001", "source_paragraphs": [3], "evidence": "阿明摘下猪猪头套。", "basis": "本次摘下"}
+     ]}
+  ]
+}
+```
+
+`variants`完整列出已有和新增佩戴资产。已有ID不能改绑另一个人物；重复应用同一base/label可复用原ID，显式新ID不能占用现用或废弃ID。佩戴类型为`headgear`或`face_covering`。程序生成的`appearance_variant`保留base_asset_id、label、kind、design_basis和当前source_digest，source_entry及source_speaker逐字继承基础人物。该基础资产确定原身份、体型与服装，不能借佩戴换脸、换世次或换衣；确有服装变化时先关联正确的服装基础资产。可以用`prop_asset_id`关联已存在的同款头套/面罩道具，供佩戴、拿取和摘戴共用设计；道具实体数量与持有人仍由prop_occurrences及连续性分别保存，三个同款头套不能因此变成同一个实物。
+
+`scenes.character_ids`始终逐项对应原人物行，不能把基础和佩戴版本同时追加为两个人。独立的`character_appearances`数组登记本场合法形象及其初始状态、切换链；切换引用本场连续原文段落，event_id不重复，from/to依次衔接。同场无摘戴动作但已佩戴出场时，initial_asset_id直接用佩戴版本，initial_evidence说明本场状态，transitions可为空；不能用后文戴上事件证明前文已佩戴。程序检查引文、链条与摘要，原文是否真的证明该人物佩戴、最初状态以及参考必要性仍由作者核实。
+
+分镜continuity中基础与佩戴版本属于同一个entity，其asset_ids列出本单元会使用的合法版本，以asset_id状态切换，不单独登记为两个人。初始形象按本单元之前已发生的事件继承，不能提前引用后文版本；changes的evidence使用对应事件完整动作引文，使其能在本场标准正文唯一定位。来源边界不能截断该切换动作证据；换镜不是重复佩戴的理由。未选范围之外的事件不需要在本单元重演。形象动作发生镜中可同时引用切换前后两图，后续镜头只使用当前形象。
+
+同一entity还可以包含明确登记了相同appearance.identity与incarnation的其他服装基础形象及其佩戴版本；只有名称或source_speaker相同不证明同一实体。各服装基础的本场佩戴轨迹仍分别验证，不合并from/to链。回忆、想象或有来源的切场进入另一服装/既定佩戴状态时，按普通continuity登记进入场次证据及形象变化，不虚构一次戴上/摘下事件；同场实际摘戴仍须匹配本场事件。单位开始时的形象必须是本范围已经成立的状态，不能把后续造型当作初始状态。
+
+现场说话的逐镜人物引用应与本镜当前或实际达到的佩戴造型一致，佩戴版本仍继承同一原说话人。检查摄影、动作和声音标签时，不让基础形象的图像引用隐式摘掉头套。一句话跨越摘戴时仍只登记一个完整audio事件，逐镜引用按实际状态复核；内心声、画外音与画内造型分别判断，不因声音来自同一人物就强迫画内嘴部动作或改变造型。
+
+迁移保留佩戴ID与一对一可定位的本场轨迹，不让新形象参与原人物槽位匹配。原文版本、原人物映射或事件证据变化时保留旧审阅并登记待核；拆并场轨迹不得猜分配，待作者重审后重新运行variants。不能直接刷新摘要或删除待核项假装审核通过。分类TXT的出现场次按基础关联及本场形象轨迹共同反查。
+
 ## 制作设计与图片提示词
 
 原文visual_facts和personality_facts保持事实及出处，未知事实仍留空；完整美术方案另存visual_design，不写回事实字段。生成者结合剧本约束和[资产图片设计规范](../../../references/asset-image-design.md)写设计JSON，脚本只校验并编译，不设计外观、不调用生图模型、不改变ID/名称/形象启用。design覆盖全部图片CHAR/SET/PROP，排除prompt_only群像；其旧生图派生字段仅在显式design时清除。design只接受已核实schema 3台账，旧schema 2须按原显式迁移流程处理；旧schema 3可在用户授权后显式执行design，新政策字段不自动添加。normalize与群像筛选先于design执行。
@@ -298,7 +347,13 @@ groups须覆盖归并后全部群像CHAR，不填非群像；--source必需且�
 
 SET的space必须写主要活动区、出入口和固定相对关系；materials_palette/furnishings/lighting提供可拍材质、陈设与基础受光。普通家具进入SET，单幅无人物主视图；父SET共用事实继承规则保持原规定，不把temporal时间跨度推成自动破败。PROP的structure/materials_palette/scale/state只描写物件本体，不编造未知密码、铭文或剧情线索；单件完整、纯净白底、不夹手部或剧情环境。
 
-style-file使用项目原样保存的单行video-style.txt；只去除文件首尾空白，不折叠内部空格、不重新翻译或缩写。编译后顶层新增image_design_version="gpt-image-2-v1"、visual_style={text,digest}、identity_anchors。每个现用资产新增visual_design、image_prompt、image_format、image_design_digest；visual_design中自动记录source_fact_digest及source_context_digest。角色image_format固定model="gpt-image-2"、aspect_ratio="16:9"、background="pure_white"、layout="left_1/3_large_front_face_right_2/3_front_side90_back_full_body"。最左面部特写占满1/3宽并贯穿高度，右2/3正面、90度侧面、背面完整全身等高并排。SET和PROP记录单幅主视图/完整单品版式，不伪造模型API参数或已生成图片。
+需整组参考的多实体PROP，在v2设计中显式填`product_layout: multiple_objects`与非空`layout_basis`（原组合证据、已知数量与参考展示范围），使用整组完整且各实体独立分开的组合版式。只需同款单个样本时沿用默认，并说明剧情实物数量不等于图片样本数。未知总数不凭样本推定；不从名称或数量词自动改版。此显式例外取代该资产的“单件”尾句，未选PROP、人物和旧v1保持原编译字节。
+
+v2图片群像不使用单个人物identity_anchor_id，改填group_members与group_wardrobe。group_members每人包含sample_id、age、body、face、hair，须有可辨外貌差异；varied/mixed模式另填个人styling。group_wardrobe包含mode（varied/uniform/mixed）、basis、era_region，uniform/mixed还须shared_style；统一服制下成员不另填服装或与shared_style完全一致，mixed保留共有服制及原文明示的等级/职责差异。不要通过样本数新增实际人物或擅改原文年龄、性别构成。完整示例和样本数边界以资产图片设计规范为准。
+
+v2佩戴图的visual_design除covering外还须visible_identity，具体说明实际可见的身份部位及锚点；如口罩露出眼眉和头发，则保留这些可见特征，全头套可以写“脸与头发均遮挡，仅保留体型轮廓”。未关联独立道具时covering为形制、色材及覆盖范围的单行文字；appearance_variant.prop_asset_id已关联PROP时，covering必须为{fit,coverage}对象，只补充穿戴适配及覆盖位置，道具形制、色材、尺寸和状态从该PROP的已审设计统一继承，不能给每个人另写互相矛盾的头套。编译器不把被遮挡的完整五官重新要求画出。佩戴版本自动继承基础identity_anchor_id、styling和已核实appearance_overrides；不能声明与基础人物不同的值，原有覆盖事实由基础记录提供。
+
+style-file使用项目原样保存的单行video-style.txt；只去除文件首尾空白，不折叠内部空格、不重新翻译或缩写。新未设计台账使用image_design_version="gpt-image-2-v2"；既有v1按原编译行为读取，只有设计JSON显式选择v2才升级，不能安装新版后使旧摘要失效。每个现用资产保存visual_design、image_prompt、image_format、image_design_digest，visual_design自动记录source_fact_digest及source_context_digest。新版按[资产图片设计规范](../../../references/asset-image-design.md)区分个体、图片群像和佩戴造型：普通个体保持16:9白底面部特写加三视图；群像用16:9白底多名外貌可辨人物、每人一次完整正面全身，衣着遵守时代地区与身份/服制；佩戴造型所有视图保持真实覆盖，不为展示五官摘除面罩。visual_design.covering具体说明头套/面罩形制、色材及覆盖范围；appearance_variant自动继承基础身份锚点及服装，拒绝借此更换人物外观或服装。SET和PROP仍为单幅主视图/完整单品版式，不伪造模型API参数或已生成图片。群像样本人数只服务外观参考，不确定剧情人数、队形或场面动作。
 
 编译将原文明示可见特征作为优先约束，结合既定风格、已写设计和分类构图，不把审计出处或“无外观事实”等说明塞入生图提示词。render再次确定性编译并核对保存的提示词、版式、设计摘要、事实完整证据及场次映射摘要。source_context_digest同时包含台账顶层source_digest：制作设计可能依赖全剧上下文，因此任意原文版本变更均保守地要求重新审阅设计，即使heading、range、visual_facts保持不变也不能沿用旧提示词。改原文、事实、证据、适用映射、设计或审阅依据、名称、风格后须审阅并显式重新design，不能只手改image_prompt；改稿迁移保留旧设计并登记制作设计待复核。旧无设计台账不受此检查影响。设计命令输出不同的新文件，不覆盖旧台账或旧TXT。重新design可读取旧设计台账，按当前事实结构核实后重编译全部完整方案。
 

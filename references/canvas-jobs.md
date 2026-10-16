@@ -20,11 +20,32 @@ python <skill>/scripts/canvas_jobs.py image-choice --project <project> --choice 
 
 `enqueue`不带`--start`只输出不可变任务JSON；`start`启动隐藏后台Python进程并立即返回，`worker`为该进程内部入口。不得用宿主反复等待进程退出来模拟后台。`status`只读本地状态，在交付分镜、处理节点菜单等交互边界读取即可，不循环核对远端或占住对话等待。
 
+任务排队时即保存total，视频/引用任务按所选单元数计数。新none-v1任务不执行黑幕ID/节点/连线/素材检查；冻结的历史任务保持原模式。视频在准备、逐节点处理和整节点回读通过时保存stage、current_unit、真实ID及updated_at；每个完整节点通过后立即更新completed和node_ids，不等整批返回。创建ACK、名称/时长单步通过、引用未通过均不能推进完整节点计数。恢复执行会重新读取目标并核验节点，本轮completed随实际核验重建；旧回执和旧进度记录仍用于同一ID续接，计数重核不代表重建节点。后台任务终态仍由完整结果决定，不能仅凭completed==total宣称完成。
+
+图片任务的分母仅包含扫描有效、名称唯一匹配且未明确skip的上传目标；未匹配或不支持的文件不计入分母，缺失/重复/无效/冲突另列；终态仍依据原有执行结果及冲突判定，不能只看分母。新任务将目标数冻结到options.image_target_count，旧任务没有此证据时total显示null，待实际执行扫描后更新；不为补历史分母读取已经改变或消失的旧图片目录。完整图片清单摘要仍用于判断输入是否漂移。
+
 需要冲突选择时，把用户明确给出的选择保存为JSON，传`enqueue --decisions <文件>`；修改选择会形成新任务。同一个request_id可补充冲突选择，但来源内容和所选分镜不能改变；新的修订使用新的commit request_id。用户未授权的覆盖选择不得由脚本自动填入。
 
 同画布、同类、同一组所选分镜或图片目录的新任务会替代未完成旧任务，保留旧JSON和操作日志。依赖旧资产任务的视频自动跟随替代任务；新任务完成后才释放依赖。替代不绕过未知写入核对。显式切换画布后，新画布任务不依赖旧画布任务；旧目标任务保留停止原因，不自动跨画布执行。
 
 用户要求暂停或停止画布工作时，立即调用`pause`。它停止派发新操作；已发送的请求收取确认并保留日志后停止。强制终止可能留下未知结果，恢复必须核对原ID。`start`和新任务不会绕过暂停；只有用户恢复后调用`resume`。恢复先核对原操作日志；结果未知时仍停止，不盲目重建、不删除CLI隔离状态。
+
+## 资产就绪、拒绝与恢复
+
+创建ACK只证明创建命令已确认。新角色/场景在写入名称与描述前，用官方快照检查同一ID的节点类型、业务content及basicInfo；最多核对3次，间隔0.5秒，未就绪返回`ASSET_NOT_READY`并保留映射。它不是图片就绪检查，不要求主图。暂停在每次查询、等待及写命令前检查。
+
+明确`ok:false`保存公开的code/message/revision并记`rejected`；超时、无效输出、执行/保存异常及其他无确定确认的错误记`uncertain`。未知写入不自动重试。仅`xyq.scene.updateDescription`明确返回`INVARIANT_FAILED / scene asset not found`时，可在官方只读核对业务资产就绪、原ID及名称/视角/描述/媒体字段未变化后，总共尝试最多3次，间隔0.5秒；不重建节点。若回读证明目标已生效则记录核验，发生人工变化停止。其他拒绝立即停止。CLI隔离/未确认事务仍按官方流程核对，不能清理后重跑。
+
+旧版把明确拒绝误记为uncertain时，`resume`本身不能解除日志阻塞。以下入口只读核对及修改本地日志，不发送业务写命令、不启动worker、不解除pause：
+
+```text
+python <skill>/scripts/canvas_jobs.py recover-assets --project <project> --operation-id <原操作ID>
+python <skill>/scripts/canvas_jobs.py recover-assets --project <project> --operation-id <原操作ID> --apply --fingerprint <预览返回的摘要>
+```
+
+仅接受本队列旧场景改名记录：完整明确拒绝JSON、唯一原映射、同ID已确认创建、名称与初始数据对应，且无其他未知操作。原业务资产必须已就绪；名称只能是原目标名或工厂默认名，视角/描述为空且无图片/其他素材。节点有人工内容、证据缺失、摘要变化或CLI查询失败时不修改日志，转为具体待处理项。apply保留原错误与操作ID，追加恢复依据、核对时间和摘要，将误分类改为rejected；回读证明目标改名已生效则记verified，不重放该步骤。恢复入口使用原账号/画布的writer锁；其他项目writer活跃时拒绝操作。
+
+用户授权恢复后，再调用`resume`。正常队列会核对原ID、已确认步骤与拒绝前字段基线，仅补未完成字段并整组核验；新成功ACK关联原拒绝记录，保留历史证据。已核验节点不重写，已创建但未核验的节点不分配新ID。暂停授权与日志修复是两件事，不能在后续分镜请求中静默恢复队列。
 
 ## 并行工作与菜单
 
@@ -45,7 +66,7 @@ python <skill>/scripts/canvas_jobs.py image-choice --project <project> --choice 
 
 - `canvas/jobs/job-<摘要>.json`：绑定、冻结session输入、所选单元与版本、请求选项、依赖任务及内容摘要。稳定CHAR/SET/PROP/分镜ID沿用，不创建易漂移的临时序号。
 - 同名`.state.json`：worker独占的进度、已核验计数、节点映射和结果。完整映射和逐操作日志继续保存在`canvas/state.json`，视频完成回执仍保存在`canvas/video-write-receipts/`。
-- `control.json`：暂停与图片菜单选择；`worker.json`：进程状态；`events.json`：每个成功任务仅一条完成事件；`worker.log`：后台运行错误。
+- `control.json`：暂停与图片菜单选择；`worker.json`：进程状态；`events.json`：区分completed与needs_attention事件，完成每任务一次，相同失败内容去重；`worker.log`：后台运行错误。
 
 追加新范围不使已有资产任务失效。来源、资产台账、风格、目标画布、所选分镜或待上传图片变动时，旧任务停止，重新提交当前内容；不得继续写旧版本。输入文件与进度文件分离，Codex不改正在执行的任务JSON。
 
@@ -55,4 +76,4 @@ python <skill>/scripts/canvas_jobs.py image-choice --project <project> --choice 
 
 不把通用apply_mutations的dryRun当业务验收，不为批量化改用浅层generation补丁写提示词。已注册描述/提示词命令保持官方业务入口；首版不启用纯创建批事务或自写MCP。未知ACK保留allocated/pending/acknowledged/uncertain等操作状态，只有回读证明目标已生效才跳过；未证明的项不能当普通失败自动重试。
 
-完成事件会尝试在Windows显示短暂桌面提示。通知失败不影响已保存结果；宿主没有事件回调时，脚本不能主动向聊天追加消息，Codex在下一交互边界读取本地事件后简短报告。只有全部任务目标核验成功才提示完成，不能把部分成功计为整批完成。
+完成和需要处理事件都会尝试在Windows显示短暂桌面提示。失败提示包含已核验计数及具体原因，不宣称任务完成；暂停和替代不触发失败提示。相同失败事件不重复通知，恢复成功仍另发完成事件。通知失败不影响已保存结果；宿主没有事件回调时，脚本不能主动向聊天追加消息，Codex在下一交互边界读取本地事件后简短报告。只有全部任务目标核验成功才提示完成，不能把部分成功计为整批完成。

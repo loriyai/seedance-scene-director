@@ -133,7 +133,24 @@ def state_file(project, job_id):
 
 
 def job_state(project, job):
-    return read(state_file(project, job["job_id"]), {"job_id": job["job_id"], "status": "queued", "completed": 0})
+    value = read(state_file(project, job["job_id"]), {"job_id": job["job_id"], "status": "queued", "completed": 0})
+    # Old jobs gain derived fields in the returned view only; never rewrite history.
+    if "total" not in value:
+        value["total"] = job_total(job)
+    value.setdefault("stage", value["status"])
+    return value
+
+
+def job_total(job):
+    if job["kind"] in ("videos", "references"):
+        return len(job["options"]["ids"])
+    if job["kind"] == "images":
+        # Old manifests did not freeze the eligible target count. Do not infer
+        # it from all files or rescan today's changed/missing folder as history.
+        return job["options"].get("image_target_count")
+    ledger = job["session"]["ledger"]
+    return (sum(item.get("visual_mode") != "prompt_only" for item in ledger.get("characters", []))
+            + len(ledger.get("scene_assets", [])) + len(ledger.get("props", [])))
 
 
 def image_inventory(folder):
@@ -167,6 +184,8 @@ def enqueue(project, kind, request_id=None, ids=None, folder=None, decisions=Non
     if kind == "images":
         d.require(folder is not None, "上传任务需要明确的图片文件夹")
         options.update(folder=str(Path(folder).resolve()), images=image_inventory(folder))
+        matched = c.media.scan_images(session, Path(options["folder"]))["matched"]
+        options["image_target_count"] = sum(not options["decisions"].get(item["key"], {}).get("skip") for item in matched)
     scope = input_scope(session, kind, selected)
     input_digest = c.digest(scope)
     identity = c.digest({"binding": binding, "kind": kind, "input_digest": input_digest, "options": options})
@@ -192,7 +211,8 @@ def enqueue(project, kind, request_id=None, ids=None, folder=None, decisions=Non
                    "dependencies": dependencies, "supersedes": supersedes, "session": copy.deepcopy(session)}
             job["manifest_digest"] = c.digest(job)
             d.write_json(path, job)
-            d.write_json(state_file(project, job_id), {"job_id": job_id, "status": "queued", "completed": 0})
+            d.write_json(state_file(project, job_id), {"job_id": job_id, "status": "queued", "stage": "queued",
+                                                      "completed": 0, "total": job_total(job)})
         result = {"job_id": job_id, "status": job_state(project, read(path))["status"], "reused": reused}
     if start:
         result["worker"] = start_worker(project)
@@ -262,6 +282,21 @@ def resume(project, start=True):
     return start_worker(project) if start else {"status": "queued"}
 
 
+def recover_assets(project, operation_id, apply=False, fingerprint=None, cli=None):
+    """Keep pause unchanged; serialize official readback and local journal repair."""
+    from canvas_job_backend import recover_asset_rejection
+    binding = c.read_state(project).get("binding")
+    d.require(binding, "恢复需要原画布绑定")
+    guard = FileLock(Path(tempfile.gettempdir()) / ("seedance-worker-" + c.digest([binding["account_id"], binding["canvas_id"]]) + ".lock"))
+    guard.acquire()
+    try:
+        d.require(not worker_active(project), "后台进程尚未停止，不能恢复日志")
+        with c.project_lock(project):
+            return recover_asset_rejection(project, cli or c.CLI(project), operation_id, apply, fingerprint)
+    finally:
+        guard.release()
+
+
 def image_choice(project, choice):
     d.require(str(choice) in ("1", "2"), "请选择上传或暂不上传")
     with metadata_lock(project):
@@ -295,11 +330,11 @@ def start_worker(project):
     return {"status": "started", "pid": process.pid}
 
 
-def notify_completion(text):
+def notify_desktop(text, warning=False):
     # Best effort desktop notification. Durable events remain authoritative.
     if os.name != "nt":
         return
-    script = "$w=New-Object -ComObject WScript.Shell; $null=$w.Popup('" + text.replace("'", "''") + "',8,'小云雀同步',64)"
+    script = "$w=New-Object -ComObject WScript.Shell; $null=$w.Popup('" + text.replace("'", "''") + "',8,'小云雀同步'," + ("48" if warning else "64") + ")"
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     try:
         subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
@@ -307,6 +342,45 @@ def notify_completion(text):
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         pass
+
+
+def notify_completion(text):
+    notify_desktop(text)
+
+
+def notify_attention(text):
+    notify_desktop(text, warning=True)
+
+
+def publish_event(project, job, state):
+    """Durable, deduplicated failure notifications never imply completion."""
+    event = state["status"]
+    if event not in ("completed", "needs_attention"):
+        return
+    events = read(directory(project) / "events.json", [])
+    count = state.get("completed", 0)
+    label = {"assets": "资产节点", "videos": "视频节点", "references": "视频引用", "images": "图片挂载"}[job["kind"]]
+    if event == "completed":
+        if any(e["job_id"] == job["job_id"] and e.get("event", "completed") == event for e in events):
+            return
+        message = f"已完成{count}个{label}的同步核验"
+        payload = {}
+    else:
+        error = state.get("error") or {"code": state.get("result", {}).get("status", "INCOMPLETE"),
+                                      "message": "同步目标尚未全部核验，请查看待处理项。"}
+        payload = {"error": error, "total": state.get("total"),
+                   "conflicts": state.get("result", {}).get("conflicts", [])}
+        signature = c.digest([job["job_id"], count, payload])
+        if any(e.get("signature") == signature for e in events):
+            return
+        payload["signature"] = signature
+        target = ("，节点" + error["node_id"]) if error.get("node_id") else ""
+        command = ("，命令" + error["command"]) if error.get("command") else ""
+        message = f"{label}同步需要处理，已核验{count}/{state.get('total', '?')}项{target}{command}：" + c.safe_message(error.get("message", error.get("code", "")))
+    events.append({"job_id": job["job_id"], "kind": job["kind"], "event": event,
+                   "count": count, "message": message, "created_at": time.time(), **payload})
+    d.write_json(directory(project) / "events.json", events)
+    (notify_completion if event == "completed" else notify_attention)(message)
 
 
 def recover_dead_operation_locks(project):
@@ -366,6 +440,7 @@ def run_worker(project, runner=None):
                         old_state.update(status="needs_attention", error={"code": "CANVAS_BINDING_CHANGED",
                             "message": "任务所属画布已不是当前绑定；保留任务，未执行远端操作。"})
                         d.write_json(state_file(project, old["job_id"]), old_state)
+                        publish_event(project, old, old_state)
                 for newer in current_jobs:
                     for old_id in newer.get("supersedes", []):
                         if old_id in current_ids and states[old_id]["status"] != "completed":
@@ -393,6 +468,7 @@ def run_worker(project, runner=None):
             def progress(value):
                 state.update(value)
                 state["status"] = "running"
+                state["updated_at"] = time.time()
                 d.write_json(state_file(project, job["job_id"]), state)
 
             try:
@@ -408,18 +484,13 @@ def run_worker(project, runner=None):
                 state["status"] = "superseded"
             except (ValueError, OSError, KeyError, TypeError) as exc:
                 state.update(status="needs_attention", error={"code": getattr(exc, "code", "ERROR"), "message": c.safe_message(exc)})
+                state["error"].update({key: value for key, value in getattr(exc, "details", {}).items()
+                                      if key in ("operation", "node_id", "key", "command") and isinstance(value, str)})
             state["finished_at"] = time.time()
+            state["stage"] = state["status"]
             with metadata_lock(project):
                 d.write_json(state_file(project, job["job_id"]), state)
-                if state["status"] == "completed":
-                    events = read(directory(project) / "events.json", [])
-                    if not any(e["job_id"] == job["job_id"] for e in events):
-                        count = state.get("completed", 0)
-                        label = {"assets": "资产节点", "videos": "视频节点", "references": "视频引用", "images": "图片挂载"}[job["kind"]]
-                        message = f"已完成{count}个{label}的同步核验"
-                        events.append({"job_id": job["job_id"], "kind": job["kind"], "count": count, "message": message, "created_at": time.time()})
-                        d.write_json(directory(project) / "events.json", events)
-                        notify_completion(message)
+                publish_event(project, job, state)
             if state["status"] not in ("completed", "superseded"):
                 with metadata_lock(project):
                     d.write_json(directory(project) / "worker.json", {"pid": os.getpid(), "status": "stopped"})
@@ -434,7 +505,7 @@ def run_worker(project, runner=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("enqueue", "start", "worker", "status", "pause", "resume", "image-choice"))
+    parser.add_argument("command", choices=("enqueue", "start", "worker", "status", "pause", "resume", "image-choice", "recover-assets"))
     parser.add_argument("--project", type=Path, required=True)
     parser.add_argument("--kind", choices=("assets", "videos", "references", "images"))
     parser.add_argument("--request-id")
@@ -443,11 +514,17 @@ def main():
     parser.add_argument("--decisions", type=Path)
     parser.add_argument("--start", action="store_true")
     parser.add_argument("--choice", choices=("1", "2"))
+    parser.add_argument("--operation-id")
+    parser.add_argument("--fingerprint")
+    parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "enqueue":
             result = enqueue(args.project, args.kind, args.request_id, args.ids, args.folder,
                              read(args.decisions) if args.decisions else None, args.start)
+        elif args.command == "recover-assets":
+            d.require(args.operation_id, "恢复必须指定原操作ID")
+            result = recover_assets(args.project, args.operation_id, args.apply, args.fingerprint)
         elif args.command == "image-choice":
             result = image_choice(args.project, args.choice)
         else:

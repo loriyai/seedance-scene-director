@@ -7,7 +7,7 @@ const vm = require("vm");
 
 const source = fs.readFileSync(path.join(__dirname, "ensure-cli.js"), "utf8");
 const requiredSemantic = [
-  "get_snapshot", "get_permissions", "create_biz_node", "update_node_data", "delete_nodes", "create_edge", "delete_edges",
+  "get_snapshot", "get_permissions", "create_biz_node", "update_node_data", "delete_nodes", "delete_edges",
   "xyq.generation.update_prompt", "xyq.role.updateDescription",
   "xyq.scene.updateDescription", "xyq.role.updateAppearance",
 ];
@@ -54,19 +54,36 @@ function fixture(catalogNames) {
   return { ensureCLI: module.exports.ensureCLI, calls, messages };
 }
 
-const normal = fixture(requiredSemantic);
-assert.strictEqual(normal.ensureCLI({ canvas: true }).cli_path, cliPath);
-const probes = normal.calls.filter((call) => call.args.includes("--help")).map((call) => call.args.slice(0, -1).join(" "));
-assert.deepStrictEqual(probes, ["status", "login", "canvas get", "canvas allocate", "canvas upload"]);
-assert(!normal.calls.some((call) => call.args.includes("install")));
-
-for (const missing of requiredSemantic) {
-  const test = fixture(requiredSemantic.filter((name) => name !== missing));
-  assert.throws(() => test.ensureCLI({ canvas: true }));
-  assert(test.messages.some((message) => message.includes("canvas command runtime")));
+let passedCases = 0;
+function runCase(name, check) {
+  try {
+    check();
+    passedCases += 1;
+  } catch (error) {
+    console.error(`CLI capability case failed: ${name}`);
+    throw error;
+  }
 }
 
-const base = fixture([]);
-assert.strictEqual(base.ensureCLI().cli_path, cliPath);
-assert.deepStrictEqual(base.calls.filter((call) => call.args.includes("--help")).map((call) => call.args.slice(0, -1).join(" ")), ["status", "login"]);
-console.log("CLI capability regression checks passed (12 cases, offline mock).");
+runCase("complete canvas command catalog", () => {
+  const normal = fixture(requiredSemantic);
+  assert.strictEqual(normal.ensureCLI({ canvas: true }).cli_path, cliPath);
+  const probes = normal.calls.filter((call) => call.args.includes("--help")).map((call) => call.args.slice(0, -1).join(" "));
+  assert.deepStrictEqual(probes, ["status", "login", "canvas get", "canvas allocate", "canvas upload"]);
+  assert(!normal.calls.some((call) => call.args.includes("install")));
+});
+
+for (const missing of requiredSemantic) {
+  runCase(`missing canvas command: ${missing}`, () => {
+    const test = fixture(requiredSemantic.filter((name) => name !== missing));
+    assert.throws(() => test.ensureCLI({ canvas: true }));
+    assert(test.messages.some((message) => message.includes("canvas command runtime")));
+  });
+}
+
+runCase("base authentication without canvas commands", () => {
+  const base = fixture([]);
+  assert.strictEqual(base.ensureCLI().cli_path, cliPath);
+  assert.deepStrictEqual(base.calls.filter((call) => call.args.includes("--help")).map((call) => call.args.slice(0, -1).join(" ")), ["status", "login"]);
+});
+console.log(`CLI capability regression checks passed (${passedCases} cases, offline mock).`);

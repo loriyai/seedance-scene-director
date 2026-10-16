@@ -18,31 +18,31 @@ class DialogueLayoutChecks(unittest.TestCase):
             u['shots'][i]['dialogue_parts']=[{'record':'L1','text':text,'start':start,'end':end}]
         return u
 
-    def test_mid_predicate_cut_rejected_without_word_loss(self):
-        u=self.plan(self.sample(end=4), [('妈妈妈妈！我看到',1,3),('猪猪侠了！！',3,4)])
-        with self.assertRaisesRegex(ValueError,'词句中间'):
-            dl.validate(u)
-
-    def test_capital_sentence_mid_clause_rejected(self):
-        u=self.plan(self.sample('这就是资本的力量吗？解决事情快得让我来不及后悔。',end=5,units=22),
-            [('这就是资本的力量吗？解决事情',1,3),('快得让我来不及后悔。',3,5)])
-        with self.assertRaisesRegex(ValueError,'词句中间'):
-            dl.validate(u)
+    def test_mid_clause_cuts_rejected_without_word_loss(self):
+        cases = [
+            ('predicate', '妈妈妈妈！我看到猪猪侠了！！', 4, 11,
+             [('妈妈妈妈！我看到', 1, 3), ('猪猪侠了！！', 3, 4)]),
+            ('capital', '这就是资本的力量吗？解决事情快得让我来不及后悔。', 5, 22,
+             [('这就是资本的力量吗？解决事情', 1, 3), ('快得让我来不及后悔。', 3, 5)]),
+            ('bed', '那宝宝就是想在床上了。', 4, 10,
+             [('那宝宝就是想在床上', 1, 3), ('了。', 3, 4)]),
+        ]
+        for name, text, end, units, pieces in cases:
+            with self.subTest(case=name):
+                u = self.plan(self.sample(text, end=end, units=units), pieces)
+                with self.assertRaisesRegex(ValueError, '词句中间'):
+                    dl.validate(u)
 
     def test_isolated_tail_rejected_even_after_punctuation(self):
         u=self.plan(self.sample('想睡觉，了。',end=4,units=4), [('想睡觉，',1,3),('了。',3,4)])
         with self.assertRaisesRegex(ValueError,'孤立句尾'):
             dl.validate(u)
 
-    def test_bed_sentence_tail_split_rejected(self):
-        u=self.plan(self.sample('那宝宝就是想在床上了。',end=4,units=10),
-                    [('那宝宝就是想在床上',1,3),('了。',3,4)])
-        with self.assertRaises(ValueError):
-            dl.validate(u)
-
     def test_punctuation_only_rejected(self):
         u=self.plan(self.sample('救命！',end=4,units=2), [('救命',1,3),('！',3,4)])
-        with self.assertRaises(ValueError):
+        u.update(output_format='reference-v2', dialogue_layout=dl.POLICY)
+        u['shots'][0]['dialogue_parts'][0]['breath_basis'] = '呼救词完整说完后的自然气口'
+        with self.assertRaisesRegex(ValueError, '禁止把纯标点分配成独立台词'):
             dl.validate(u)
 
     def test_short_whole_utterance_requires_replanned_cut(self):

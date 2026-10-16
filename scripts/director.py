@@ -27,7 +27,7 @@ CLOSE = {"近景", "特写"}
 OUTPUT_FORMAT = "reference-v3"
 RECEIPT_DISPLAY_FORMAT = "batch-names-v1"
 LEGACY_RECEIPT_DISPLAY_FORMAT = "numbered-units-v1"
-BLACK_REFERENCE_MODE = "edge-only-v1"
+BLACK_REFERENCE_MODE = "none-v1"
 PHOTOGRAPHY_FIELDS = ("camera", "composition", "depth_of_field", "lighting")
 FACE_FRAMINGS = CLOSE | {"中近景"}
 
@@ -209,7 +209,7 @@ def dependency(path=None):
     instructions = found / ("INSTRUCTIONS.md" if (found / "INSTRUCTIONS.md").is_file() else "SKILL.md")
     required = {"INSTRUCTIONS.md", "references/asset-ledger.md", "references/review.md",
                 "scripts/asset_ledger.py", "scripts/asset_migrate.py",
-                "scripts/asset_visual_design.py",
+                "scripts/asset_visual_design.py", "scripts/character_variants.py",
                 "scripts/screenplay_io.py", "scripts/screenplay_review.py"}
     require(instructions.is_file() and all((found / p).is_file() for p in required if p != "INSTRUCTIONS.md"),
             "剧本标准化模块不完整；请重新解压完整Skill包")
@@ -591,7 +591,13 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
     scenes = {s["id"]: s for s in state["ledger"]["scenes"]}
     chars = {c["id"]: c for c in state["ledger"]["characters"]}
     props = {p["id"]: p for p in state["ledger"]["props"]}
-    allowed_chars = set().union(*(set(scenes[s]["character_ids"]) for s in covered_scenes))
+    variants = None
+    if state["ledger"].get("character_variant_policy"):
+        dependency()
+        variants = importlib.import_module("character_variants")
+    scene_chars = {sid: set(variants.scene_character_ids(scene) if variants else scene["character_ids"])
+                   for sid, scene in scenes.items()}
+    allowed_chars = set().union(*(scene_chars[s] for s in covered_scenes))
     allowed_props = set().union(*(set(scenes[s]["prop_ids"]) for s in covered_scenes))
     require(isinstance(unit["character_ids"], list) and len(unit["character_ids"]) == len(set(unit["character_ids"]))
             and set(unit["character_ids"]) <= allowed_chars, "单元人物不在关联台账中或重复")
@@ -612,11 +618,13 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
         require(framing in FRAMINGS, "无法识别景别")
         closeups += framing == "特写"
         require(shot["scene_id"] in covered_scenes, "镜头场景不在来源内")
+        shot_assets = scene_chars[shot["scene_id"]] | set(scenes[shot["scene_id"]]["prop_ids"])
+        shot_references = shot_assets | set(scene_asset_ids(state, [shot["scene_id"]]))
         subjects = shot["subjects"]
         require(isinstance(subjects, list) and len(subjects) == len(set(subjects)), "主体列表格式错误或重复")
         valid_subjects = set(unit["character_ids"]) | set(unit["prop_ids"])
         require(set(subjects) <= valid_subjects, "镜头主体未列入本单元资产")
-        require(set(subjects) <= set(scenes[shot["scene_id"]]["character_ids"] + scenes[shot["scene_id"]]["prop_ids"]), "镜头使用了其他场景的资产")
+        require(set(subjects) <= shot_assets, "镜头使用了其他场景的资产")
         require("focus" in shot or not subjects, "有人物或主要道具的镜头须明确观看焦点focus")
         if "focus" in shot:
             focus = shot["focus"]
@@ -633,7 +641,7 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
             require(isinstance(value, str) and value.strip() and not any(c in value for c in "\r\n[]"),
                     f"镜头{field}须为非空单行，不能含换行或方括号")
             _, referenced = asset_text(state, unit, value)
-            require(referenced <= set(scenes[shot["scene_id"]]["character_ids"] + scenes[shot["scene_id"]]["prop_ids"] + scene_asset_ids(state, [shot["scene_id"]])),
+            require(referenced <= shot_references,
                     f"镜头{field}引用了其他场景的资产")
         photography_references = set()
         for field in PHOTOGRAPHY_FIELDS:
@@ -643,7 +651,7 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
             require(compact(value) and compact(value) not in ("同前", "同上", "无", "电影感"),
                     f"镜头{field}不能使用无信息占位值；须具体说明本镜摄影状态")
             _, referenced = asset_text(state, unit, value)
-            require(referenced <= set(scenes[shot["scene_id"]]["character_ids"] + scenes[shot["scene_id"]]["prop_ids"] + scene_asset_ids(state, [shot["scene_id"]])),
+            require(referenced <= shot_references,
                     f"镜头{field}引用了其他场景的资产")
             photography_references.update(referenced)
         text = shot["text"]
@@ -653,7 +661,7 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
                     "镜头正文不得泄漏估时或用抽象续声代替实际台词")
         _, referenced = asset_text(state, unit, text)
         require(set(subjects) <= referenced | photography_references | set(shot.get("focus", [])), "正文参与者须使用@台账完整名称或@{资产ID}引用；主焦点由景别字段引用")
-        require(referenced <= set(scenes[shot["scene_id"]]["character_ids"] + scenes[shot["scene_id"]]["prop_ids"] + scene_asset_ids(state, [shot["scene_id"]])),
+        require(referenced <= shot_references,
                 "镜头正文引用了其他场景的资产")
         if not subjects:
             evidence = shot.get("environment_evidence", "")
@@ -663,13 +671,13 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
             require(isinstance(shot["connector"], str), "连接词须为字符串")
             if shot["connector"].strip():
                 _, referenced = asset_text(state, unit, shot["connector"])
-                require(referenced <= set(scenes[shot["scene_id"]]["character_ids"] + scenes[shot["scene_id"]]["prop_ids"] + scene_asset_ids(state, [shot["scene_id"]])),
+                require(referenced <= shot_references,
                         "镜头连接词引用了其他场景的资产")
         for field in ("sound_foreground", "sound_environment"):
             if field in shot:
                 require(isinstance(shot[field], str) and not any(c in shot[field] for c in "\r\n"), "镜头音效须为单行字符串，可留空")
                 _, referenced = asset_text(state, unit, shot[field])
-                require(referenced <= set(scenes[shot["scene_id"]]["character_ids"] + scenes[shot["scene_id"]]["prop_ids"] + scene_asset_ids(state, [shot["scene_id"]])),
+                require(referenced <= shot_references,
                         "镜头音效引用了其他场景的资产")
         used_chars.update(set(subjects) & set(chars))
         used_props.update(set(subjects) & set(props))
@@ -680,6 +688,7 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
                          "review": "超过两镜特写仅触发审查，不是数量配额；检查每镜必要信息、焦点变化及空间关系。"})
     events = unit["audio"]
     require(isinstance(events, list), "audio须为数组")
+    dialogue_layout.validate_voice_policy(unit)
     expected = {r["id"]: r for r in selected if r["kind"] == "dialogue"}
     require(len(events) == len(expected) and {e["record"] for e in events} == set(expected), "声音事件遗漏、重复或不属于本单元台词")
     previous_start, voice_ids, used_record_ids = -1, set(), []
@@ -689,7 +698,7 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
         require(event["text"] == portion(record, a, b), "台词与标准剧本所选部分不逐字一致")
         require(event["voice"] == record["voice"], "发声类型与标准剧本不一致")
         cid = event["character_id"]
-        require(cid in unit["character_ids"] and cid in scenes[record["scene"]]["character_ids"], "声源未列入本单元/原场景人物")
+        require(cid in unit["character_ids"] and cid in scene_chars[record["scene"]], "声源未列入本单元/原场景人物")
         name = chars[cid].get("source_entry", chars[cid]["name"])
         speaker = name.split("-群像-", 1)[0] + "-群像" if "-群像-" in name else name.split("-", 1)[0]
         speaker = chars[cid].get("source_speaker", speaker)
@@ -743,16 +752,36 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
         require(collapsed == list(expected), "镜头台词片段顺序与标准剧本不一致")
     if unit.get("dialogue_layout") == dialogue_layout.POLICY:
         dialogue_layout.validate(unit)
+        from speech_timing_audit import audit as audit_fragment_timing
+        warnings.extend(audit_fragment_timing(unit))
+        warnings.extend(dialogue_layout.voice_warnings(unit))
     key = unit.get("id", "当前单元")
     warnings.extend(photography_warnings(state, [(key, i + 1, shot) for i, shot in enumerate(shots)]))
     continuity_result = continuity.validate_unit(state, unit, required=require_continuity)
     if continuity_result is not None:
         warnings.extend(continuity_result["warnings"])
+    if variants:
+        variants.validate_storyboard(state, unit)
     from prop_reference_review import check as check_prop_references
     warnings.extend(check_prop_references(state, unit))
     from group_reference_review import check as check_group_references
     warnings.extend(check_group_references(state, unit))
+    from shot_review import diagnostics as shot_diagnostics, appearance_reference_warnings
+    warnings.extend(shot_diagnostics(unit))
+    warnings.extend(appearance_reference_warnings(state, unit))
+    if unit.get('workflow_policy') == 'scene-review-b-v2':
+        from authoring_gates import validate_staging
+        validate_staging(state, unit)
     return warnings
+
+
+def require_workflow(request):
+    """New workflow entry points opt in; historical receipts remain readable."""
+    from storyboard_preflight import POLICY
+    units = request.get("units", [])
+    require(isinstance(units, list) and units and all(
+        isinstance(unit, dict) and unit.get("workflow_policy") == POLICY for unit in units),
+        "B流程新单元须登记workflow_policy=scene-review-b-v2；不升级未选旧单元")
 
 
 def validate(state, request, partial=False):
@@ -769,7 +798,8 @@ def validate(state, request, partial=False):
                     "新生成/修改的有声单元须采用semantic-v2台词布局；旧交付仅保留读取和渲染")
     request = resolved_request(state, request)
     units = request["units"]
-    warnings = []
+    from storyboard_preflight import validate as validate_preflight
+    warnings = validate_preflight(state, request)
     if request["mode"] == "append":
         a, b = interval(request["span"], state["length"])
         review = range_review(state, [a, b])
@@ -826,9 +856,9 @@ def render_unit(state, unit, reference_text=None):
     scene_text = "".join(("" if structured_format else scenes[s])
                          + convert("@" + catalog[scene_asset_ids(state, [s])[0]] + " ") + "；"
                          for s in unit["scene_ids"])
-    require(unit.get("black_reference_mode") in (None, BLACK_REFERENCE_MODE), "未知的黑幕引用模式")
+    require(unit.get("black_reference_mode") in (None, "edge-only-v1", BLACK_REFERENCE_MODE), "未知的黑幕引用模式")
     lines = [f'{unit_name(unit)}（时长：{unit["duration"]}秒）']
-    if unit.get("black_reference_mode") != BLACK_REFERENCE_MODE:
+    if unit.get("black_reference_mode") not in ("edge-only-v1", BLACK_REFERENCE_MODE):
         lines.append(convert("@黑幕"))
     lines.extend([unit["style"] + ";" + header[0], header[1],
              "人物：" + (people if unit["character_ids"] else "无；"),
@@ -845,7 +875,7 @@ def render_unit(state, unit, reference_text=None):
         for part in shot.get("dialogue_parts", []):
             event = next(e for e in unit["audio"] if e["record"] == part["record"])
             timing = dialogue_layout.timing(part, shot, event.get("timing_basis") == "recording") if not current_format and unit.get("dialogue_layout") == dialogue_layout.LEGACY_POLICY else ""
-            delivery = dialogue_layout.delivery_text(part, event) if structured_format else ""
+            delivery = dialogue_layout.delivery_text(part, event, unit) if structured_format else ""
             parts.append(convert(reference_name(state, event["character_id"], chars)) + event["voice"] + timing + delivery + '：“' + part["text"] + '”')
         for link in shot.get("dialogue_continuations", []):
             event = next(e for e in unit["audio"] if e["record"] == link["record"])
@@ -950,6 +980,8 @@ def commit(args, state):
         return {"status": "already_committed", "output": old_receipt["output"], "ids": [u["id"] for u in old_receipt["units"]],
                 "names": [unit_name(u) for u in old_receipt["units"]],
                 "canvas_sync": sync_canvas_replacements(args.project, old_receipt), **receipt_summary(old_receipt)}
+    if getattr(args, "require_workflow", False):
+        require_workflow(request)
     scope = None
     if request["mode"] == "append":
         scope = batch_naming.scope_for(args.project, state.get("batch_scope"), getattr(args, "batch_scope", None))
@@ -960,6 +992,10 @@ def commit(args, state):
     output = validate_output_path(state, args.project, args.output, scope)
     require(not output.exists(), "交付文件已存在；请使用新文件名以保留旧版本")
     warnings = validate(state, request)
+    from review_gate import verify as verify_final_review
+    review_path = getattr(args, "review", None)
+    require(review_path is not None, "新提交须提供--review最终稿复核记录；结构检查通过不代表语义复核通过")
+    final_review = verify_final_review(state, request, read_json(review_path), warnings)
     request = resolved_request(state, request)
     style = (args.project / "video-style.txt").read_text(encoding="utf-8-sig").strip()
     allocation = (batch_naming.allocate(scope, args.project, request["request_id"], request_hash)
@@ -999,7 +1035,8 @@ def commit(args, state):
                                      "confirmed": bool(request.get("range_confirmation")), "batch_label": batch_label})
             working["batch_scope"] = str(scope)
         receipt = {"request_id": request["request_id"], "request_hash": request_hash, "mode": request["mode"],
-                   "output": str(output), "units": copy.deepcopy(units), "display_format": RECEIPT_DISPLAY_FORMAT}
+                   "output": str(output), "units": copy.deepcopy(units), "display_format": RECEIPT_DISPLAY_FORMAT,
+                   "final_review": final_review}
         if scope is not None:
             receipt.update(batch_scope=str(scope), batch_label=batch_label)
         working["receipts"].append(receipt)
@@ -1042,10 +1079,12 @@ def main():
             p.add_argument("--end", type=int, required=True)
         elif command in ("check", "commit"):
             p.add_argument("--request", type=Path, required=True)
+            p.add_argument("--require-workflow", action="store_true", help="新B流程要求所有选中单元显式使用scene-review-b-v1；旧回执幂等导出不升级")
             if command == "check":
                 p.add_argument("--partial", action="store_true")
             else:
                 p.add_argument("--output", type=Path, required=True)
+                p.add_argument("--review", type=Path, help="与最终请求及当前上下文摘要一致的语义复核记录；旧提交幂等导出无需补录")
                 p.add_argument("--batch-scope", type=Path, help="同一对话共享的批次登记目录；自定义项目跨项目共享时指定")
         elif command == "render":
             p.add_argument("--request-id", required=True)
@@ -1072,12 +1111,17 @@ def main():
                 if (args.project / "canvas" / "jobs").is_dir():
                     from canvas_jobs import status as job_status
                     result["canvas_jobs"] = job_status(args.project)
+                from recovery_status import summarize
+                result["recovery"] = summarize(args.project, state, result.get("canvas_jobs"))
             elif args.command == "locate":
                 result = locate(args, state)
             elif args.command == "range":
                 result = {"span": [args.start, args.end], **range_review(state, [args.start, args.end])}
             elif args.command == "check":
-                result = {"status": "passed", "partial": args.partial, "warnings": validate(state, read_json(args.request), args.partial)}
+                if args.require_workflow:
+                    require_workflow(read_json(args.request))
+                result = {"status": "passed", "structural_check": "passed", "semantic_review": "not_performed",
+                          "partial": args.partial, "warnings": validate(state, read_json(args.request), args.partial)}
             elif args.command == "commit":
                 result = commit(args, state)
             else:

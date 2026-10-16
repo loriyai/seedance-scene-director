@@ -66,7 +66,9 @@ class AssetJobCLI(WorkflowCLI):
                 c.nodes(self.doc)[value['id']]['data'] = {'name': self.factory_name}
             if self.pause_after_create:
                 self.paused = True
-        if name == 'get_snapshot' and self.writes and self.final_fault:
+        if (name == 'get_snapshot' and self.final_fault
+                and any(n == 'xyq.generation.update_prompt' or v.get('field') in ('appearance', 'description')
+                        for n, v in self.writes)):
             self.final_fault(result['document'])
         return result
 
@@ -88,6 +90,9 @@ class AssetJobBackendChecks(unittest.TestCase):
         self.state['binding'] = {'canvas_id': 'ROOT', 'account_id': 'USER'}
         c.save(self.project, self.state)
         self.progress = []
+        attention = patch.object(jobs, 'notify_attention')
+        attention.start()
+        self.addCleanup(attention.stop)
 
     def sync(self, **kwargs):
         return backend.sync_assets(self.project, self.cli, self.session,
@@ -112,7 +117,7 @@ class AssetJobBackendChecks(unittest.TestCase):
             result = self.sync(batch_size=2)
         self.assertEqual(result['status'], 'synced')
         self.assertEqual(self.cli.allocation_batches, [2, 1])
-        self.assertEqual(self.cli.calls.count('get_snapshot'), 5)  # Initial + 2 reads/group.
+        self.assertEqual(self.cli.calls.count('get_snapshot'), 7)  # Plus business readiness for role/scene.
         checkpoint.assert_called_once()
         state = c.read_state(self.project)
         for item in backend.asset_items(self.session):
@@ -264,7 +269,7 @@ class AssetJobBackendChecks(unittest.TestCase):
         self.assertEqual(row['status'], 'needs_attention')
         self.assertEqual(row['error']['code'], 'UNCERTAIN_WRITE')
         self.assertEqual(self.cli.writes, before)
-        self.assertEqual(current['events'], [])
+        self.assertTrue(all(e['event'] == 'needs_attention' for e in current['events']))
         notify.assert_not_called()
 
     def test_replacement_job_does_not_bypass_unknown_canvas_journal(self):

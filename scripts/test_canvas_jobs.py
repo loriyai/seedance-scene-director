@@ -65,6 +65,9 @@ class CanvasJobChecks(unittest.TestCase):
         self.notification_guard = patch.object(jobs, 'notify_completion')
         self.notify = self.notification_guard.start()
         self.addCleanup(self.notification_guard.stop)
+        attention = patch.object(jobs, 'notify_attention')
+        self.attention = attention.start()
+        self.addCleanup(attention.stop)
 
     def save_session(self):
         d.write_json(self.project / 'session.json', self.session)
@@ -147,7 +150,7 @@ class CanvasJobChecks(unittest.TestCase):
             pass
         self.assertEqual(calls, [])
         self.assertNotEqual(self.job_status(queued), 'completed')
-        self.assertEqual(jobs.status(self.project)['events'], [])
+        self.assertEqual([e['event'] for e in jobs.status(self.project)['events']], ['needs_attention'])
 
     def test_changed_canvas_binding_stops_before_dispatch(self):
         queued = self.enqueue(request_id='old-target')
@@ -208,21 +211,31 @@ class CanvasJobChecks(unittest.TestCase):
         self.assertEqual(calls, ['assets'])
         self.assertEqual(self.job_status(assets), 'needs_attention')
         self.assertNotEqual(self.job_status(videos), 'completed')
-        self.assertEqual(jobs.status(self.project)['events'], [])
+        self.assertEqual([e['event'] for e in jobs.status(self.project)['events']], ['needs_attention'])
+        self.notify.assert_not_called()
 
     def test_success_dispatches_asset_then_video_and_is_not_repeated(self):
         assets = self.enqueue(request_id='complete-assets')
         videos = self.enqueue('videos', request_id='complete-video', ids=[self.unit['id']])
+        session_before = (self.project / 'session.json').read_bytes()
         calls = []
         jobs.run_worker(self.project, runner=self.successful_runner(calls))
         self.assertEqual([m['kind'] for m in calls], ['assets', 'videos'])
         self.assertEqual(self.job_status(assets), 'completed')
         self.assertEqual(self.job_status(videos), 'completed')
         before = copy.deepcopy(jobs.status(self.project)['events'])
-        self.assertTrue(before, 'Only a fully successful run may publish completion')
+        self.assertEqual([event['job_id'] for event in before],
+                         [assets['job_id'], videos['job_id']])
+        self.assertEqual([event['event'] for event in before], ['completed', 'completed'])
+        notifications_before = list(self.notify.call_args_list)
+        self.assertEqual([call.args for call in notifications_before],
+                         [(event['message'],) for event in before])
+        self.assertEqual((self.project / 'session.json').read_bytes(), session_before)
         jobs.run_worker(self.project, runner=self.successful_runner(calls))
         self.assertEqual(len(calls), 2)
         self.assertEqual(jobs.status(self.project)['events'], before)
+        self.assertEqual(self.notify.call_args_list, notifications_before)
+        self.assertEqual((self.project / 'session.json').read_bytes(), session_before)
 
     def test_pause_requested_between_jobs_stops_next_dispatch(self):
         assets = self.enqueue(request_id='pause-after-assets')
@@ -282,16 +295,9 @@ class CanvasJobChecks(unittest.TestCase):
         self.assertEqual(self.job_status(queued), 'needs_attention')
         jobs.run_worker(self.project, runner=uncertain)
         self.assertEqual(calls, [queued['job_id']])
-        self.assertEqual(jobs.status(self.project)['events'], [])
+        self.assertEqual([e['event'] for e in jobs.status(self.project)['events']], ['needs_attention'])
+        self.attention.assert_called_once()
         self.notify.assert_not_called()
-
-    def test_completion_notification_is_emitted_only_once(self):
-        self.enqueue(request_id='one-notification')
-        jobs.run_worker(self.project, runner=self.successful_runner([]))
-        self.notify.assert_called_once()
-        jobs.run_worker(self.project, runner=self.successful_runner([]))
-        self.notify.assert_called_once()
-        self.assertEqual(len(jobs.status(self.project)['events']), 1)
 
     def test_active_worker_guard_rejects_a_second_worker_without_dispatch(self):
         queued = self.enqueue(request_id='first-worker')

@@ -106,21 +106,30 @@ class AssetVisualDesignTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "至少需要2次"):
             self.validate(self.data)
 
-    def test_same_event_label_cannot_be_counted_twice(self):
+    def test_shared_visible_use_evidence_rejections(self):
+        # Props and both group policies delegate these evidence rules to one
+        # validator. Keep the complete matrix here and a failure at each caller.
+        original = self.data["props"][0]
+        first, second = original["visible_uses"]
+        cases = (
+            ("same_event", first, "同一独立事件重复"),
+            ("renamed_overlapping_event", dict(first, event_id="另一个标签"), "证据重叠"),
+            ("foreign_paragraph", dict(second, source_paragraphs=[1]), "没有原文证据"),
+        )
+        scenes = {scene["id"]: scene for scene in self.data["scenes"]}
+        for name, replacement, error in cases:
+            with self.subTest(case=name):
+                prop = copy.deepcopy(original)
+                prop["visible_uses"][1] = copy.deepcopy(replacement)
+                with self.assertRaisesRegex(ValueError, error):
+                    design.validate_visible_uses(
+                        prop, self.paragraphs, scenes, ledger.fact_list,
+                        "prop_ids", 2, "可见使用")
+
+    def test_prop_policy_rejects_invalid_visible_evidence(self):
         uses = self.data["props"][0]["visible_uses"]
         uses[1] = copy.deepcopy(uses[0])
         with self.assertRaisesRegex(ValueError, "同一独立事件重复"):
-            self.validate(self.data)
-
-    def test_two_labels_for_same_evidence_cannot_be_counted_twice(self):
-        uses = self.data["props"][0]["visible_uses"]
-        uses[1] = dict(uses[0], event_id="另一个标签")
-        with self.assertRaisesRegex(ValueError, "证据重叠"):
-            self.validate(self.data)
-
-    def test_foreign_scene_evidence_fails(self):
-        self.data["props"][0]["visible_uses"][1]["source_paragraphs"] = [1]
-        with self.assertRaisesRegex(ValueError, "没有原文证据"):
             self.validate(self.data)
 
     def test_furniture_cannot_pass_by_claiming_special(self):

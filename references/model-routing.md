@@ -4,6 +4,8 @@
 
 ## 分派时机
 
+完整剧本入口的可访问性检查与风格菜单由主代理直接处理。风格确认并保存前，不分派standardize、assets或design任务；用户已经提供本项目有效风格时直接保存并继续，不再次询问。
+
 | 现有工作 | stage | 分派单位 |
 |---|---|---|
 | 阶段1原文整理、逐场稿 | `standardize` | 一个完整整理任务，逐场保存草稿 |
@@ -19,6 +21,8 @@
 短菜单回复、唯一范围定位、单次状态查询、导出、队列提交等直接由主代理调用既有脚本，不为一次命令启动子代理。主代理的实际模型及强度已被宿主可靠确认为目标配置时，可直接完成该阶段；无法确认且需要实质创作/批量审阅时显式分派。不要逐镜或逐条CLI调用创建代理；不让主代理完整重做子代理工作来“验收”。
 
 连续分镜沿前一单元终态顺序推进。每项目最多一个起草代理写自己的输出目录；独立只读复核可以并行，各自用独立输出目录。全剧身份、来源覆盖由主代理统一接受后才能推进设计/分镜；不把不同代理的临时ID各自提交。
+
+新分镜采用[场次前检与保守增量复核](scene-review-workflow.md)。保持一个起草写者和明确的场次主审，按场次冻结版本并合并反馈；不要按镜头重新派发，不因零散意见反复打断同一写者。专项复核仅用于明确复杂问题。主代理负责去重、裁决、证据合并和正式提交，不完整重做独立审阅。可复用同一代理承担后续同类任务，但每次仍给不可变交接、当前原文/资产依据及必要前后状态；不假定它记得新版规则或漏传必要上下文。前序未决状态所影响的后续草稿不得当成已接受材料。
 
 ## 升级与回退
 
@@ -60,7 +64,7 @@ python <skill>/scripts/agent_handoff.py prepare --project <project> --stage revi
 
 可以在独立草稿目录运行 `screenplay_review.py`、`asset_ledger.py normalize/build-scenes/design`，但输入/输出路径必须明确，不能覆盖正式材料。已有绑定的分镜可运行只读 `director.py check --project <project> --request <本次output内的batch.json> [--partial]`；replace 不用 partial。允许读取 `canvas_jobs.py status` 的本地结果。后台队列运行时，其进度可能变化，核对可使用主代理已保存的状态快照，避免把持续变化的worker文件当成冻结内容。
 
-不得改 `session.json`、正式逐场稿/台账、`video-style.txt`、批次登记或交付文件；不得运行 `bind/style/phase/commit/render`、修改队列控制或直接进行云端写入。需要资产补审、重绑定、来源变化或用户选择时，在结果中说明，由主代理执行原流程。
+不得改 `session.json`、正式逐场稿/台账、`video-style.txt`、批次登记或交付文件；不得运行 `bind/style/phase/commit/render`、修改队列控制或直接进行云端写入。允许按[渲染前检](scene-review-workflow.md#关键触发时间窗与渲染前检)调用纯函数director.render_unit，只在本次output保存带临时草稿名称的预览；这不包含正式render命令、编号分配或项目状态写入。需要资产补审、重绑定、来源变化或用户选择时，在结果中说明，由主代理执行原流程。
 
 `result.json` 写 `status`（`draft_complete` / `needs_input` / `failed`）、含相同 `task_key` 的 `scope`、相对输出目录的非空 `artifacts`（含 `result.json` 自身）、`issues`、实际运行的 `checks`。报告只写实际证据；`draft_complete` 不是正式交付，也不表示已经写入画布。主代理只把业务所需的文件交付用户，调度JSON留后台。
 
@@ -72,7 +76,7 @@ python <skill>/scripts/agent_handoff.py verify --handoff <project>/agents/<id>/h
 
 verify 检查输入未变、预期文件存在且非空、输出路径没有逃出目录，并校验结果报告的状态、任务身份与产物路径。`artifacts_present` 只表示这些结构检查通过，不代表原文、艺术或语义验收通过；`result_status` 为 `needs_input` / `failed` 时仍不得接受为可提交稿。检查失败时不采用草稿，保留记录并按当前材料重新交接，不强行修改旧哈希。
 
-主代理按阶段核对真实产物和 `issues`，然后调用原有验收：标准化按 review→assemble，资产按来源/身份/命名/覆盖/设计校验，分镜按完整 check 和必要语义复核。只接收通过的草稿；同一项目的正式文件、style/phase/bind/commit/render及批次编号由主代理单写，保持原ID、范围和历史。新的交接目录及文件不进入资产台账或视频提示词。
+主代理按阶段核对真实产物和 `issues`，然后调用原有验收：标准化按 review→assemble，资产按来源/身份/命名/覆盖/设计校验，分镜按完整check和[最终稿复核记录](runtime.md#最终稿复核与估时诊断)验收，记录须绑定实际提交请求及当前上下文；修改后不能沿用旧摘要。只接收通过的草稿；同一项目的正式文件、style/phase/bind/commit/render及批次编号由主代理单写，保持原ID、范围和历史。新的交接目录及文件不进入资产台账或视频提示词。
 
 `sync` 子代理负责已经授权任务的批量准备与结果核对；它不直接写画布。主代理检查已有授权后，调用 `canvas_jobs.py enqueue` 等原入口；云端逐条ACK、回读和续接由既有worker执行。同画布单writer、未知确认停止、原ID续接、人工冲突保护和原有菜单全部保留。常规队列提交很短，由主代理直接执行即可，无须额外开启一个Medium代理。
 

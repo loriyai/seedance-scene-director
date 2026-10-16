@@ -1,5 +1,9 @@
 import copy
 import unittest
+from types import SimpleNamespace
+
+import director as d
+from core_test_support import setup_skill_fixture
 
 import group_reference_review as review
 
@@ -103,10 +107,8 @@ class GroupReferenceTests(unittest.TestCase):
         self.assertEqual(review.check(self.state, self.unit), [])
 
     def test_director_surfaces_review_and_keeps_prompt_only_rendering(self):
-        import self_check as fixtures
-        case = fixtures.SkillChecks('test_day_night_share_one_set_and_all_assets_in_plan')
-        case.setUp()
-        self.addCleanup(case.doCleanups)
+        case = SimpleNamespace(addCleanup=self.addCleanup)
+        setup_skill_fixture(case)
         group = copy.deepcopy(self.group)
         group['id'] = 'CHAR0100'
         case.state['ledger']['group_policy'] = review.POLICY
@@ -115,9 +117,9 @@ class GroupReferenceTests(unittest.TestCase):
         case.unit['character_ids'].append(group['id'])
         case.unit['shots'][0]['subjects'].append(group['id'])
         case.unit['shots'][0]['focus'].append(group['id'])
-        result = fixtures.d.validate_unit(case.state, case.unit, case.unit['span'])
+        result = d.validate_unit(case.state, case.unit, case.unit['span'])
         self.assertTrue(any(warning['kind'] == '群像图片需求需复核' for warning in result))
-        rendered, _ = fixtures.d.asset_text(case.state, case.unit, '@{CHAR0100} 站在门旁。')
+        rendered, _ = d.asset_text(case.state, case.unit, '@{CHAR0100} 站在门旁。')
         self.assertEqual(rendered, group['name'] + ' 站在门旁。')
 
 

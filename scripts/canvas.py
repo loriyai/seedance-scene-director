@@ -45,6 +45,15 @@ def safe_message(text):
     return re.sub(r'(?i)((?:access[_-]?key|authorization|token|secret)["\']?\s*[:=]\s*["\']?)[^\s,"\'}]+', r'\1[隐藏]', text)[:1600]
 
 
+def rejection_details(value):
+    """Retain only public rejection evidence, never the entire CLI response."""
+    if not isinstance(value, dict) or value.get("ok") is not False:
+        return None
+    return {key: safe_message(value[key]) if isinstance(value[key], str) else value[key]
+            for key in ("ok", "code", "message", "revision")
+            if key in value and isinstance(value[key], (str, int, bool, type(None)))}
+
+
 def run_json(argv, cwd, timeout=120):
     try:
         result = subprocess.run([str(x) for x in argv], cwd=str(cwd), shell=False,
@@ -58,7 +67,7 @@ def run_json(argv, cwd, timeout=120):
     except (ValueError, TypeError):
         fail("CLI_ERROR", safe_message(result.stderr or "CLI没有返回有效JSON"))
     if isinstance(value, dict) and value.get("ok") is False:
-        fail("COMMAND_REJECTED", safe_message(d.packed(value)))
+        fail("COMMAND_REJECTED", safe_message(d.packed(value)), rejection=rejection_details(value))
     if result.returncode:
         fail("CLI_ERROR", safe_message(result.stderr or d.packed(value)))
     return value
@@ -366,6 +375,10 @@ def prompt_references_satisfied(doc, node_id, prompt):
             if not role_reference_row(references, source):
                 return False
     return True
+
+
+def no_black(unit):
+    return unit.get("black_reference_mode") == "none-v1"
 
 
 def edge_only_black(unit):
@@ -869,6 +882,8 @@ def reconcile_black_video(project, cli, state, doc, decisions=None, preview=Fals
     # Explicit videos may recover a deleted video reference for this range.
     # Legacy image pins remain immutable and outside-range units are untouched.
     for unit in context.get("units", []) if context is not None else []:
+        if no_black(unit):
+            continue
         mapping = state["mappings"].get(unit["id"], {})
         if mapping.get("black_node_kind") == "video" and mapping.get("black_node_id") not in nodes(doc):
             mapping["black_node_id"] = black
@@ -934,8 +949,8 @@ def desired_videos(session, state, doc, units, bind_references=False, failures=N
     wanted = []
     for unit in units:
         unit_refs = dict(refs)
-        black, black_kind, black_issue = black_reference(state, doc, unit["id"])
-        if flags[unit["id"]]:
+        black, black_kind, black_issue = ((None, None, None) if no_black(unit) else black_reference(state, doc, unit["id"]))
+        if flags[unit["id"]] and not no_black(unit):
             if black_issue is None:
                 if not edge_only_black(unit):
                     unit_refs["黑幕"] = "<node-asset>" + black + "</node-asset>"
@@ -1116,9 +1131,9 @@ def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, pre
 
 
 def sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview=False, bind_references=False,
-         existing_only=False, references_only=False, session_override=None):
+         existing_only=False, references_only=False, session_override=None, progress=None):
     """Always leave a batch report, including on a stopped/uncertain CLI write."""
-    context = {"failures": []}
+    context = {"failures": [], "progress": progress}
     try:
         result = _sync(project, cli, kind, request_id, ids, decisions, preview, bind_references,
                        existing_only, references_only, context, session_override)
@@ -1184,10 +1199,14 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
             doc, asset_summary = reconcile_asset_nodes(project, cli, session, state, doc, decisions, preview, context)
             context["doc"] = doc
             context["failures"].extend(asset_summary["conflicts"])
-            doc, black_summary = reconcile_black_video(project, cli, state, doc, decisions, preview, context)
-            context["doc"] = doc
-            asset_summary["black_video"] = black_summary
-            context["failures"].extend(black_summary["conflicts"])
+            legacy_black_units = [u for u in units if not no_black(u)]
+            if legacy_black_units:
+                # Historical receipt execution remains compatible; new requests
+                # never acquire a BLACK ID or create a BLACK reference edge.
+                doc, black_summary = reconcile_black_video(project, cli, state, doc, decisions, preview, context)
+                context["doc"] = doc
+                asset_summary["black_video"] = black_summary
+                context["failures"].extend(black_summary["conflicts"])
             bind_references = True
         bind_references = bind_references or references_only or any(m.get("image") for m in state["mappings"].values())
         blocked_assets = {item["key"] for item in asset_summary["conflicts"]} if asset_summary else set()
@@ -1295,6 +1314,8 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
     for item in plan:
         key, node_id = item["key"], item.get("node_id")
         check_control(cli)
+        if kind == "videos" and context.get("progress"):
+            context["progress"]({"stage": "verifying_node", "current_unit": key, "current_node_id": node_id})
         context["active"] = {"key": key, "name": item["name"], "kind": item["kind"], "node_id": node_id}
         # Re-read before every node; detect changes since planning.
         fresh = document(cli, state["binding"])
@@ -1417,6 +1438,13 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
                     else:
                         marker_path.unlink()
         save(project, state)
+        if kind == "videos" and context.get("progress"):
+            # Only a fully verified node advances the count. Allocation/ACKs,
+            # core-only and partial reference receipts never count as complete.
+            complete = mapping.get("references_bound") is True and mapping.get("version") == item.get("version")
+            context["progress"]({"stage": "node_verified" if complete else "node_needs_attention",
+                                 "current_unit": key, "current_node_id": node_id,
+                                 "verified_unit": key if complete else None})
     context.pop("active", None)
     if kind == "videos":
         consume_image_references(session, state, reference_completed, pending)

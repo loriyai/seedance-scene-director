@@ -183,8 +183,10 @@ def verify(handoff_value):
     require(isinstance(result.get("status"), str)
             and result["status"] in {"draft_complete", "needs_input", "failed"}, "result.json status 无效")
     require(task_key(result) == task_key(manifest.get("brief")), "result.json scope.task_key 与交接任务不符")
-    verify_files(output, output_names(result.get("artifacts"), "artifacts"))
+    artifacts = output_names(result.get("artifacts"), "artifacts")
+    verify_files(output, artifacts)
     return {"status": "artifacts_present", "result_status": result["status"], "handoff": str(handoff),
+            "artifact_sha256": {name: digest(output / name) for name in dict.fromkeys([*names, *artifacts])},
             "semantic_review": "not_performed", "submitted": False}
 
 

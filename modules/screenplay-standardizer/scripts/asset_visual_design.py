@@ -9,12 +9,16 @@ import hashlib
 import json
 import re
 
+from character_variants import scene_character_ids, scene_appearance_tracks
+
 
 LEGACY_PROP_POLICY = "visible-reuse-v1"
 PROP_POLICY = "visual-continuity-v2"
 LEGACY_GROUP_POLICY = "visible-reuse-v1"
 GROUP_POLICY = "visual-continuity-v2"
-DESIGN_VERSION = "gpt-image-2-v1"
+LEGACY_DESIGN_VERSION = "gpt-image-2-v1"
+DESIGN_VERSION = "gpt-image-2-v2"
+DESIGN_VERSIONS = (LEGACY_DESIGN_VERSION, DESIGN_VERSION)
 ASSET_CATEGORIES = ("characters", "scene_assets", "props")
 FURNITURE = re.compile(r"(?:桌|床|椅|柜|沙发|茶几|凳)(?:子|铺)?$")
 DAILY_ITEMS = {"锅", "碗", "瓢", "盆", "锅碗瓢盆", "筷子", "餐具", "水杯", "杯子", "手机", "雨伞", "香烟", "茶杯", "盘子", "勺子"}
@@ -23,6 +27,26 @@ CHARACTER_LAYOUT = (
     "完整展示头部和清晰五官；右侧2/3依次并排正面全身、90度侧面全身、背面全身，"
     "三个全身视图等高，头顶和脚底对齐，头顶到脚底完整入镜，不裁切、不重叠。"
     "特写和三个全身视图属于同一角色、同一状态，脸部身份、体型、发型、服装和配色一致。"
+)
+ANIMAL_LAYOUT = (
+    "16:9横版动物参考板，纯白背景。左侧1/3为正面头部特写，完整保留该物种真实头部、耳部和面部结构；"
+    "右侧2/3依次并排自然姿态的正面完整身体、90度侧面完整身体、背面完整身体，"
+    "三个身体视图比例相同，头部、全部肢体及尾部完整，不裁切、不重叠。"
+    "四幅均为同一动物、同一体型、同一毛羽或皮肤状态及配色，按该物种真实解剖结构呈现，不人化。"
+)
+GROUP_LAYOUT = (
+    "16:9横版群像参考板，纯白背景。按下列样本顺序从左到右并排呈现多个外貌各异的人物，"
+    "每个样本只出现一次，均为单个完整全身正视图，平视前方，自然静态站姿；"
+    "头顶至脚底完整入镜，人物彼此分开、不重叠、不遮挡，保留各自真实身高与体型比例。"
+    "不绘面部特写，不绘同一人物的侧面或背面重复视图。"
+    "样本数量仅用于展示造型差异，不规定剧情人数、队形、成员身份或各场同一批实体人物。"
+)
+MASKED_CHARACTER_LAYOUT = (
+    "16:9横版角色参考图，纯白背景。最左侧1/3为当前佩戴状态的正面头部特写，"
+    "完整展示遮挡物的外形和实际露出的部位；右侧2/3依次并排正面全身、90度侧面全身、背面全身，"
+    "三个全身视图等高，头顶和脚底对齐，完整入镜、不裁切、不重叠。"
+    "头部特写与三个全身视图均为同一角色、同一体型、同一服装及同一佩戴状态，"
+    "遮挡物始终按设定佩戴，不摘下、不掀开、不透明化，不画被遮住的五官或头发。"
 )
 
 
@@ -37,8 +61,31 @@ def fingerprint(value):
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def is_speaking_ensemble(item):
+    return item.get("character_kind") == "speaking_ensemble"
+
+
 def is_group(item):
-    return "-群像-" in item.get("source_entry", item.get("name", ""))
+    return is_speaking_ensemble(item) or "-群像-" in item.get("source_entry", item.get("name", ""))
+
+
+def validate_speaking_ensemble(data, item):
+    """An explicit collective speaker uses a group board, never background filtering."""
+    label = item["id"]
+    if item.get("visual_mode") != "image_asset":
+        raise ValueError(f"{label}发声群体须保留图片参考，不能设prompt_only")
+    if "-群像-" in item.get("source_entry", item.get("name", "")):
+        raise ValueError(f"{label}发声群体须保留真实集合称谓，不登记为背景群像")
+    if item.get("appearance_variant"):
+        raise ValueError(f"{label}发声群体不能作为单人的佩戴形象")
+    nonempty(item.get("source_speaker"), f"{label}原文集合声源称谓")
+    review = item.get("ensemble_review")
+    if not isinstance(review, dict) or review.get("kind") != "speaking_ensemble" or review.get("reviewed_full_script") is not True:
+        raise ValueError(f"{label}发声群体须完成集合身份及共同发声审阅")
+    if not data.get("source_digest") or review.get("source_digest") != data["source_digest"]:
+        raise ValueError(f"{label}发声群体审阅与原文版本不匹配")
+    for field in ("identity_basis", "speech_basis", "consistency_reason"):
+        nonempty(review.get(field), f"{label}发声群体{field}")
 
 
 def visual_assets(data, category):
@@ -55,6 +102,9 @@ def validate_group_modes(data):
             mode = item.get("visual_mode")
             if mode is not None and mode not in ("image_asset", "prompt_only"):
                 raise ValueError(f"{item['id']} visual_mode须为image_asset或prompt_only")
+            if category == "characters" and is_speaking_ensemble(item):
+                validate_speaking_ensemble(data, item)
+                continue
             if category != "characters" or not is_group(item):
                 if mode == "prompt_only":
                     raise ValueError(f"{item['id']}仅无姓名、无独立台词的背景群像可设为prompt_only")
@@ -104,6 +154,15 @@ def validate_group_policy(data, paragraphs, fact_validator, script=None):
     validate_group_modes(data)
     scenes = {scene["id"]: scene for scene in data["scenes"]}
     for item in data["characters"]:
+        if is_speaking_ensemble(item):
+            validate_visible_uses(item, paragraphs, scenes, fact_validator, "character_ids", 1, "集合出场或共同发声")
+            if script is not None:
+                speaker = re.escape(item["source_speaker"])
+                pattern = re.compile(r"^\s*" + speaker + r"(?:（[^\n]*?）|\([^\n]*?\))?\s*[:：]\S", re.M)
+                numbers = {scene["number"] for scene in scenes.values() if item["id"] in scene["character_ids"]}
+                if not any(scene["number"] in numbers and pattern.search(scene["body_text"]) for scene in script):
+                    raise ValueError(f"{item['id']}发声群体未对应本组关联场次的集合台词标签")
+            continue
         if not is_group(item) or (data.get("group_policy") is None and "visual_mode" not in item):
             continue
         entry = item.get("source_entry", item["name"])
@@ -123,7 +182,7 @@ def apply_group_review(data, payload):
     if not isinstance(payload, dict) or not isinstance(payload.get("groups"), list):
         raise ValueError("群像审阅JSON须包含groups数组")
     result = copy.deepcopy(data)
-    groups = {item["id"]: item for item in result["characters"] if is_group(item)}
+    groups = {item["id"]: item for item in result["characters"] if is_group(item) and not is_speaking_ensemble(item)}
     records = {}
     for record in payload["groups"]:
         if not isinstance(record, dict) or set(record) != {"character_id", "visual_mode", "extraction_review", "visible_uses"}:
@@ -186,8 +245,26 @@ def validate_visible_uses(item, paragraphs, scenes, fact_validator, linked_field
         spans.append(span)
 
 
+def linked_covering_prop(data, item):
+    prop_id = item.get("appearance_variant", {}).get("prop_asset_id")
+    if prop_id is None:
+        return None
+    prop = next((value for value in data.get("props", []) if value["id"] == prop_id), None)
+    if prop is None or prop.get("visual_mode") == "prompt_only":
+        raise ValueError(f"{item['id']}关联佩戴道具不存在或不是图片资产：{prop_id}")
+    return prop
+
+
 def asset_facts(data, category, item):
     facts = item.get("visual_facts", [])
+    if category == "characters" and item.get("appearance_variant"):
+        base = next((character for character in data["characters"]
+                     if character["id"] == item["appearance_variant"].get("base_asset_id")), None)
+        if base:
+            facts = base.get("visual_facts", []) + facts
+        prop = linked_covering_prop(data, item)
+        if prop:
+            facts = facts + prop.get("visual_facts", [])
     if category == "scene_assets":
         location = next(loc for loc in data["locations"] if loc["id"] == item["location_id"])
         facts = location["visual_facts"] + facts
@@ -206,19 +283,40 @@ def source_constraints(data, category, item):
 def source_context_digest(data, category, item):
     linked = []
     for scene in data["scenes"]:
-        appears = (item["id"] in scene["character_ids"] if category == "characters" else
+        appears = (item["id"] in scene_character_ids(scene) if category == "characters" else
                    item["id"] in scene["prop_ids"] if category == "props" else
                    scene.get("scene_asset_id") == item["id"])
         if appears:
-            linked.append({field: copy.deepcopy(scene.get(field)) for field in
-                           ("id", "number", "heading", "source_range", "location_id", "scene_asset_id",
-                            "character_ids", "prop_ids", "temporal_layer_id")})
+            mapping = {field: copy.deepcopy(scene.get(field)) for field in
+                       ("id", "number", "heading", "source_range", "location_id", "scene_asset_id",
+                        "character_ids", "prop_ids", "temporal_layer_id")}
+            if scene.get("character_appearances"):
+                mapping["character_appearances"] = copy.deepcopy(scene_appearance_tracks(scene))
+            linked.append(mapping)
     record = {"source_digest": data.get("source_digest"),
               "category": category, "name": item["name"], "facts": asset_facts(data, category, item),
               "scene_mapping": linked, "source_entry": item.get("source_entry"),
               "source_name": item.get("source_name"), "appearance": item.get("appearance"),
               "visible_uses": item.get("visible_uses"), "variant": item.get("variant"),
               "parent_id": item.get("parent_id"), "location_id": item.get("location_id")}
+    if "appearance_variant" in item:
+        record["appearance_variant"] = copy.deepcopy(item["appearance_variant"])
+        base = next((character for character in data["characters"]
+                     if character["id"] == item["appearance_variant"].get("base_asset_id")), None)
+        if base:
+            record["appearance_base"] = {field: copy.deepcopy(base.get(field)) for field in
+                                         ("id", "name", "source_entry", "source_speaker", "appearance", "visual_facts")}
+        prop = linked_covering_prop(data, item)
+        if prop:
+            # Bind author inputs rather than derived hashes so a freshly applied
+            # shared design is independent of CHAR/PROP compilation order.
+            prop_design = prop.get("visual_design", {})
+            record["covering_prop"] = {
+                field: copy.deepcopy(prop.get(field)) for field in
+                ("id", "name", "source_name", "visual_facts", "extraction_review", "visible_uses")}
+            record["covering_prop"]["visual_design"] = {
+                key: copy.deepcopy(value) for key, value in prop_design.items()
+                if key not in ("source_fact_digest", "source_context_digest")}
     # Preserve legacy digests exactly; new reviewed groups bind the extraction
     # decision as well as the source facts to their compiled image prompt.
     if "visual_mode" in item:
@@ -226,6 +324,13 @@ def source_context_digest(data, category, item):
         record["extraction_review"] = item.get("extraction_review")
         if is_group(item) and data.get("group_policy") == GROUP_POLICY:
             record["group_policy"] = GROUP_POLICY
+    if is_speaking_ensemble(item):
+        record["character_kind"] = "speaking_ensemble"
+        record["source_speaker"] = item.get("source_speaker")
+        record["ensemble_review"] = item.get("ensemble_review")
+    if item.get("asset_type") == "animal" and data.get("image_design_version") == DESIGN_VERSION:
+        record["asset_type"] = "animal"
+        record["species"] = item.get("species")
     if data.get("asset_policy") == PROP_POLICY:
         record["prop_policy"] = PROP_POLICY
         record["prop_coverage"] = [candidate for candidate in
@@ -364,13 +469,60 @@ def validate_prop_policy(data, paragraphs, fact_validator):
     validate_prop_coverage(data, paragraphs, fact_validator)
 
 
-def validate_design_record(category, item, design, anchors):
+def validate_group_design(item, design):
     label = item["id"]
+    if "identity_anchor_id" in design or design.get("appearance_overrides"):
+        raise ValueError(f"{label}群像使用独立样本，不使用单个人物身份锚点或版本覆盖")
+    wardrobe = design.get("group_wardrobe")
+    if not isinstance(wardrobe, dict) or wardrobe.get("mode") not in ("varied", "uniform", "mixed"):
+        raise ValueError(f"{label}group_wardrobe须说明varied/uniform/mixed服装策略")
+    for field in ("basis", "era_region"):
+        nonempty(wardrobe.get(field), f"{label}group_wardrobe.{field}")
+    if wardrobe["mode"] in ("uniform", "mixed"):
+        nonempty(wardrobe.get("shared_style"), f"{label}群体共同服制")
+    members = design.get("group_members")
+    if not isinstance(members, list) or len(members) < 2:
+        raise ValueError(f"{label}群像参考板须至少2个外貌可辨的group_members样本；样本数不是剧情人数")
+    identifiers, appearances, outfits = set(), set(), []
+    for member in members:
+        if not isinstance(member, dict):
+            raise ValueError(f"{label}群像样本须为对象")
+        if set(member) - {"sample_id", "age", "body", "face", "hair", "styling"}:
+            raise ValueError(f"{label}群像样本只保存造型，不新增姓名、职业或剧情身份")
+        for field in ("sample_id", "age", "body", "face", "hair"):
+            nonempty(member.get(field), f"{label}群像样本.{field}")
+        if member["sample_id"] in identifiers:
+            raise ValueError(f"{label}群像sample_id重复")
+        identifiers.add(member["sample_id"])
+        appearance = tuple(member[field].strip() for field in ("body", "face", "hair"))
+        if appearance in appearances:
+            raise ValueError(f"{label}群像外貌样本重复；不能只改编号、年龄或服装冒充不同外貌")
+        appearances.add(appearance)
+        if wardrobe["mode"] == "uniform":
+            if "styling" in member and member["styling"] != wardrobe["shared_style"]:
+                raise ValueError(f"{label}统一服制的成员不可各写不同服装；有依据的等级差异改用mixed")
+            outfit = wardrobe["shared_style"]
+        else:
+            outfit = nonempty(member.get("styling"), f"{label}群像成员服装")
+        outfits.append(outfit)
+    if wardrobe["mode"] == "varied" and len(set(outfits)) != len(outfits):
+        raise ValueError(f"{label}各异服装策略须逐人设计不同搭配，统一或分组服制使用uniform/mixed")
+
+
+def validate_design_record(category, item, design, anchors, version=DESIGN_VERSION):
+    label = item["id"]
+    if category == "characters" and item.get("asset_type") == "animal" and version == DESIGN_VERSION:
+        nonempty(item.get("species"), f"{label}动物物种")
+    if category == "characters" and is_speaking_ensemble(item) and version != DESIGN_VERSION:
+        raise ValueError(f"{label}发声群体多人参考板须使用{DESIGN_VERSION}")
     if not isinstance(design, dict) or design.get("attribution") != "制作设计":
         raise ValueError(f"{label}视觉设计须独立标注制作设计")
     nonempty(design.get("basis"), f"{label}设计依据")
     if design.get("reviewed_source_facts") is not True:
         raise ValueError(f"{label}设计作者须审阅原文明示约束并声明 reviewed_source_facts=true")
+    if version == DESIGN_VERSION and category == "characters" and is_group(item):
+        validate_group_design(item, design)
+        return
     fields = {
         "characters": ("identity_anchor_id", "styling"),
         "scene_assets": ("space", "materials_palette", "furnishings", "lighting"),
@@ -378,9 +530,25 @@ def validate_design_record(category, item, design, anchors):
     }[category]
     for field in fields:
         nonempty(design.get(field), f"{label}.{field}")
+    if category == "props" and "product_layout" in design:
+        if version != DESIGN_VERSION or design["product_layout"] != "multiple_objects":
+            raise ValueError(f"{label}组合道具版式仅接受v2显式multiple_objects")
+        nonempty(design.get("layout_basis"), f"{label}组合道具须说明原文依据与参考展示范围")
     if category == "characters":
         if design["identity_anchor_id"] not in anchors:
             raise ValueError(f"{label}缺少共享人物身份锚点")
+        if item.get("appearance_variant") or "covering" in design:
+            if version != DESIGN_VERSION:
+                raise ValueError(f"{label}遮面造型须显式采用{DESIGN_VERSION}，不能落入旧版露面模板")
+            covering = design.get("covering")
+            if item.get("appearance_variant", {}).get("prop_asset_id") is not None:
+                if not isinstance(covering, dict) or set(covering) != {"fit", "coverage"}:
+                    raise ValueError(f"{label}已关联道具的covering仅填fit/coverage对象，形制色材由PROP统一继承")
+                for field in ("fit", "coverage"):
+                    nonempty(covering.get(field), f"{label}佩戴关系covering.{field}")
+            else:
+                nonempty(covering, f"{label}当前遮挡物形制与实际遮挡范围covering")
+            nonempty(design.get("visible_identity"), f"{label}佩戴状态实际可见的身份特征visible_identity")
         overrides = design.get("appearance_overrides", {})
         if not isinstance(overrides, dict) or set(overrides) - {"age", "body", "face", "hair"}:
             raise ValueError(f"{label}人物版本覆盖只允许age/body/face/hair")
@@ -395,7 +563,8 @@ def validate_design_record(category, item, design, anchors):
         if not isinstance(changes, dict):
             raise ValueError(f"{label}override_source_facts须为字段到原文事实text的对象")
         for field in ("face", "body"):
-            if field in overrides and changes.get(field) not in [fact["text"] for fact in item.get("visual_facts", [])]:
+            if (field in overrides and not item.get("appearance_variant")
+                    and changes.get(field) not in [fact["text"] for fact in item.get("visual_facts", [])]):
                 raise ValueError(f"{label}覆盖{field}须指定已验证原文事实作为变化依据，不因换装改脸或改体型")
 
 
@@ -418,6 +587,8 @@ def identity_map(data):
 def validate_shared_identity(data):
     identities, anchor_owners = {}, {}
     for item in visual_assets(data, "characters"):
+        if data.get("image_design_version") == DESIGN_VERSION and is_group(item):
+            continue
         appearance = item.get("appearance")
         if not appearance:
             continue  # No string splitting to guess the identity of old/simple casts.
@@ -431,6 +602,36 @@ def validate_shared_identity(data):
         anchor_owners[anchor] = key
 
 
+def validate_variant_inheritance(data):
+    characters = {item["id"]: item for item in data["characters"]}
+    for item in visual_assets(data, "characters"):
+        variant = item.get("appearance_variant")
+        if not variant:
+            continue
+        base = characters.get(variant.get("base_asset_id"))
+        if not base or base.get("appearance_variant") or is_group(base):
+            raise ValueError(f"{item['id']}遮面造型须指向现用独立人物基础服装形象")
+        for field in ("identity_anchor_id", "styling", "appearance_overrides", "override_source_facts"):
+            if item["visual_design"].get(field) != base["visual_design"].get(field):
+                raise ValueError(f"{item['id']}遮面造型须继承基础形象的{field}；不同服装须指向对应基础服装形象")
+
+
+def compile_group_prompt(common, design):
+    wardrobe = design["group_wardrobe"]
+    description = f"时代、地区与身份约束：{wardrobe['era_region']}；服装设计依据：{wardrobe['basis']}。"
+    if wardrobe["mode"] in ("uniform", "mixed"):
+        description += f"共同服制：{wardrobe['shared_style']}。"
+    for index, member in enumerate(design["group_members"], 1):
+        outfit = wardrobe["shared_style"] if wardrobe["mode"] == "uniform" else member["styling"]
+        description += (f"从左到右第{index}个造型样本：年龄与性别感{member['age']}；"
+                        f"体型{member['body']}；面容{member['face']}；发型{member['hair']}；服装{outfit}。")
+    prompt = common + GROUP_LAYOUT + description + "柔和均匀棚拍光，服装剪裁可信，材质层次明确。无剧情动作、额外手持物、说明文字、标签、水印或签名；原文限定的年龄、性别、服制与外貌范围优先，不增加人物身份。"
+    form = {"model": "gpt-image-2", "aspect_ratio": "16:9", "background": "pure_white",
+            "layout": "distinct_members_single_front_full_body", "sample_count": len(design["group_members"]),
+            "sample_count_is_story_count": False, "wardrobe_mode": wardrobe["mode"]}
+    return prompt, form
+
+
 def compile_prompt(data, category, item, design, anchors):
     style = nonempty(data["visual_style"].get("text"), "视觉风格")
     facts = source_constraints(data, category, item)
@@ -438,8 +639,53 @@ def compile_prompt(data, category, item, design, anchors):
     style_end = "" if style.endswith(("。", ".", "！", "!", "？", "?")) else "。"
     common = f"统一视觉风格：{style}{style_end}{hard}"
     if category == "characters":
+        if data.get("image_design_version") == DESIGN_VERSION and is_group(item):
+            common = f"统一视觉风格：{style}{style_end}"
+            if facts:
+                common += ("原文群体约束：" + "；".join(facts)
+                           + "。外貌、年龄、性别及服制约束优先用于造型；原文人数、队形与动作属于剧情，"
+                           "不换算成本参考板的样本数、队形或动作。")
+            prompt, form = compile_group_prompt(common, design)
+            if is_speaking_ensemble(item):
+                form["subject_kind"] = "speaking_ensemble"
+            return prompt, form
         anchor = dict(anchors[design["identity_anchor_id"]])
         anchor.update(design.get("appearance_overrides", {}))
+        if data.get("image_design_version") == DESIGN_VERSION and design.get("covering"):
+            # Underlying face/hair stay in the identity anchor, not instructions
+            # to reveal hidden features in a currently covered reference board.
+            common = f"统一视觉风格：{style}{style_end}"
+            if facts:
+                common += "原文约束：" + "；".join(facts) + "。仅呈现本佩戴状态实际可见的部分，被遮住的部位保持遮挡。"
+            prop = linked_covering_prop(data, item)
+            if prop:
+                shared = prop["visual_design"]
+                covering = (f"遮挡物统一采用道具资产{prop['name']}的已审阅设计：形制与结构{shared['structure']}；"
+                            f"材质与颜色{shared['materials_palette']}；尺寸关系{shared['scale']}；状态{shared['state']}。"
+                            f"本人物佩戴关系：{design['covering']['fit']}；实际遮挡范围：{design['covering']['coverage']}。"
+                            "佩戴关系只决定贴合与遮挡，不另改道具形制、材质或配色；共享造型不代表共用同一个实物。")
+            else:
+                covering = f"当前遮挡物及遮挡范围：{design['covering']}。"
+            description = (f"年龄与性别感：{anchor['age']}；体型与轮廓：{anchor['body']}；"
+                           f"继承服装与配饰：{design['styling']}；{covering}"
+                           f"当前可见身份特征：{design['visible_identity']}。"
+                           "被遮住的真实五官、头发继续使用同一身份锚点，不通过摘戴对照或透视展示。")
+            prompt = common + MASKED_CHARACTER_LAYOUT + description + "自然静态站姿，柔和均匀棚拍光，遮挡物结构与材质清晰，服装剪裁可信。无剧情动作、额外手持物、其他角色、说明文字、标签、水印或签名。"
+            form = {"model": "gpt-image-2", "aspect_ratio": "16:9", "background": "pure_white",
+                    "layout": "left_1/3_covered_head_right_2/3_front_side90_back_full_body",
+                    "covering_state": "worn_in_every_view"}
+            if prop:
+                form["covering_prop_asset_id"] = prop["id"]
+            return prompt, form
+        if data.get("image_design_version") == DESIGN_VERSION and item.get("asset_type") == "animal":
+            species = nonempty(item.get("species"), f"{item['id']}动物物种")
+            description = (f"物种：{species}；年龄与性别感：{anchor['age']}；"
+                           f"真实体态与肢体结构：{anchor['body']}；头部特征：{anchor['face']}；"
+                           f"毛羽或皮肤：{anchor['hair']}；已审阅的服饰或配件状态：{design['styling']}。")
+            prompt = common + ANIMAL_LAYOUT + description + "保持物种自然静态姿态，柔和均匀棚拍光，结构和表面细节清晰。不增加未指定的衣物、人类肢体、其他角色、文字标签、水印或签名。"
+            return prompt, {"model": "gpt-image-2", "aspect_ratio": "16:9", "background": "pure_white",
+                            "layout": "left_1/3_animal_head_right_2/3_front_side90_back_complete_body",
+                            "subject_kind": "animal", "species": species}
         description = f"年龄与性别感：{anchor['age']}；体型与轮廓：{anchor['body']}；五官：{anchor['face']}；发型：{anchor['hair']}；服装与配饰：{design['styling']}。"
         differences = design.get("variant_differences", [])
         if differences:
@@ -452,6 +698,10 @@ def compile_prompt(data, category, item, design, anchors):
         prompt += "单幅清晰广角建立镜头，平视或微俯，前中后层次有秩序，出入口和主要活动区清楚，保留人物行动通道，空间结构自洽。完全无人物、人影或故事动物，无剧情动作、说明文字、水印或签名。"
         form = {"model": "gpt-image-2", "layout": "single_environment_master_view", "subjects": "no_characters"}
     else:
+        if data.get("image_design_version") == DESIGN_VERSION and design.get("product_layout") == "multiple_objects":
+            prompt = common + f"组合道具资产：{item['name']}。形制与关键结构：{design['structure']}；材质与颜色：{design['materials_palette']}；尺寸关系：{design['scale']}；当前状态：{design['state']}。"
+            prompt += f"本参考图的组合依据与展示范围：{design['layout_basis']}。整组居中完整入镜，各实体独立、清楚分开、不重叠，不能合并成一个物体。原文明确的数量须保留；未明确的剧情总数不由图片样本数推定。四周留白，比例准确，纯净白色背景，柔和均匀棚拍光，轻淡阴影。无人物、手部、组合以外的额外物品、展示架、剧情环境、额外文字、水印或签名；保留原文明示的物件本体文字或图案。"
+            return prompt, {"model": "gpt-image-2", "layout": "multiple_complete_objects", "background": "pure_white"}
         prompt = common + f"单品道具资产：{item['name']}。形制与关键结构：{design['structure']}；材质与颜色：{design['materials_palette']}；尺寸关系：{design['scale']}；当前状态：{design['state']}。"
         prompt += "标准产品摄影视角，立体物件微俯3/4视角，扁平物件正俯平铺。单件居中完整入镜，四周留白，比例准确，结构美观清晰，纯净白色背景，柔和均匀棚拍光，轻淡阴影。无人物、手部、其他物品、展示架、剧情环境、额外文字、水印或签名；保留原文明示的物件本体文字或图案。"
         form = {"model": "gpt-image-2", "layout": "single_complete_product", "background": "pure_white"}
@@ -469,8 +719,8 @@ def validate_visual_design(data):
                       for category in ASSET_CATEGORIES for item in data.get(category, []))
     if version is None and not has_records:
         return
-    if version != DESIGN_VERSION or data.get("schema_version") != 3:
-        raise ValueError("视觉设计须显式使用schema 3与gpt-image-2-v1；旧项目不自动迁移")
+    if version not in DESIGN_VERSIONS or data.get("schema_version") != 3:
+        raise ValueError("视觉设计须显式使用schema 3与支持的gpt-image-2版本；旧项目不自动迁移")
     style = data.get("visual_style")
     if not isinstance(style, dict) or style.get("digest") != fingerprint(style.get("text")):
         raise ValueError("视觉风格与摘要不匹配，请重新运行design")
@@ -478,7 +728,7 @@ def validate_visual_design(data):
     for category in ASSET_CATEGORIES:
         for item in visual_assets(data, category):
             design = item.get("visual_design")
-            validate_design_record(category, item, design, anchors)
+            validate_design_record(category, item, design, anchors, version)
             if item.get("image_design_digest") != fingerprint(design):
                 raise ValueError(f"{item['id']}制作设计或审阅依据已改变，请重新运行design")
             facts = source_constraints(data, category, item)
@@ -490,6 +740,7 @@ def validate_visual_design(data):
             if item.get("image_prompt") != prompt or item.get("image_format") != form:
                 raise ValueError(f"{item['id']}生图提示词或版式与台账设计不一致，请重新运行design")
     validate_shared_identity(data)
+    validate_variant_inheritance(data)
 
 
 def apply_design(data, payload, style_text):
@@ -502,7 +753,12 @@ def apply_design(data, payload, style_text):
     style_text = style_text.strip()
     nonempty(style_text, "style-file视觉风格")
     result = copy.deepcopy(data)
-    result["image_design_version"] = DESIGN_VERSION
+    # A newly designed project uses v2. Explicitly designed v1 ledgers retain
+    # their exact compiler unless the author asks for an explicit migration.
+    version = payload.get("image_design_version", data.get("image_design_version", DESIGN_VERSION))
+    if version not in DESIGN_VERSIONS:
+        raise ValueError(f"不支持的image_design_version：{version}")
+    result["image_design_version"] = version
     result["visual_style"] = {"text": style_text, "digest": fingerprint(style_text)}
     result["identity_anchors"] = copy.deepcopy(payload.get("identity_anchors", []))
     anchors = identity_map(result)
@@ -517,6 +773,22 @@ def apply_design(data, payload, style_text):
     expected = {item["id"] for category in ASSET_CATEGORIES for item in visual_assets(result, category)}
     if set(designs) != expected:
         raise ValueError(f"design须覆盖全部现用图片CHAR/SET/PROP，prompt_only群像不填设计；缺少{sorted(expected - set(designs))}，多余{sorted(set(designs) - expected)}")
+    characters = {item["id"]: item for item in result["characters"]}
+    for item in visual_assets(result, "characters"):
+        variant = item.get("appearance_variant")
+        if not variant:
+            continue
+        base = characters.get(variant.get("base_asset_id"))
+        if not base or base.get("appearance_variant") or base["id"] not in designs or is_group(base):
+            raise ValueError(f"{item['id']}遮面造型须指向现用独立人物基础服装形象")
+        current, base_design = designs[item["id"]], designs[base["id"]]
+        for field in ("identity_anchor_id", "styling", "appearance_overrides", "override_source_facts"):
+            if field in current and current[field] != base_design.get(field):
+                raise ValueError(f"{item['id']}遮面造型须继承基础形象的{field}；不同服装须指向对应基础服装形象")
+            if field in base_design:
+                current[field] = copy.deepcopy(base_design[field])
+        if base_design.get("appearance_overrides"):
+            current.setdefault("variant_differences", copy.deepcopy(base_design.get("variant_differences", [])))
     for item in result["characters"]:
         if item.get("visual_mode") == "prompt_only":
             for field in ("visual_design", "image_prompt", "image_format", "image_design_digest"):
@@ -524,10 +796,15 @@ def apply_design(data, payload, style_text):
     for category in ASSET_CATEGORIES:
         for item in visual_assets(result, category):
             design = designs[item["id"]]
-            validate_design_record(category, item, design, anchors)
+            validate_design_record(category, item, design, anchors, version)
+            item["visual_design"] = design
+    # All author designs are installed before any dependent CHAR is compiled;
+    # it must consume this payload's PROP design, never an old ledger snapshot.
+    for category in ASSET_CATEGORIES:
+        for item in visual_assets(result, category):
+            design = item["visual_design"]
             design["source_fact_digest"] = fingerprint(source_constraints(result, category, item))
             design["source_context_digest"] = source_context_digest(result, category, item)
-            item["visual_design"] = design
             item["image_design_digest"] = fingerprint(design)
             item["image_prompt"], item["image_format"] = compile_prompt(result, category, item, design, anchors)
     validate_visual_design(result)

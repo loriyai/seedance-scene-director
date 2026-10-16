@@ -13,7 +13,7 @@ from asset_ledger import digest, scene_ranges, source_paragraphs, split_cast_ent
 
 SCENE_FILE = re.compile(r"scene_(\d+)_(\d+)-(\d+)\.txt$")
 TRANSITION = re.compile(r"^(?:遮挡转场|转场)\s*")
-REVIEW_VERSION = 5
+REVIEW_VERSION = 6
 
 
 def compact(value):
@@ -58,6 +58,14 @@ def cue_reason(value, names):
 
 def explicit_label(value, names):
     """Read only a known cast name followed by a bounded cue and speech delimiter."""
+    known = "|".join(re.escape(name) for name in sorted(names, key=len, reverse=True))
+    if known:
+        match = re.match(r"((?:" + known + r")(?:\s*、\s*(?:" + known + r"))+)(?:\s*(?:（([^（）]*)）|\(([^()]*)\)))?\s*(?:[：:]\s*|(?=「))", value)
+        if match:
+            members = re.split(r"\s*、\s*", match.group(1))
+            if len(members) == len(set(members)):
+                return {"speaker": "、".join(members), "cue": match.group(2) or match.group(3) or "",
+                        "text": value[match.end():]}
     for name in sorted(names, key=len, reverse=True):
         match = re.match(re.escape(name) + r"\s*(?:（([^（）]*)）|\(([^()]*)\))?\s*(?:[：:]\s*|(?=「))", value)
         if match:
@@ -265,7 +273,7 @@ def check_scene(paragraphs, start, end, path, decisions):
             cast_match = all(part in names for part in dialogue["speaker"].split("、"))
             if not cast_match:
                 issues.append("说话人未逐字列入人物行")
-            if (not hint or hint not in dialogue["speaker"].split("、")) and not (decision and decision.get("speaker") == dialogue["speaker"]):
+            if (not hint or (hint != dialogue["speaker"] and hint not in dialogue["speaker"].split("、"))) and not (decision and decision.get("speaker") == dialogue["speaker"]):
                 issues.append("待人工确认说话人")
         else:
             issues.append("原文引号未匹配成稿台词；若非台词须人工确认")

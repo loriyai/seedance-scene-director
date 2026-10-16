@@ -27,6 +27,9 @@ class GroupVisualPolicyTests(unittest.TestCase):
         self.temp.cleanup()
 
     def add_group(self, mode="prompt_only", occurrences=(1,)):
+        # These cases retain the original single-sample compiler as a legacy
+        # compatibility fixture. Dedicated v2 board tests supply member designs.
+        self.payload["image_design_version"] = design.LEGACY_DESIGN_VERSION
         uses = []
         drafts = []
         for number, scene in enumerate(self.data["scenes"], 1):
@@ -94,17 +97,8 @@ class GroupVisualPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "证据重叠"):
             self.validate()
 
-    def test_group_duplicate_event_foreign_evidence_and_missing_reason_fail(self):
+    def test_group_image_requires_consistency_reason(self):
         group = self.add_group("image_asset", (1, 2))
-        original = copy.deepcopy(group["visible_uses"])
-        group["visible_uses"][1] = copy.deepcopy(group["visible_uses"][0])
-        with self.assertRaisesRegex(ValueError, "同一独立事件重复"):
-            self.validate()
-        group["visible_uses"] = copy.deepcopy(original)
-        group["visible_uses"][1]["source_paragraphs"] = [1]
-        with self.assertRaisesRegex(ValueError, "没有原文证据"):
-            self.validate()
-        group["visible_uses"] = original
         group["extraction_review"].pop("consistency_reason")
         with self.assertRaisesRegex(ValueError, "一致性理由"):
             self.validate()
