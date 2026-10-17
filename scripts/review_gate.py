@@ -26,13 +26,39 @@ def warning_records(warnings):
     return {digest(w): w for w in warnings}
 
 
+def accepted_authoring_warnings(state, request):
+    """Reuse exact, already supplied writer decisions, never invent approval.
+
+    The independent shot review and all aggregate verdicts stay pending. A
+    source, speech/action plan or warning change must pass readiness again.
+    """
+    from authoring_gates import audio_ready, POLICY as WORKFLOW_POLICY
+    from storyboard_preflight import check_audio_plan
+    from shot_dependencies import scope_warning
+    accepted = {}
+    for index, unit in enumerate(request.get('units', [])):
+        if unit.get('workflow_policy') != WORKFLOW_POLICY:
+            continue
+        result = audio_ready(state, unit, check_audio_plan(unit))
+        if result['status'] != 'ready':
+            continue
+        key = unit.get('id', f'unit-{index + 1}')
+        for item in unit.get('audio_preflight', {}).get('warning_decisions', []):
+            warning = scope_warning(dict(item['warning'], unit=key), request.get('units', []))
+            accepted[digest(warning)] = {'warning_sha256': digest(warning),
+                                        'warning': warning, 'decision': 'accepted',
+                                        'basis': item['basis']}
+    return accepted
+
+
 def pending(state, request, warnings):
     from shot_review import targets
+    accepted = accepted_authoring_warnings(state, request)
     return {'policy': POLICY, 'request_sha256': digest(request), 'context_sha256': context_digest(state),
             'status': 'pending', 'reviewer': '',
             'checks': {key: {'status': 'pending', 'basis': ''} for key in CHECKS},
             'shot_reviews': targets(state, request),
-            'warning_decisions': [{'warning_sha256': key, 'warning': value, 'decision': 'pending', 'basis': ''}
+            'warning_decisions': [accepted.get(key, {'warning_sha256': key, 'warning': value, 'decision': 'pending', 'basis': ''})
                                   for key, value in warning_records(warnings).items()]}
 
 
@@ -69,8 +95,9 @@ def verify(state, request, report, warnings):
 
 
 def main():
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8')
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('prepare', 'verify'))
     parser.add_argument('--project', type=Path, required=True)

@@ -326,12 +326,14 @@ class AuditDirectorChecks(unittest.TestCase):
     def test_text_timing_calls_estimate_with_band_limits(self):
         unit = self.speech_unit()
         with patch.object(dl, 'estimate', wraps=dl.estimate) as estimate:
-            self.assertEqual(d.validate_unit(self.state, unit, [0, 9]), [])
+            self.assertEqual([w['kind'] for w in d.validate_unit(self.state, unit, [0, 9])],
+                             ['4至6秒实际运镜需审查'])
         self.assertEqual([call.args[2] for call in estimate.call_args_list], [5.2, 4.0])
 
     def test_extra_emotional_pause_is_not_counted_twice(self):
         unit = self.speech_unit(end=3.1, pause=1.1)
-        self.assertEqual(d.validate_unit(self.state, unit, [0, 9]), [])
+        self.assertEqual([w['kind'] for w in d.validate_unit(self.state, unit, [0, 9])],
+                         ['4至6秒实际运镜需审查'])
 
     def test_text_timing_warns_without_rejecting_and_reports_pause_basis(self):
         unit = self.speech_unit(end=1.0)
@@ -345,7 +347,8 @@ class AuditDirectorChecks(unittest.TestCase):
     def test_recording_path_does_not_use_text_estimate(self):
         unit = self.speech_unit(measured=True)
         with patch.object(dl, 'estimate', side_effect=AssertionError('recording must not estimate')):
-            self.assertEqual(d.validate_unit(self.state, unit, [0, 9]), [])
+            self.assertEqual([w['kind'] for w in d.validate_unit(self.state, unit, [0, 9])],
+                             ['4至6秒实际运镜需审查'])
 
 
 class AuditDialogueChecks(unittest.TestCase):

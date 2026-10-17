@@ -7,12 +7,13 @@ import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 
 from asset_visual_design import (PROP_POLICY, GROUP_POLICY, apply_design, apply_group_review,
                                  validate_prop_policy, validate_group_policy,
-                                 validate_visual_design, visual_assets)
+                                 validate_visual_design, visual_assets, scene_source_digests)
 from character_variants import (apply_variant_review, scene_character_ids,
                                 validate_character_variants)
 from cast_contract import split_cast_entry, validate_cast_entries
@@ -305,6 +306,9 @@ def validate(script: list[dict], paragraphs: list[str], data: dict, *, require_d
     if 'observations' in data:
         from scene_observations import validate_imported_observations
         validate_imported_observations(data, paragraphs, script)
+    if ("design_source_scene_digests" in data
+            and data["design_source_scene_digests"] != scene_source_digests(data, paragraphs)):
+        raise ValueError("设计依赖场次摘要与当前原文不一致；通过design重建，不手改摘要")
     categories = {k: v for k, v in ID_PATTERNS.items() if k != "scene_assets" or data["schema_version"] == 3}
     for category in categories:
         if not isinstance(data.get(category), list):
@@ -440,6 +444,34 @@ def validate(script: list[dict], paragraphs: list[str], data: dict, *, require_d
     validate_prop_policy(data, paragraphs, fact_list)
     validate_group_policy(data, paragraphs, fact_list, script)
     validate_visual_design(data)
+
+
+def candidate_data(data):
+    """Validate author facts independently of intentionally stale derivatives."""
+    result = copy.deepcopy(data)
+    for field in ("image_design_version", "visual_style", "identity_anchors", "design_source_scene_digests"):
+        result.pop(field, None)
+    for category in ("characters", "scene_assets", "props"):
+        for item in result.get(category, []):
+            for field in ("visual_design", "image_prompt", "image_format", "image_design_digest"):
+                item.pop(field, None)
+    return result
+
+
+def preflight(script_path, source_path, ledger_path, stage="candidate"):
+    data = json.loads(ledger_path.read_text(encoding="utf-8-sig"))
+    paragraphs = source_paragraphs(source_path)
+    if stage not in ("candidate", "designed"):
+        raise ValueError("preflight阶段须为candidate或designed")
+    if data.get("schema_version") != 3:
+        raise ValueError("当前资产前检须使用schema 3；旧台账先按迁移流程审阅")
+    if stage == "designed" and not data.get("image_design_version"):
+        raise ValueError("designed前检须有完整美术设计；候选台账不能冒充成品")
+    validate(parse_script(script_path), paragraphs, candidate_data(data) if stage == "candidate" else data)
+    return {"status": "passed", "stage": stage, "semantic_review": "not_performed",
+            "inputs": {name: {"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                       for name, path in (("script", script_path), ("source", source_path), ("ledger", ledger_path))},
+            "counts": {category: len(data.get(category, [])) for category in ("scenes", "characters", "scene_assets", "props")}}
 
 
 def temporal_context(data, paragraphs=None):
@@ -841,6 +873,9 @@ def render(script_path: Path, source_path: Path, ledger_path: Path, output: Path
 
 
 def main() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init", help="从剧本和逐场稿建立空事实资产索引")
@@ -866,12 +901,14 @@ def main() -> None:
     view.add_argument("ledger", type=Path)
     view.add_argument("--output", type=Path, required=True)
     view.add_argument("--require-designed", action="store_true", help="新项目完整资产交付门槛；兼容读取旧事实台账时不指定")
-    preflight = commands.add_parser("validate", aliases=["preflight"], help="只读全量前检；新项目契约自动要求完整设计，候选检查显式用--candidate")
-    preflight.add_argument("script", type=Path)
-    preflight.add_argument("source", type=Path)
-    preflight.add_argument("ledger", type=Path)
-    preflight.add_argument("--require-designed", action="store_true")
-    preflight.add_argument('--candidate', action='store_true', help='显式候选前检，不签发完整交付通过')
+    asset_check = commands.add_parser("validate", aliases=["preflight"], help="只读全量前检；新项目契约自动要求完整设计，候选检查显式用--candidate")
+    asset_check.add_argument("script", type=Path)
+    asset_check.add_argument("source", type=Path)
+    asset_check.add_argument("ledger", type=Path)
+    asset_check.add_argument("--require-designed", action="store_true")
+    asset_check.add_argument('--candidate', action='store_true', help='显式候选前检，不签发完整交付通过')
+    asset_check.add_argument("--stage", choices=("candidate", "designed"), help="兼容显式前检阶段；不与交付选项混用")
+    asset_check.add_argument("--report", type=Path, help="可选前检报告，须为新文件")
     template = commands.add_parser("review-template", help="依据明确的kind及稳定ID生成待填审阅模板和真实摘要，不自动确认语义")
     template.add_argument("ledger", type=Path)
     template.add_argument("selections", type=Path)
@@ -901,6 +938,7 @@ def main() -> None:
     design.add_argument("--style-file", type=Path, required=True)
     design.add_argument("--output", type=Path, required=True)
     design.add_argument("--catalog-output", type=Path)
+    design.add_argument("--patch", action="store_true", help="仅更新变化设计并校验未变依赖")
     preview = commands.add_parser("design-check", help="只读检查指定设计及依赖闭包；局部预览不能作为交付或绑定")
     preview.add_argument("script", type=Path)
     preview.add_argument("source", type=Path)
@@ -935,6 +973,16 @@ def main() -> None:
             with args.output.open("x", encoding="utf-8", newline="\n") as stream:
                 stream.write(json.dumps(template, ensure_ascii=False, indent=2) + "\n")
             print(json.dumps({"status": "review_template", "output": str(args.output.resolve()), "semantic_review": "required"}, ensure_ascii=False))
+        elif args.command in ("validate", "preflight") and args.stage is not None:
+            if args.candidate or args.require_designed:
+                raise ValueError("--stage不能与--candidate或--require-designed混用")
+            if args.report and args.report.exists():
+                raise ValueError("前检报告须为新文件，不覆盖输入或历史证据")
+            report = preflight(args.script, args.source, args.ledger, args.stage)
+            if args.report:
+                args.report.parent.mkdir(parents=True, exist_ok=True)
+                args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            print(json.dumps(report, ensure_ascii=False))
         elif args.command in ("validate", "preflight", "review-apply", "review-verify", "review-check"):
             script = parse_script(args.script)
             paragraphs = source_paragraphs(args.source)
@@ -1015,13 +1063,7 @@ def main() -> None:
             result = apply_variant_review(data, json.loads(args.review_json.read_text(encoding="utf-8-sig")), paragraphs)
             # Existing designs remain archived on the new draft. They are not
             # silently recompiled or declared valid after adding appearances.
-            source_data = copy.deepcopy(result)
-            for field in ("image_design_version", "visual_style", "identity_anchors"):
-                source_data.pop(field, None)
-            for category in ("characters", "scene_assets", "props"):
-                for item in source_data.get(category, []):
-                    for field in ("visual_design", "image_prompt", "image_format", "image_design_digest"):
-                        item.pop(field, None)
+            source_data = candidate_data(result)
             validate(parse_script(args.script), paragraphs, source_data)
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1036,16 +1078,10 @@ def main() -> None:
             data = json.loads(args.ledger.read_text(encoding="utf-8-sig"))
             # Recompilation is also the explicit path for reviewed changes to
             # facts/style. Validate source structure without stale derivatives.
-            source_data = copy.deepcopy(data)
-            for field in ("image_design_version", "visual_style", "identity_anchors"):
-                source_data.pop(field, None)
-            for category in ("characters", "scene_assets", "props"):
-                for item in source_data.get(category, []):
-                    for field in ("visual_design", "image_prompt", "image_format", "image_design_digest"):
-                        item.pop(field, None)
+            source_data = candidate_data(data)
             validate(script, paragraphs, source_data)
             result = apply_design(data, json.loads(args.design_json.read_text(encoding="utf-8-sig")),
-                                  args.style_file.read_text(encoding="utf-8-sig"))
+                                  args.style_file.read_text(encoding="utf-8-sig"), patch=args.patch, paragraphs=paragraphs)
             validate(script, paragraphs, result, require_designed=True)
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

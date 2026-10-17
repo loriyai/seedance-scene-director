@@ -225,7 +225,9 @@ class SkillChecks(unittest.TestCase):
         shot.update(subjects=[], framing='远景', label='雨景', text='窗外细雨滴落屋檐。',
                     environment_evidence='窗外细雨滴落屋檐')
         shot.pop('focus')
-        self.assertEqual(d.validate_unit(self.state, self.unit, self.unit['span']), [])
+        warnings = d.validate_unit(self.state, self.unit, self.unit['span'])
+        self.assertEqual([w['kind'] for w in warnings], ['4至6秒实际运镜需审查'])
+        self.assertEqual([s['shot'] for s in warnings[0]['shots']], [1])
         rendered = d.render_unit(self.state, self.unit)
         self.assertIn('人物：无；', rendered)
         self.assertIn('（@陈默卧室 的远景；转场：硬切）', rendered)
@@ -247,7 +249,10 @@ class SkillChecks(unittest.TestCase):
                     unit['shots'].append(shot)
                     cursor += length
                 warnings = d.validate_unit(self.state, unit, unit['span'])
-                self.assertTrue(all(w['kind'] == '连续三镜摄影重复需审查' for w in warnings))
+                self.assertTrue(all(w['kind'] in {'连续三镜摄影重复需审查', '4至6秒实际运镜需审查'} for w in warnings))
+                movement = [w for w in warnings if w['kind'] == '4至6秒实际运镜需审查']
+                expected_long = [i + 1 for i, length in enumerate(lengths) if length >= 4]
+                self.assertEqual([s['shot'] for w in movement for s in w['shots']], expected_long)
                 rendered = d.render_unit(self.state, unit)
                 self.assertEqual(sum(line.startswith('·') for line in rendered.splitlines()), len(lengths))
                 self.assertIn(f'秒-{sum(lengths):02d}秒[镜头{len(lengths)}-动作{len(lengths)}]', rendered.splitlines()[-1])
@@ -325,7 +330,9 @@ class SkillChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '录音测量依据'):
             d.validate_unit(self.state, self.unit, self.unit['span'])
         self.unit['audio'][0]['recording_evidence'] = '虚构测试录音：测量区间0至2.34秒'
-        self.assertEqual(d.validate_unit(self.state, self.unit, self.unit['span']), [])
+        warnings = d.validate_unit(self.state, self.unit, self.unit['span'])
+        self.assertEqual([w['kind'] for w in warnings], ['4至6秒实际运镜需审查'])
+        self.assertEqual([s['shot'] for s in warnings[0]['shots']], [1])
         self.assertNotIn('实配音', d.render_unit(self.state, self.unit))
         self.assertNotIn('发声估时', d.render_unit(self.state, self.unit))
 

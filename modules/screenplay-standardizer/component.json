@@ -2,16 +2,16 @@
   "component": "screenplay-standardizer",
   "bundle_format": 1,
   "files": {
-    "INSTRUCTIONS.md": "d050f94bac92e74cae1da3f7edaa87d4cd180f54c939cbba2654898707a12a00",
+    "INSTRUCTIONS.md": "2b4024ec7ff2b58d37c9d3a8250a8f6f3156250bf5053ead96d7d4cec9611fe2",
     "references/asset-decisions.md": "51a8f39acd39e4747c751d32d7fe6a6261f69fc241de58cecc6f67751ab13e49",
-    "references/asset-ledger.md": "eec2b6c1593a53a8833ded75dca76e45eccbadc496406ab47a6e217c75d114ea",
+    "references/asset-ledger.md": "f3062c7e2c83e1149488860974f2ef236a417aa96368d623b67a20f26cc852a5",
     "references/observations.md": "038c7c30603924670e4483d9a0bdd7153b3bcd7c008972ce604b89d251cdf41f",
-    "references/review.md": "587d56ef674f906bf2a83091b9463ab96844f3cc0a0af4e303d7e3504b473583",
+    "references/review.md": "0374b84c9ee2d9c4abe697a15ee16d51bdc17d79e61974f0e905cfb402a15831",
     "scripts/asset_impact.py": "5a2e28caa09468111fcbc2609f0e346cd0efbede20f4d12111e6d23531e6de8c",
-    "scripts/asset_ledger.py": "617d3c09e7a763da48eb172b302aacd5aaecade8318d953ffd83256df720d1e0",
-    "scripts/asset_migrate.py": "80ea49c28a8ae8797da4b13776bfa1f9cd2897847cd88c137b931497c8866eed",
+    "scripts/asset_ledger.py": "9495f9137b865c87792c10db48254ed7899900d35f13867b6b273e42d942fef1",
+    "scripts/asset_migrate.py": "a8be18a62268c80d11c4a827d9e0a94d40c03ba777e44b1f2024e41cf35200af",
     "scripts/asset_review.py": "3290eaad589611f56d59264ce6caaf9d50a7417c3a7c3292737acf9c8b65885d",
-    "scripts/asset_visual_design.py": "6c6de2e37c482aae85f506c498a8ca83b0eec1dd164384ab2809e29105e60714",
+    "scripts/asset_visual_design.py": "32a77cf0201957b5e1a1c7f5e8fcb35f3466126cfc51713c888d62798e1b8843",
     "scripts/cast_contract.py": "dc7bc49703cb0eb14a619ca9c15a6d190e2671413abf22ac3f489df818b4673a",
     "scripts/character_variants.py": "5c39905960b977d8379edc77d04ee96cd5da0014edd89bbb9832320acfe870cc",
     "scripts/design_inputs.py": "7315d13d0a63a1be8ea48e4a6bb1a79870e3a259c1c7ff6478d618751324d141",
@@ -21,8 +21,8 @@
     "scripts/evidence_draft.py": "a3496edb36ecffe2cfae388eedcaed51e9973e66165d6f7837cb2a39279ec4dd",
     "scripts/project_contract.py": "d2c6b5204f1727ec6f5f96c454c8fa1d53b81b04fdd6dd0b2690814ebad7f2cc",
     "scripts/scene_observations.py": "57a78c81595ebc1024c0fcc7ff070253e298b221355c9fc5c4d8899c04f506cf",
-    "scripts/screenplay_io.py": "dc286e29b9bb933429c680b63b5d960d912d215ddc4ea9670210838cdc0201f1",
-    "scripts/screenplay_review.py": "5da38f012fcfc0f810a91a85ce1c32f9a77222f1578a5381bd50e13ebb6c32d5",
+    "scripts/screenplay_io.py": "c8e9bc8ee2057de43727e6ec1a6e5de67fc75a1d1532a3b0c3172153307cf906",
+    "scripts/screenplay_review.py": "b1617c2ad674e6e704933f9832eadeb43956afaf2c1b59e51d96beadc5a7a1e8",
     "scripts/source_compat.py": "2fcf9b97d4d8913ef92d77198bb890639b910c05a8a7fe560a5401fe628db6a8"
   }
 }

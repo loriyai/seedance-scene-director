@@ -54,7 +54,7 @@ class DialogueLayoutChecks(unittest.TestCase):
         self.assertFalse(any(s.get('dialogue_continuations') for s in u['shots']))
 
     def test_natural_short_sentence_cannot_be_stretched_to_cross(self):
-        u=self.sample('那宝宝就是想在床上了。',end=7,units=10,durations=(3,4))
+        u=self.sample('那宝宝就是想在床上了。',end=8,units=10,durations=(3,5))
         with self.assertRaisesRegex(ValueError,'拉长'):
             dl.attach(u)
 

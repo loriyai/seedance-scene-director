@@ -9,6 +9,12 @@ description: 内置剧本标准化、可复用资产筛选与美术设计，输�
 
 共同约束见[执行契约](references/execution-contract.md)。按当前阶段读取资料，资产任务不加载分镜和画布细则；已委派子代理只读交接中的阶段规则，不重新执行主入口或递归分派。剧本项目文件不得写入Skill目录。
 
+## 入口与规则归属
+
+先识别当前任务：新完整剧本走风格确认和资产主流程；已绑定项目续写或指定修改走[分镜工作流](references/storyboard-workflow.md)；直接画布请求只走已授权画布接口。审计或维护Skill本身不触发制作菜单、生产调度或云端操作。不套用其他Skill的固定15秒、固定镜数或输出模式。
+
+流程与责任以本入口、[资产主流程](references/asset-workflow.md)及[场次审阅流程](references/scene-review-workflow.md)为准，命令与字段以[后台接口](references/runtime.md)为准。摄影、表演、资产与输出格式各从专项参考读取。同一要求在负责阶段完成真实语义判断；冻结和提交可以重新核验结构与摘要，不因此重复通读未变全文。已读未变规则可复用，实际变化补读相关部分。
+
 ## 完整剧本入口：先确认风格
 
 收到完整剧本后，只检查文件是否存在且可读取（粘贴全文视为已收到），不先解析全文或分析剧情。不可访问时简短报告并请求可访问文件；可访问且本项目尚无已确认风格时，立即暂停工作，显示以下选项并等待用户回答：
@@ -34,7 +40,7 @@ description: 内置剧本标准化、可复用资产筛选与美术设计，输�
 
 每个剧本项目独立保存在当前任务 `work/seedance-scene-director/<项目标识>/`；交付放任务 `outputs/` 或用户指定位置。`video-style.txt` 独立保存风格，`session.json` 保存来源摘要、历史范围、编号和版本。同一聊天的各剧本项目共享 `work/seedance-scene-director/` 下的批次登记，成功提交的新范围依次使用A、B…Z、AA；项目恢复读取已保存批次，不依赖对话记忆。不把运行状态写入Skill安装目录，不跨对话默认沿用其他项目。恢复项目读取文件，不靠对话记忆推测。多个项目无法唯一判断时才问目标。
 
-绑定文件发生变化时停止使用旧绑定：按内置标准化模块的改稿流程复核、迁移并建立新绑定；旧分镜保留为旧版，不与新稿静默混用。纯资产显示名调整不改剧本正文，不重做剧情复核；重新检查台账及映射后建立明确的新绑定，禁止直接改session摘要绕过校验。
+绑定文件变化时停止使用旧绑定，按[绑定变更边界](references/binding-changes.md)复核受影响来源、资产及引用。当前bind只支持新项目，不存在同目录原位rebind命令；不手改session摘要、不把“重新绑定”当作已实现的覆盖接口。纯制作名调整不反写正文，不重做无关剧情审阅；旧版与新稿不得静默混用。
 
 恢复时运行`director.py status`，以其中`recovery`的session前台阶段、当前输入对应的队列及提交记录为准。`intake-state.json`仅是历史快照，不用其中旧计数、旧next_step或旧失败描述决定续接；状态查询只读，不自动改写历史文件或恢复暂停。后台进度与前台阶段分别读取，已排队和单步ACK不计完整节点完成。
 
@@ -53,10 +59,20 @@ description: 内置剧本标准化、可复用资产筛选与美术设计，输�
 - 标准化：读取[内置规则](modules/screenplay-standardizer/INSTRUCTIONS.md)、[复核](modules/screenplay-standardizer/references/review.md)、[逐场观察](modules/screenplay-standardizer/references/observations.md)。保留source、原句及成稿去向；sample/partial不用于正式合并或绑定。
 - 资产统筹：读取[资产主流程](references/asset-workflow.md)、[台账规则](modules/screenplay-standardizer/references/asset-ledger.md)、[审阅草稿与影响分析](modules/screenplay-standardizer/references/asset-decisions.md)。全剧身份、服装、地点与候选裁决统一负责。背景群像和共同发声集合不同，原集合称谓与完整台词保留；非人物播报须有绑定原文的分类决定。
 - 美术设计：读取[图片设计](references/asset-image-design.md)和[共享基线及设计组](references/design-workspace.md)。先确定身份、服装、公共空间和关联道具，再做代表组design-check并实读。结构检查不签发语义通过；完整提示词只由最终JSON编译，TXT不另维护一份设计。
-- 分镜及指定修改：仅进入该阶段才读[分镜工作流](references/storyboard-workflow.md)及其摄影、连续性、表演、声音和输出规范。保留sound-first、逐镜真实审阅和最终提交门槛；连续单元顺序承接，不扩展用户范围。
+- 分镜及指定修改：仅进入该阶段才读[分镜工作流](references/storyboard-workflow.md)、[分镜创作规则](references/storyboard-authoring.md)及其专项引用。先使动作/声音计划readiness=ready，再展开有观看重点的摄影；作者同版渲染/状态前检、首次独立逐镜实读和最终提交门槛保留。连续单元顺序承接，不扩展用户范围。
 - 画布：仅在明确请求或菜单选择后读[画布工作流](references/canvas-workflow.md)、[接口](references/canvas.md)和[队列](references/canvas-jobs.md)。同画布一个writer；未知写入先回读，保留原ID续接，不触发生成。
 
 阶段委派按[模型调度](references/model-routing.md)及agents/model-routing.json执行，主聊天模型不自动切换。创作默认creative，已授权同步准备用operations，具体疑难按原规则升级。标准化、全剧统筹和连续分镜保留单写者；只有冻结基线、无跨组可变依赖、责任ID互斥的design组允许受控并行。所有正式文件与提交由主代理单写。
+
+## 分镜制作与修订边界
+
+原文的叙事作用、情绪与反差须落实到可见动作过程、空间关系、信息揭示和切点；事件覆盖不能代替表达成立。摄影、表演、状态更新和事件时序的通用判定见分镜专项规则，不新增表单或审查轮次。
+
+单元4～30秒、单镜1～6秒整数；固定仅限1～3秒，4～6秒必须有服务观看重点的实际相机位移或转向，仅移焦或主体运动不算，运动后可短暂稳定。26～30秒8～13镜，短单元及建议镜数按自然负荷选择，不补动作、反应或停顿凑时长。新提交/选定替换使用reference-v3、none-v1及visual-only-v2纯视觉抬头；旧receipt保持原版。
+
+一个生成写者、一个独立场次主审，主代理验收交接与闭环证据，不再作第三轮逐镜通读。按完整自然场次或必要连续段冻结，集中同根因问题后一次修订；真实依赖未变的判断可追溯复用，只实读pending镜头与必要连接。声音变化核对整声音单元，状态变化沿真实承接至有证据的收敛边界；不为固定小批数量反复交接。待审期间可继续来源和进入状态独立的后续工作，依赖未决状态的部分等待解决。
+
+新制作使用紧凑staging材料并按需展开核验来源，实际校验仍绑定完整材料；展示投影不构成通过证据。完整prepare/prepare-incremental已对同版执行完整check时，补齐真实审阅记录后直接commit，由commit校验最终结构与证据，不紧邻重复check/verify。具体兼容、依赖与复核命令见场次审阅流程。
 
 ## 交付与进度
 

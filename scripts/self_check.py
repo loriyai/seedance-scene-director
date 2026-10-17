@@ -29,4 +29,7 @@ def load_tests(loader, tests, pattern):
 
 
 if __name__ == '__main__':
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     unittest.main(verbosity=2)

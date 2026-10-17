@@ -281,6 +281,40 @@ def source_constraints(data, category, item):
     return list(dict.fromkeys(fact["text"].strip() for fact in asset_facts(data, category, item)))
 
 
+def scene_source_digests(data, paragraphs):
+    """Content identities for declared design dependencies, never review verdicts."""
+    return {scene["id"]: fingerprint(paragraphs[scene["source_range"][0] - 1:scene["source_range"][1]])
+            for scene in data["scenes"]}
+
+
+def design_dependency_scenes(data, category, item):
+    scope = item.get("visual_design", {}).get("source_scope")
+    if scope is None:
+        return None  # Preserve the exact conservative digest of existing designs.
+    if not isinstance(scope, dict) or scope.get("kind") not in ("global", "scenes"):
+        raise ValueError(f"{item['id']} source_scope.kind须为global或scenes")
+    nonempty(scope.get("basis"), f"{item['id']}设计上下文范围依据")
+    if scope["kind"] == "global":
+        return None
+    ids = scope.get("scene_ids")
+    scenes = {scene["id"]: scene for scene in data["scenes"]}
+    if (not isinstance(ids, list) or not ids or any(not isinstance(sid, str) or sid not in scenes for sid in ids)
+            or len(ids) != len(set(ids))):
+        raise ValueError(f"{item['id']}设计依赖场次须非空、唯一且存在")
+    linked = {scene["id"] for scene in data["scenes"]
+              if (item["id"] in scene_character_ids(scene) if category == "characters" else
+                  item["id"] in scene["prop_ids"] if category == "props" else
+                  scene.get("scene_asset_id") == item["id"])}
+    # An author may add context scenes, but cannot omit the asset's own scenes.
+    if not linked.issubset(ids):
+        raise ValueError(f"{item['id']}设计依赖漏掉资产出现场次：{sorted(linked - set(ids))}")
+    digests = data.get("design_source_scene_digests", {})
+    if not isinstance(digests, dict) or any(not isinstance(digests.get(sid), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digests[sid]) for sid in ids):
+        raise ValueError(f"{item['id']}局部设计依赖缺少当前原文场次摘要；通过design命令建立")
+    return sorted(ids)
+
+
 def source_context_digest(data, category, item):
     linked = []
     for scene in data["scenes"]:
@@ -339,6 +373,20 @@ def source_context_digest(data, category, item):
                                    if candidate.get("target_id") == item["id"]]
         if category == "props":
             record["extraction_review"] = item.get("extraction_review")
+    dependencies = design_dependency_scenes(data, category, item)
+    if dependencies is not None:
+        # Source/evidence validation remains mandatory at the ledger boundary.
+        # Global review refreshes must not invalidate an unchanged local design.
+        def local_context(value):
+            if isinstance(value, dict):
+                return {key: local_context(child) for key, child in value.items()
+                        if key not in ("source_digest", "source_paragraphs", "source_range", "number")}
+            if isinstance(value, list):
+                return [local_context(child) for child in value]
+            return value
+        record = local_context(record)
+        record["source_scope"] = item["visual_design"]["source_scope"]
+        record["source_scenes"] = {sid: data["design_source_scene_digests"][sid] for sid in dependencies}
     return fingerprint(record)
 
 
@@ -717,6 +765,49 @@ def compile_prompt(data, category, item, design, anchors):
     return prompt, form
 
 
+def validate_design_item(data, category, item, anchors, version):
+    design = item.get("visual_design")
+    validate_design_record(category, item, design, anchors, version)
+    if item.get("image_design_digest") != fingerprint(design):
+        raise ValueError(f"{item['id']}制作设计或审阅依据已改变，请重新运行design")
+    if design.get("source_fact_digest") != fingerprint(source_constraints(data, category, item)):
+        raise ValueError(f"{item['id']}原文外观事实已改变，须审阅设计并重新运行design")
+    if design.get("source_context_digest") != source_context_digest(data, category, item):
+        raise ValueError(f"{item['id']}原文版本、出处或场次映射已改变，须审阅设计并重新运行design")
+    prompt, form = compile_prompt(data, category, item, design, anchors)
+    if item.get("image_prompt") != prompt or item.get("image_format") != form:
+        raise ValueError(f"{item['id']}生图提示词或版式与台账设计不一致，请重新运行design")
+
+
+def design_review_status(data):
+    """Report exact stale design IDs separately from candidate review gates."""
+    result = {"reusable_asset_ids": [], "review_required": [], "shared_errors": []}
+    try:
+        anchors = identity_map(data)
+        version = data.get("image_design_version")
+        if version not in DESIGN_VERSIONS:
+            raise ValueError("制作设计版本缺失或不支持")
+        style = data.get("visual_style")
+        if not isinstance(style, dict) or style.get("digest") != fingerprint(style.get("text")):
+            raise ValueError("视觉风格与摘要不匹配")
+    except (ValueError, KeyError, TypeError) as exc:
+        result["shared_errors"].append(str(exc))
+        return result
+    for category in ASSET_CATEGORIES:
+        for item in visual_assets(data, category):
+            try:
+                validate_design_item(data, category, item, anchors, version)
+                result["reusable_asset_ids"].append(item["id"])
+            except (ValueError, KeyError, TypeError, StopIteration) as exc:
+                result["review_required"].append({"asset_id": item["id"], "reason": str(exc)})
+    for validator in (validate_shared_identity, validate_variant_inheritance):
+        try:
+            validator(data)
+        except (ValueError, KeyError, TypeError) as exc:
+            result["shared_errors"].append(str(exc))
+    return result
+
+
 def validate_visual_design(data):
     validate_prop_coverage(data)
     validate_group_modes(data)
@@ -736,23 +827,12 @@ def validate_visual_design(data):
     anchors = identity_map(data)
     for category in ASSET_CATEGORIES:
         for item in visual_assets(data, category):
-            design = item.get("visual_design")
-            validate_design_record(category, item, design, anchors, version)
-            if item.get("image_design_digest") != fingerprint(design):
-                raise ValueError(f"{item['id']}制作设计或审阅依据已改变，请重新运行design")
-            facts = source_constraints(data, category, item)
-            if design.get("source_fact_digest") != fingerprint(facts):
-                raise ValueError(f"{item['id']}原文外观事实已改变，须审阅设计并重新运行design")
-            if design.get("source_context_digest") != source_context_digest(data, category, item):
-                raise ValueError(f"{item['id']}原文版本、出处或场次映射已改变，须审阅设计并重新运行design")
-            prompt, form = compile_prompt(data, category, item, design, anchors)
-            if item.get("image_prompt") != prompt or item.get("image_format") != form:
-                raise ValueError(f"{item['id']}生图提示词或版式与台账设计不一致，请重新运行design")
+            validate_design_item(data, category, item, anchors, version)
     validate_shared_identity(data)
     validate_variant_inheritance(data)
 
 
-def apply_design(data, payload, style_text):
+def apply_design(data, payload, style_text, *, patch=False, paragraphs=None):
     validate_prop_coverage(data)
     validate_group_modes(data)
     if data.get("schema_version") != 3:
@@ -762,14 +842,30 @@ def apply_design(data, payload, style_text):
     style_text = style_text.strip()
     nonempty(style_text, "style-file视觉风格")
     result = copy.deepcopy(data)
+    if paragraphs is not None:
+        result["design_source_scene_digests"] = scene_source_digests(result, paragraphs)
     # A newly designed project uses v2. Explicitly designed v1 ledgers retain
     # their exact compiler unless the author asks for an explicit migration.
     version = payload.get("image_design_version", data.get("image_design_version", DESIGN_VERSION))
     if version not in DESIGN_VERSIONS:
         raise ValueError(f"不支持的image_design_version：{version}")
+    if patch and (version != data.get("image_design_version")
+                  or style_text != data.get("visual_style", {}).get("text")):
+        raise ValueError("局部design不能同时切换风格或设计版本；请显式提交完整设计")
     result["image_design_version"] = version
     result["visual_style"] = {"text": style_text, "digest": fingerprint(style_text)}
-    result["identity_anchors"] = copy.deepcopy(payload.get("identity_anchors", []))
+    supplied_anchors = payload.get("identity_anchors", [])
+    if not isinstance(supplied_anchors, list):
+        raise ValueError("identity_anchors须为数组")
+    if patch:
+        existing_anchors = {anchor["id"]: copy.deepcopy(anchor) for anchor in data.get("identity_anchors", [])}
+        supplied_ids = [anchor.get("id") for anchor in supplied_anchors if isinstance(anchor, dict)]
+        if len(supplied_ids) != len(supplied_anchors) or any(not isinstance(aid, str) for aid in supplied_ids) or len(set(supplied_ids)) != len(supplied_ids):
+            raise ValueError("局部设计identity_anchors存在无效或重复ID")
+        existing_anchors.update({anchor["id"]: copy.deepcopy(anchor) for anchor in supplied_anchors})
+        result["identity_anchors"] = list(existing_anchors.values())
+    else:
+        result["identity_anchors"] = copy.deepcopy(supplied_anchors)
     anchors = identity_map(result)
     designs = {}
     for record in payload["designs"]:
@@ -780,6 +876,18 @@ def apply_design(data, payload, style_text):
             raise ValueError(f"重复资产设计：{aid}")
         designs[aid] = {key: copy.deepcopy(value) for key, value in record.items() if key != "asset_id"}
     expected = {item["id"] for category in ASSET_CATEGORIES for item in visual_assets(result, category)}
+    changed_ids = set(designs)
+    reused = {}
+    if patch:
+        if not changed_ids or not changed_ids.issubset(expected):
+            raise ValueError(f"局部design须指定至少一个现用图片资产；多余{sorted(changed_ids - expected)}")
+        for category in ASSET_CATEGORIES:
+            for item in visual_assets(result, category):
+                if item["id"] not in changed_ids:
+                    if not isinstance(item.get("visual_design"), dict):
+                        raise ValueError(f"{item['id']}没有可复用设计；请加入本次designs")
+                    reused[item["id"]] = copy.deepcopy(item)
+                    designs[item["id"]] = copy.deepcopy(item["visual_design"])
     if set(designs) != expected:
         raise ValueError(f"design须覆盖全部现用图片CHAR/SET/PROP，prompt_only群像不填设计；缺少{sorted(expected - set(designs))}，多余{sorted(set(designs) - expected)}")
     characters = {item["id"]: item for item in result["characters"]}
@@ -815,6 +923,16 @@ def apply_design(data, payload, style_text):
     for category in ASSET_CATEGORIES:
         for item in visual_assets(result, category):
             design = item["visual_design"]
+            if item["id"] in reused:
+                old = reused[item["id"]]
+                prompt, form = compile_prompt(result, category, item, design, anchors)
+                if (old.get("image_design_digest") != fingerprint(design)
+                        or design.get("source_fact_digest") != fingerprint(source_constraints(result, category, item))
+                        or design.get("source_context_digest") != source_context_digest(result, category, item)
+                        or old.get("image_prompt") != prompt or old.get("image_format") != form):
+                    raise ValueError(f"{item['id']}复用设计的事实、上下文、身份或共享资产依赖已变化；请审阅并加入本次designs")
+                # Keep the original record and hashes; never bless stale inputs.
+                continue
             design["source_fact_digest"] = fingerprint(source_constraints(result, category, item))
             design["source_context_digest"] = source_context_digest(result, category, item)
             item["image_design_digest"] = fingerprint(design)

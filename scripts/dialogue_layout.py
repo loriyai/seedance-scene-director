@@ -199,11 +199,11 @@ def validate(unit):
             require(shot['start'] <= t0 < shot['end'], '完整台词必须写在实际开始发声的镜头')
             if local:
                 require(t1 <= shot['end']+.001, '台词片段必须完整落在本镜；长句按标点和语义分句，或重排切点')
-            if t1-t0 <= 5+.001:
+            if t1-t0 <= 6+.001:
                 require(t1 <= shot['end']+.001, '可在单镜说完的短句必须完整落在一镜；调整切点或发声起点')
             if len(parts) == 1:
                 low = {'常速':4.0,'快节奏':4.5,'情绪慢速':3.3}[event['speed']]
-                if event['units']/low + event['pause'] <= 5+.001:
+                if event['units']/low + event['pause'] <= 6+.001:
                     require(t1 <= shot['end']+.001, '不能把自然短句拉长后跨镜；应重排镜头')
             for j, following in enumerate(unit['shots']):
                 if j > i and following['start'] < t1:

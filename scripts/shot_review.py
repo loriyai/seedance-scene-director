@@ -94,7 +94,12 @@ def targets(state, request):
             cues = []
             camera = shot.get('camera', '')
             if '固定' in camera:
-                cues.append('固定镜头：核对原有动作或保持的用途、信息读清所需时长和切点；不要求补运镜。')
+                if (unit.get('review_dependencies', {}).get('policy') == 'shot-dependencies-v2'
+                        and type(shot.get('start')) is int and type(shot.get('end')) is int
+                        and 4 <= shot['end'] - shot['start'] <= 6):
+                    cues.append('4至6秒镜头含固定描述：核对是否仅为实际运镜后的短暂稳定落点；整镜固定不合格，须有服务观看重点的相机位移或转向，移焦与主体动作不算。')
+                else:
+                    cues.append('固定镜头：核对原有动作或保持的用途、信息读清所需时长和切点；不要求补运镜。')
             if any(text in camera for text in ('移', '推', '拉', '跟', '升', '降', '摇', '环绕')):
                 cues.append('运动镜头：核对起止取景、途中可见性、遮挡和落点；不只检查起始构图。')
             views = shot.get('continuity', {}).get('visibility', {})
@@ -108,7 +113,9 @@ def targets(state, request):
                            'shot': copy.deepcopy(shot), 'review_cues': cues,
                            'status': 'pending', 'basis': ''})
             if 'review_dependencies' in unit:
-                result[-1]['dependency_declaration'] = copy.deepcopy(unit['review_dependencies'])
+                from shot_dependencies import target_declaration
+                result[-1]['dependency_declaration'] = target_declaration(
+                    unit, shot.get('review_id'), request.get('units', []))
             for change in changes:
                 item = current.get(change['entity'])
                 if item is None:

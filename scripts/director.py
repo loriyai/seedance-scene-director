@@ -21,6 +21,8 @@ import continuity
 import batch_naming
 import audio_sources
 HEADER_SHA = "8001822afdf324cbbfa3eb284b2a03ccbde084b2e70fa66763a26b5c738e5962"
+HEADER_POLICY = "visual-only-v2"
+VISUAL_HEADER_SHA = "cd5eb2c7a9c50b6d6962bf8fe00ae53cb32b1f36e4d050a83d2e3508e4fdf7a6"
 STYLES = {"1": "3D国风动漫,暗黑武侠/超写实仙侠风格", "2": "3D国风动漫，眷思量风格，东方奇幻唯美风格"}
 SPEEDS = {"常速": (4.0, 5.2), "快节奏": (4.5, 5.8), "情绪慢速": (3.3, 4.4)}
 FRAMINGS = {"大远景", "大全景", "远景", "全景", "中景", "中近景", "近景", "特写"}
@@ -70,6 +72,14 @@ def photography_warnings(state, entries, boundary_only=False):
         if not isinstance(shot.get("focus"), list) or not isinstance(shot.get("camera"), str) or not shot["camera"].strip():
             return None
         return (shot.get("framing"), tuple(sorted(shot["focus"])), shot.get("angle"), compact(shot["camera"]))
+
+    if not boundary_only:
+        long_shots = [item for item in entries if type(item[2].get("start")) is int
+                      and type(item[2].get("end")) is int
+                      and 4 <= item[2]["end"] - item[2]["start"] <= 6]
+        if long_shots:
+            emit("4至6秒实际运镜需审查", long_shots,
+                 "所列各镜必须有服务观看重点的相机位置或朝向变化；结合时码核对camera中的实际路径、起止取景和purpose。仅移焦、主体运动或‘运镜丝滑’不算运镜；运动后可短暂稳定，不能整镜固定。同轮逐镜实读确认所列范围，可合并处置，不另加逐镜证明；程序不按关键词判定通过，未满足则修订。")
 
     for index, (_, number, shot) in enumerate(entries):
         face = face_focus(shot, characters)
@@ -500,9 +510,13 @@ def milliseconds(value):
     return int(number)
 
 
-def fixed_header():
-    text = (ROOT / "assets" / "fixed-header.txt").read_text(encoding="utf-8-sig").strip()
-    require(sha(text) == HEADER_SHA, "固定抬头被修改；请恢复原样常量")
+def fixed_header(policy=None):
+    # Unmarked stored units retain their original header on every re-export.
+    require(policy in (None, HEADER_POLICY), "未知的固定抬头版本")
+    filename, expected = (("fixed-header-visual-v2.txt", VISUAL_HEADER_SHA)
+                          if policy == HEADER_POLICY else ("fixed-header.txt", HEADER_SHA))
+    text = (ROOT / "assets" / filename).read_text(encoding="utf-8-sig").strip()
+    require(sha(text) == expected, "固定抬头被修改；请恢复对应版本常量")
     return text.splitlines()
 
 
@@ -586,6 +600,8 @@ def resolved_request(state, request):
 
 
 def validate_unit(state, unit, request_span, *, require_continuity=False):
+    from shot_dependencies import validate_unit as validate_dependencies
+    validate_dependencies(unit)
     require(unit.get("output_format") == OUTPUT_FORMAT, "新生成/修改单元须采用reference-v3输出模板；旧交付仅保留读取和渲染")
     a, b = interval(unit["span"], state["length"])
     duration = unit["duration"]
@@ -640,7 +656,7 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
     cursor, closeups, used_chars, used_props = 0, 0, set(), set()
     for i, shot in enumerate(shots):
         start, end = shot["start"], shot["end"]
-        require(type(start) is int and type(end) is int and start == cursor and 1 <= end - start <= 5, "镜头时间轴不连续或单镜不在1～5秒")
+        require(type(start) is int and type(end) is int and start == cursor and 1 <= end - start <= 6, "镜头时间轴不连续或单镜不在1～6秒")
         framing = shot["framing"]
         require(framing in FRAMINGS, "无法识别景别")
         closeups += framing == "特写"
@@ -759,7 +775,8 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
                       "source_pause_seconds": source_pause, "registered_pause_seconds": pause / 1000}}
         else:
             in_band = low <= rate <= high
-        if not in_band:
+        if not in_band and not (unit.get('workflow_policy') == 'scene-review-b-v2'
+                                and event.get('timing_basis', 'text_estimate') == 'text_estimate'):
             warnings.append({"record": record["id"], "kind": "估计净语速超档", "rate": round(rate, 3), **timing})
     require(used_record_ids == list(expected), "台词事件顺序与标准剧本不同")
     require(set(unit["character_ids"]) == used_chars | voice_ids, "人物名单存在未出镜/未发声角色，或遗漏主体")
@@ -781,8 +798,11 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
         require(collapsed == list(expected), "镜头台词片段顺序与标准剧本不一致")
     if unit.get("dialogue_layout") == dialogue_layout.POLICY:
         dialogue_layout.validate(unit)
-        from speech_timing_audit import audit as audit_fragment_timing
-        warnings.extend(audit_fragment_timing(unit))
+        # V2 uses the same exact fragment diagnostics before and after filming
+        # choices; do not ask for a second verdict under a legacy warning name.
+        if unit.get('workflow_policy') != 'scene-review-b-v2':
+            from speech_timing_audit import audit as audit_fragment_timing
+            warnings.extend(audit_fragment_timing(unit))
         warnings.extend(dialogue_layout.voice_warnings(unit))
     key = unit.get("id", "当前单元")
     warnings.extend(photography_warnings(state, [(key, i + 1, shot) for i, shot in enumerate(shots)]))
@@ -801,7 +821,8 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
     if unit.get('workflow_policy') == 'scene-review-b-v2':
         from authoring_gates import validate_staging
         validate_staging(state, unit)
-    return warnings
+    from shot_dependencies import scope_warning
+    return [scope_warning(warning, [unit], local_index=0) for warning in warnings]
 
 
 def require_workflow(request):
@@ -814,7 +835,7 @@ def require_workflow(request):
 
 
 def validate(state, request, partial=False):
-    fixed_header()
+    fixed_header(HEADER_POLICY)
     require(state["style_hash"], "尚未选择并保存视频风格")
     require(request.get("mode") in ("append", "replace"), "mode须为append或replace")
     require(isinstance(request.get("request_id"), str) and request["request_id"].strip(), "缺少幂等request_id")
@@ -827,8 +848,10 @@ def validate(state, request, partial=False):
                     "新生成/修改的有声单元须采用semantic-v2台词布局；旧交付仅保留读取和渲染")
     request = resolved_request(state, request)
     units = request["units"]
+    from shot_dependencies import validate_request as validate_dependencies, scope_warning
+    validate_dependencies(request)
     from storyboard_preflight import validate as validate_preflight
-    warnings = validate_preflight(state, request)
+    warnings = [scope_warning(warning, units) for warning in validate_preflight(state, request)]
     if request["mode"] == "append":
         a, b = interval(request["span"], state["length"])
         review = range_review(state, [a, b])
@@ -867,7 +890,8 @@ def validate(state, request, partial=False):
                          "total_shots": total, "percent": round(special * 100 / total, 3), "review_reference_percent": 15,
                          "review": "15%仅为诊断参考，不限制提交；低于参考线也不代表摄影质量合格，仍审查看点、空间与面部重复。"})
     warnings.extend(boundary_photography_warnings(state, prospective))
-    return warnings
+    from shot_dependencies import scope_warning
+    return [scope_warning(warning, prospective) for warning in warnings]
 
 
 def render_unit(state, unit, reference_text=None):
@@ -877,7 +901,7 @@ def render_unit(state, unit, reference_text=None):
     relevant = set(unit["character_ids"] + scene_asset_ids(state, unit["scene_ids"]))
     relevant.update(pid for scene in state["ledger"]["scenes"] if scene["id"] in unit["scene_ids"] for pid in scene["prop_ids"])
     catalog = reference_catalog(state, relevant)
-    header = fixed_header()
+    header = fixed_header(unit.get("header_policy"))
     structured_format = unit.get("output_format") == OUTPUT_FORMAT
     current_format = unit.get("output_format") in ("reference-v2", OUTPUT_FORMAT)
     reference_format = unit.get("output_format") in ("reference-v1", "reference-v2", OUTPUT_FORMAT)
@@ -1042,6 +1066,7 @@ def commit(args, state):
         for index, unit in enumerate(units, 1):
             unit["style"] = style
             unit["black_reference_mode"] = BLACK_REFERENCE_MODE
+            unit["header_policy"] = HEADER_POLICY
             if request["mode"] == "append":
                 main = unit["main_scene"]
                 number = working["next_numbers"].get(main, 1)

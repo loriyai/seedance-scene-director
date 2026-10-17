@@ -90,7 +90,7 @@ python scripts/asset_ledger.py review-verify <standard-script.txt> <source.json>
   "characters": [
     {
       "id": "CHAR0001",
-      "name": "卢筱筱-基础形象",
+      "name": "角色甲-基础形象",
       "aliases": [],
       "visual_facts": [],
       "personality_facts": []
@@ -115,15 +115,15 @@ python scripts/asset_ledger.py review-verify <standard-script.txt> <source.json>
 }
 ```
 
-`init` 只建立场次、人物和待核地点索引，scene_assets为空且scene_asset_id为null，不自动提取资产事实或主要道具。地点按场景先分配独立 ID，核实是同一地点后再合并；明确姓名的角色只按完整人物条目初步归并。`卢筱筱-基础形象` 与 `卢筱筱-黑色裙子` 分别建立稳定 ID；同一完整条目在多场出现且身份明确时复用 ID。泛称有台词角色先按身份核实；群像草稿直接加地点后缀，在地点核实后normalize按同地点同原条目/形象归并候选，再审阅图片筛选，不逐SC建图。群像只用于无姓名、无台词且原文明示阵营、身份、人设或职业的背景人物。新init的群像暂记visual_mode="prompt_only"但未完成审阅，不能直接交付；最终模式须依据全剧证据确认。若相同条目指向不同实体，拆成不同 ID，并用逐场关联指向各自实体。新 ID 只追加，废弃的 ID 放入 `retired_ids`，不回收。场景的 `number`、`heading` 可随剧本修改；`id` 保持稳定。
+`init` 只建立场次、人物和待核地点索引，scene_assets为空且scene_asset_id为null，不自动提取资产事实或主要道具。地点按场景先分配独立 ID，核实是同一地点后再合并；明确姓名的角色只按完整人物条目初步归并。`角色甲-基础形象` 与 `角色甲-黑色裙子` 分别建立稳定 ID；同一完整条目在多场出现且身份明确时复用 ID。泛称有台词角色先按身份核实；群像草稿直接加地点后缀，在地点核实后normalize按同地点同原条目/形象归并候选，再审阅图片筛选，不逐SC建图。群像只用于无姓名、无台词且原文明示阵营、身份、人设或职业的背景人物。新init的群像暂记visual_mode="prompt_only"但未完成审阅，不能直接交付；最终模式须依据全剧证据确认。若相同条目指向不同实体，拆成不同 ID，并用逐场关联指向各自实体。新 ID 只追加，废弃的 ID 放入 `retired_ids`，不回收。场景的 `number`、`heading` 可随剧本修改；`id` 保持稳定。
 
-原文用词与制作名称分开：人物source_entry对应人物行完整条目，未填则兼容以name匹配；人物name是唯一制作名称，今生省略“今生”段，如“卢筱筱-基础形象”；前世、明确第几世、不同身份、服装/年龄版本及必要地点限定仍保留。appearance.incarnation、identity、source_entry和来源证据不删；不能按戏份多少猜同一人物或合并不同世次。normalize仅在新未绑定台账中移除姓名后独立“今生”段，保留ID，重名时报错并要求按真实身份消歧，不自动合并。已有绑定台账不迁移；场景 `heading` 对应完整标题；地点主名称对应至少一个关联场景标题中的地点字样，其他已确认同一地点的标题字样可放入 `aliases`；道具source_name须原样出现在至少一个关联场景正文，每场出现source_name或aliases；未填兼容以name匹配。name用于唯一图片引用，可使用有依据的版本限定，例如“惊堂木-京城茶馆”；不把制作名写进原台词，不把剧情说明当外形事实。
+原文用词与制作名称分开：人物source_entry对应人物行完整条目，未填则兼容以name匹配；人物name是唯一制作名称，今生省略“今生”段，如“角色甲-基础形象”；前世、明确第几世、不同身份、服装/年龄版本及必要地点限定仍保留。appearance.incarnation、identity、source_entry和来源证据不删；不能按戏份多少猜同一人物或合并不同世次。normalize仅在新未绑定台账中移除姓名后独立“今生”段，保留ID，重名时报错并要求按真实身份消歧，不自动合并。已有绑定台账不迁移；场景 `heading` 对应完整标题；地点主名称对应至少一个关联场景标题中的地点字样，其他已确认同一地点的标题字样可放入 `aliases`；道具source_name须原样出现在至少一个关联场景正文，每场出现source_name或aliases；未填兼容以name匹配。name用于唯一图片引用，可使用有依据的版本限定，例如“惊堂木-京城茶馆”；不把制作名写进原台词，不把剧情说明当外形事实。
 
 新项目heading统一为 `场景X-日/夜-内/外-地点`，例如 `场景1-日-内-昏暗房间`，实际名称不含选项斜杠，并通过文件名字符检查。读取兼容旧项目的冒号与间隔点标题，保持绑定剧本与台账场次标题一致；图片文件名使用scene_assets的name，不自动迁移旧项目。
 
 `time_basis.kind` 只能是 `原文明示` 或 `格式默认`。前者的 `source_paragraphs` 必须列出该场原文明示时间的段落；后者须为空数组。标题中默认写 `日` 不代表原文明确是白天。脚本生成的待核值不能直接通过 `render`。
 
-每条 `visual_facts` 或 `personality_facts` 采用以下结构。`text` 是简短事实，`evidence` 是原文中的连续原句或词组；证据跨段时，可引用各段共有的短词组，或拆成多条事实。`source_paragraphs` 使用 `prepare` 生成的原文段落编号，不能重复或引用关联场景之外的段落。`scene_ids` 只列证据所在场景，程序分别验证每场所引连续段落包含该证据，不跨场景或跨段落缺口拼接证据；此字段不表示该特征在未明示的后续场景仍持续。
+每条 `visual_facts` 或 `personality_facts` 采用以下结构。`text` 是针对当前资产本体的简短事实，`evidence` 是原文中的连续原句或词组；证据跨段时，可引用各段共有的短词组，或拆成多条事实。`source_paragraphs` 使用 `prepare` 生成的原文段落编号，不能重复或引用关联场景之外的段落。`scene_ids` 只列证据所在场景，程序分别验证每场所引连续段落包含该证据，不跨场景或跨段落缺口拼接证据；此字段不表示该特征在未明示的后续场景仍持续。
 
 ```json
 {
@@ -134,6 +134,8 @@ python scripts/asset_ledger.py review-verify <standard-script.txt> <source.json>
   "attribution": "叙述"
 }
 ```
+
+个体CHAR和单件PROP的`visual_facts.text`不写同场人数、其他人物、共同动作、站位或剧情过程；多人共用原句时，只提取对当前人物或物件成立的外观/佩戴状态，原句仍逐字保留在`evidence`，完整共同事件放在正文、`visible_uses`或形象切换轨迹。个体佩戴形象仅描述该人物的佩戴状态及实际可见范围；关联PROP仅描述物件本体的形制和遮挡特征。关联PROP或基础CHAR将被继承的事实摘要也遵守此边界，不能让多人叙述经继承进入单角色图片提示词。群像、发声集合和显式多实体组合仍按各自规则处理。
 
 人物性格只填原文直接命名的稳定特点。出自人物自述或他人评价时，`attribution` 填实际说话人并在 `text` 中写成“某人自述／某人认为……”，不把评价升级成客观结论。仅有一次温柔语气、一次发怒或某个行动时，`personality_facts` 保持空数组。性格也不写入剧本人物行的“形象”。
 
@@ -331,7 +333,7 @@ groups须覆盖归并后全部群像CHAR，不填非群像；--source必需且�
 
 ## 同一人物的佩戴形象与同场切换
 
-遮面显著改变头部轮廓、身份辨识或跨镜外观，或者承担戴上/摘下情节时，审阅后可建立独立佩戴图片CHAR。不会因出现“口罩”一词就自动建图，不设至少两次出场门槛；始终属于固定制服且无需区分佩戴前后的形象，可直接纳入已有造型设计。命名保留原身份、世次及服装限定，例如`阿明-白衬衫-戴猪猪头套`；分类TXT显示为`角色02 - 阿明-白衬衫-戴猪猪头套`，展示序号不进入name。
+遮面显著改变头部轮廓、身份辨识或跨镜外观，或者承担戴上/摘下情节时，审阅后可建立独立佩戴图片CHAR。不会因出现“口罩”一词就自动建图，不设至少两次出场门槛；始终属于固定制服且无需区分佩戴前后的形象，可直接纳入已有造型设计。命名保留原身份、世次及服装限定，例如`阿明-白衬衫-戴面具`；分类TXT显示为`角色02 - 阿明-白衬衫-戴面具`，展示序号不进入name。
 
 仅显式执行以下命令启用`character_variant_policy: source-masked-v1`，旧台账及已交付回执不自动迁移。输入是作者审阅的完整JSON快照，输出新的待设计台账；保留已有设计供复核，须重新design及明确重绑定后用于新分镜，不改标准剧本、原人物行或既有画布。
 
@@ -345,14 +347,14 @@ python scripts/asset_ledger.py variants <standard-script.txt> <source.json> <led
   "source_digest": "当前原文摘要",
   "reviewed": true,
   "variants": [
-    {"id": "CHAR0002", "base_asset_id": "CHAR0001", "name": "阿明-白衬衫-戴猪猪头套", "label": "戴猪猪头套", "kind": "headgear", "design_basis": "完整遮头轮廓跨镜使用，需固定佩戴后的整体外观"}
+    {"id": "CHAR0002", "base_asset_id": "CHAR0001", "name": "阿明-白衬衫-戴面具", "label": "戴面具", "kind": "headgear", "design_basis": "完整遮头轮廓跨镜使用，需固定佩戴后的整体外观"}
   ],
   "scene_appearances": [
     {"scene_id": "SC0001", "base_asset_id": "CHAR0001", "initial_asset_id": "CHAR0001",
      "initial_evidence": {"source_paragraphs": [1], "evidence": "阿明未戴头套站在门口。", "basis": "原文明示未戴状态"},
      "transitions": [
-       {"event_id": "wear", "from_asset_id": "CHAR0001", "to_asset_id": "CHAR0002", "source_paragraphs": [2], "evidence": "阿明戴上猪猪头套。", "basis": "本次戴上"},
-       {"event_id": "remove", "from_asset_id": "CHAR0002", "to_asset_id": "CHAR0001", "source_paragraphs": [3], "evidence": "阿明摘下猪猪头套。", "basis": "本次摘下"}
+       {"event_id": "wear", "from_asset_id": "CHAR0001", "to_asset_id": "CHAR0002", "source_paragraphs": [2], "evidence": "阿明戴上面具。", "basis": "本次戴上"},
+       {"event_id": "remove", "from_asset_id": "CHAR0002", "to_asset_id": "CHAR0001", "source_paragraphs": [3], "evidence": "阿明摘下面具。", "basis": "本次摘下"}
      ]}
   ]
 }
@@ -372,7 +374,7 @@ python scripts/asset_ledger.py variants <standard-script.txt> <source.json> <led
 
 ## 移动载体与地点映射
 
-现有schema 3每个SC仍绑定一个主要叙事LOC及其SET，不新增一SC多地点或第二张车内图协议。连续“酒吧门口看车→上车→启动”可用同一SC：heading地点为酒吧门口，location_id指向酒吧门口LOC，scene_asset_id指向其SET，prop_ids包含已审车辆PROP；车门、座椅和方向盘关系放该PROP的structure/scale。车内外动作及人物出场完整保留。
+现有schema 3每个SC仍绑定一个主要叙事LOC及其SET，不新增一SC多地点或第二张车内图协议。同一主要叙事地点的连续事件沿用所属SC，其heading、location_id和scene_asset_id保持经审阅的地点与布景关联，prop_ids按实际使用引用已审载体PROP；载体内部结构关系写入该PROP的structure/scale。取景位置、动作及人物出场完整保留。
 
 连续行驶的路径与当前位置变化写入动作或连续性说明；场景标题优先保留原文明示的主要地点，遵循[地点称谓与移动过程](../INSTRUCTIONS.md#地点称谓与移动过程)，不为覆盖行驶范围自行拼接地名。LOC及SET的名称只沿用已审阅的地点称谓或有依据的必要消歧限定，不将移动过程登记为新地点或别名。若真正到达另一独立地点、发生实质转场则在那里拆分；不能为了少建场而把未证同一的路口、道路、金荣街写成同一LOC别名。持续在列车包厢等独立叙事空间发生的新段落可按原文建车厢SC/LOC/SET，车辆是否另需PROP按外观参考用途审阅，不是车辆一律只能当PROP。
 
@@ -421,7 +423,31 @@ v2佩戴图的visual_design除covering外还须visible_identity，具体说明�
 
 style-file使用项目原样保存的单行video-style.txt；只去除文件首尾空白，不折叠内部空格、不重新翻译或缩写。新未设计台账使用image_design_version="gpt-image-2-v2"；既有v1按原编译行为读取，只有设计JSON显式选择v2才升级，不能安装新版后使旧摘要失效。每个现用资产保存visual_design、image_prompt、image_format、image_design_digest，visual_design自动记录source_fact_digest及source_context_digest。新版按[资产图片设计规范](../../../references/asset-image-design.md)区分个体、图片群像和佩戴造型：普通个体保持16:9白底面部特写加三视图；群像用16:9白底多名外貌可辨人物、每人一次完整正面全身，衣着遵守时代地区与身份/服制；佩戴造型所有视图保持真实覆盖，不为展示五官摘除面罩。visual_design.covering具体说明头套/面罩形制、色材及覆盖范围；appearance_variant自动继承基础身份锚点及服装，拒绝借此更换人物外观或服装。SET和PROP仍为单幅主视图/完整单品版式，不伪造模型API参数或已生成图片。群像样本人数只服务外观参考，不确定剧情人数、队形或场面动作。
 
-编译将原文明示可见特征作为优先约束，结合既定风格、已写设计和分类构图，不把审计出处或“无外观事实”等说明塞入生图提示词。render再次确定性编译并核对保存的提示词、版式、设计摘要、事实完整证据及场次映射摘要。source_context_digest同时包含台账顶层source_digest：制作设计可能依赖全剧上下文，因此任意原文版本变更均保守地要求重新审阅设计，即使heading、range、visual_facts保持不变也不能沿用旧提示词。改原文、事实、证据、适用映射、设计或审阅依据、名称、风格后须审阅并显式重新design，不能只手改image_prompt；改稿迁移保留旧设计并登记制作设计待复核。旧无设计台账不受此检查影响。设计命令输出不同的新文件，不覆盖旧台账或旧TXT。重新design可读取旧设计台账，按当前事实结构核实后重编译全部完整方案。
+编译将原文明示可见特征作为优先约束，结合既定风格、已写设计和分类构图，不把审计出处或“无外观事实”等说明塞入生图提示词。render再次确定性编译并核对保存的提示词、版式、设计摘要、事实完整证据及场次映射摘要。未声明局部依赖的设计继续把台账顶层source_digest纳入source_context_digest，保留既有全剧保守策略。明确声明的局部依赖按下节逐场绑定，不能自动推定或迁移旧设计。变化事实、设计或依赖须审阅并显式design，不能只手改image_prompt；迁移保留旧设计，design_status逐项列出可复用与待审ID。旧无设计台账不受此检查影响。设计命令输出不同的新文件，不覆盖旧台账或旧TXT。
+
+### 设计依赖与局部更新
+
+在作者已核实设计上下文边界时，每条作者设计可选填：
+
+```json
+"source_scope": {
+  "kind": "scenes",
+  "scene_ids": ["SC0001", "SC0004"],
+  "basis": "这两个出现场次包含该形象全部时代、身份、服装与动作适配依据；其他场次没有额外设计约束"
+}
+```
+
+这是一条需要真实审阅的作者声明，不能根据资产出场列表自动填套话。scene_ids必须包含该资产全部出现场次，并加入未出场但提供时代、地区、身份或关系设计依据的场次；无法封闭依赖时不填，或用`{"kind":"global","basis":"具体全剧依赖说明"}`。旧设计不因安装新版而取得局部声明。程序能检查场次存在、无重复和出场覆盖，不能证明作者未漏掉跨场语义依赖。
+
+design命令从当前source.json计算`design_source_scene_digests`；只读验证核对它与实际原文，不允许手改摘要。局部设计绑定所列场次的原文内容、事实、关联及共享设计依赖，无关场次的来源摘要变化不再使它过期；仅段落偏移不改变证据原意，仍须通过当前出处验证。资产显示名、实际场次映射、图像模式、筛选理由、身份锚点、基础形象或共享遮挡PROP变化仍会触发对应验证，不能用局部声明逃避。共享身份或道具的编译结果改变时，其依赖者也必须加入本次审阅。
+
+完整初次设计保持原命令。已有设计的局部修订：
+
+```text
+python scripts/asset_ledger.py design <script.txt> <source.json> <current-ledger.json> <patch.json> --style-file <video-style.txt> --patch --output <new-ledger.json> --catalog-output <new-catalog.txt>
+```
+
+patch.json的`designs`只列变化资产；`identity_anchors`可省略，或只列变化锚点。未列设计必须仍通过其原始设计摘要、事实、上下文、身份与共享资产依赖、实际编译结果检查，原记录及摘要保留，不自动“刷新通过”。缺少新资产设计、过期未选项或遗漏共享依赖时报告具体ID，先补足审阅再重试；不重交无关项。换风格或设计版本仍用显式完整design，patch拒绝隐式全量切换。prop/group候选覆盖等前置审阅仍须通过；全剧可能出现新候选时复核候选范围，不等同于重新设计全部外观。
 
 ## 核对
 
@@ -457,7 +483,7 @@ python scripts/asset_migrate.py <old-ledger.json> <old-source.json> <new-script.
 
 ## 物理地点与布景版本
 
-scenes保留全部剧情场次及heading，不删场、不合并叙事；scene_assets存储真正要创建节点的布景资产。先结合原文的所属主体、建筑、楼层、具体空间核实LOC身份。别名和同名不等于同一物理空间；确认同一实体才合并LOC并重指场次，废弃LOC ID写入retired_ids。填写identity_status="confirmed"和非空identity_basis说明核实依据；无法确认保持pending，最终render及bind阻止通过。不同地点的泛称相同时，用有原文依据的所属主体或空间限定区分布景name，禁止编造地点。
+scenes保留按标准化规则确定的全部剧情场次及heading，不删减原文叙事；scene_assets存储真正要创建节点的布景资产。先按标准化规则确定主场归属，再结合原文的所属主体、建筑、楼层、具体空间核实LOC身份。同一主场内的车内外取景共用主场LOC/SET，不因车厢、车窗边或上下车另建LOC/SET。车辆内部不单独生成场景图片资产或场景节点；座椅、方向盘、车门窗及前后排关系归车辆道具的结构设计，当前取景、人物座次与动作归分镜。其他附属局部取景按同一原则核实，不能把每个拍摄位置都当成独立布景。别名和同名不等于同一物理空间；确认同一实体才合并LOC并重指场次，废弃LOC ID写入retired_ids。填写identity_status="confirmed"和非空identity_basis说明核实依据；无法确认保持pending，最终render及bind阻止通过。不同地点的泛称相同时，用有原文依据的所属主体或空间限定区分布景name，禁止编造地点。
 
 build-scenes是确定性索引脚本：先确认并合并LOC、登记时间层及原样基准，对新台账normalize消除逐场init产生的同名群像/道具候选，再调用build-scenes；该命令执行完整制作名称预检，不能带着未归并的重复CHAR名称进入。它按已确认LOC ID建立每个地点唯一的base SET，再依据人工审阅登记的时间层及原样基准建立或复用SET，填写各场scene_asset_id；不按名称字符串自动合并、不扫描全文猜测跳时、不提取或杜撰视觉事实。无时间层元数据的schema 3仍按既有base/decor规则处理；已有SET ID及有效关联保留，新增ID高于现用及废弃SET。旧SET关联与新时间层不一致时报告映射/绑定迁移需求，不静默覆盖。输出为新文件，再补充原文事实、完成群像筛选与美术设计并完整render校验。身份待核、重复基础布景、无效关联均阻止后续阶段。
 

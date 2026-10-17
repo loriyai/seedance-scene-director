@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import re
+import sys
 from pathlib import Path
 
 from dialogue_layout import estimate, pause_seconds, PUNCTUATION, TAILS
@@ -396,6 +397,41 @@ def lint_identity(state, unit):
     return _report(errors, warnings, candidates=candidates)
 
 
+def reference_closure(state, unit):
+    """Aggregate the existing final-render subject rule, without inferring cast.
+
+    Incomplete photography is reported as deferred, not manufactured to satisfy
+    this diagnostic. The final director validation remains authoritative.
+    """
+    from director import asset_text, PHOTOGRAPHY_FIELDS
+    errors, deferred = [], []
+    fields = ('text', *PHOTOGRAPHY_FIELDS)
+    for index, shot in enumerate(unit.get('shots', []), 1):
+        missing = [name for name in fields if not _line(shot.get(name))]
+        if missing or not isinstance(shot.get('subjects'), list):
+            deferred.append({'shot': index, 'missing_fields': missing +
+                             ([] if isinstance(shot.get('subjects'), list) else ['subjects'])})
+            continue
+        referenced = set(shot.get('focus', []))
+        for field in fields:
+            try:
+                _, found = asset_text(state, unit, shot[field])
+                referenced.update(found)
+            except (ValueError, KeyError, TypeError) as exc:
+                errors.append(_issue('RENDER_REFERENCE_INVALID', str(exc), shot=index,
+                                     field=f'shots[{index - 1}].{field}'))
+        absent = set(shot['subjects']) - referenced
+        if absent:
+            errors.append(_issue('RENDER_SUBJECT_REFERENCE_MISSING',
+                                 '非焦点主体须在正文或摄影字段中使用既有资产引用',
+                                 shot=index, field=f'shots[{index - 1}]', asset_ids=sorted(absent),
+                                 checked_fields=list(fields)))
+    result = _report(errors, [], deferred_shots=deferred)
+    if not errors and deferred:
+        result['status'] = 'incomplete'
+    return result
+
+
 def _source_audio(state, unit):
     """Check supplied source records without requiring a full photography draft."""
     errors = []
@@ -462,7 +498,8 @@ def preflight(state, request):
         try:
             audio = check_audio_plan(unit)
             identity = lint_identity(state, unit)
-            ue = audio["errors"] + identity["errors"] + _source_audio(state, unit)
+            references = reference_closure(state, unit)
+            ue = audio["errors"] + identity["errors"] + references['errors'] + _source_audio(state, unit)
         except (TypeError, ValueError, KeyError, AttributeError) as exc:
             errors.append(_issue("PREFLIGHT_SCHEMA", "前置数据结构不合法：" + str(exc), unit=key))
             units.append({"unit": key, "status": "failed"})
@@ -474,7 +511,8 @@ def preflight(state, request):
         uw = audio["warnings"] + identity["warnings"]
         errors.extend(dict(item, unit=key) for item in ue)
         warnings.extend(dict(item, unit=key) for item in uw)
-        units.append({"unit": key, "status": "failed" if ue else "passed", "audio": audio, "identity": identity, "readiness": readiness})
+        units.append({"unit": key, "status": "failed" if ue else "passed", "audio": audio,
+                      "identity": identity, "reference_closure": references, "readiness": readiness})
     return _report(errors, warnings, policy=POLICY, units=units)
 
 
@@ -490,6 +528,9 @@ def validate(state, request):
 
 
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--state", type=Path)

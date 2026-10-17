@@ -228,6 +228,53 @@ def validate_job(project, job):
               "任务来源、台账、风格或选中分镜已变化，请重新提交")
     if job["kind"] == "images":
         d.require(image_inventory(job["options"]["folder"]) == job["options"]["images"], "待上传图片已变化，请重新提交")
+    return session
+
+
+def file_stamp(path):
+    """Cheap change signal only; content hashes remain authoritative at boundaries."""
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+class JobInputGuard:
+    """Reuse unchanged local verification between full node/group boundary checks."""
+    def __init__(self, project, job):
+        self.project, self.job = Path(project), job
+        self.paths, self.stamps = [], None
+
+    def watched_paths(self):
+        session = self.job["session"]
+        paths = [self.project / "session.json", self.project / "video-style.txt"]
+        files = session.get("files", {})
+        paths.extend(Path(row["path"]) for row in files.values())
+        if "source" in files:
+            scenes = Path(files["source"]["path"]).parent / "scenes"
+            paths.extend([scenes, *scenes.glob("*.txt")])
+        if self.job["kind"] == "images":
+            folder = Path(self.job["options"]["folder"])
+            # Watching directories detects added/renamed files without rehashing
+            # the entire image library at every pause/CLI control check.
+            paths.append(folder)
+            paths.extend(path for path in folder.rglob("*") if path.is_dir()
+                         or path.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"))
+        return list(dict.fromkeys(paths))
+
+    def signature(self):
+        return {str(path): file_stamp(path) for path in self.paths}
+
+    def check(self, force=False):
+        if not force and self.stamps is not None and self.signature() == self.stamps:
+            return
+        self.paths = self.watched_paths()
+        before = self.signature()
+        validate_job(self.project, self.job)
+        after = self.signature()
+        d.require(before == after, "任务输入在校验期间变化；停止并按当前内容重新提交")
+        self.stamps = after
 
 
 def status(project):
@@ -456,16 +503,31 @@ def run_worker(project, runner=None):
                 state.update(status="running", started_at=time.time(), error=None)
                 d.write_json(state_file(project, job["job_id"]), state)
 
-            def check_control():
+            input_guard = JobInputGuard(project, job)
+            manifest_cache = {}
+
+            def check_control(force=False):
                 if c.read_state(project).get("binding") != binding:
                     c.fail("CANVAS_BINDING_CHANGED", "后台进程所持画布锁与当前绑定不同，请重新启动后台同步。")
                 if read(directory(project) / "control.json", {}).get("paused"):
                     raise PauseRequested()
-                if any(job["job_id"] in j.get("supersedes", []) for j in manifests(project)):
-                    raise Superseded()
-                validate_job(project, job)
+                for path in directory(project).glob("job-*.json"):
+                    if path.name.endswith(".state.json"):
+                        continue
+                    stamp = file_stamp(path)
+                    cached_stamp, cached = manifest_cache.get(path, (None, None))
+                    if cached is None or cached_stamp != stamp:
+                        cached = read(path)
+                        manifest_cache[path] = (stamp, cached)
+                    if job["job_id"] in cached.get("supersedes", []):
+                        raise Superseded()
+                input_guard.check(force=force)
+
+            check_control.boundary = lambda: check_control(force=True)
 
             def progress(value):
+                if value.get("stage") in ("verifying_node", "node_verified", "node_needs_attention"):
+                    check_control.boundary()
                 state.update(value)
                 state["status"] = "running"
                 state["updated_at"] = time.time()
@@ -504,6 +566,9 @@ def run_worker(project, runner=None):
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("enqueue", "start", "worker", "status", "pause", "resume", "image-choice", "recover-assets"))
     parser.add_argument("--project", type=Path, required=True)

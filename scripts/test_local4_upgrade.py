@@ -93,7 +93,12 @@ class FineReviewTests(unittest.TestCase):
             elif mode=='delete':shots.pop(1)
             else:shots[0],shots[1]=shots[1],shots[0]
             _,proof=self.run_change(new)
-            self.assertEqual(proof['stats']['reused_shots'],0)
+            pending=set(self.pending(proof))
+            self.assertTrue({f'3:{n+1}' for n in range(len(shots))} <= pending)
+            self.assertIn('2:3',pending)  # Actual incoming boundary changed.
+            self.assertNotIn('1:1',pending)
+            self.assertNotIn('5:2',pending)
+            self.assertGreater(proof['stats']['reused_shots'],0)
 
     def test_tampered_report_snapshot_and_missing_dependencies(self):
         bad=copy.deepcopy(self.review);bad['shot_reviews'][0]['basis']='被替换的虚构依据，不是原审阅记录。'
@@ -237,7 +242,9 @@ class StagingAndNamingTests(unittest.TestCase):
     def test_full_new_workflow_validation_requires_current_render_review(self):
         state=self.fixture.state;request=self.fixture.request()
         for u in request['units']:
-            u.update(style='3D国漫',workflow_policy=ag.POLICY)
+            u.update(style='3D国漫',workflow_policy=ag.POLICY,action_plan=[])
+            # This fixture tests staging after the silent action plan is ready.
+            approve_fictional_audio(state,u,'虚构样例中站起看窗按原文呈现，没有对白或额外需要登记的动作时间窗。')
         d.require_workflow(request)
         with self.assertRaisesRegex(ValueError,'冻结前'):d.validate(state,request)
         for u in request['units']:

@@ -21,6 +21,26 @@ POLICY = 'scene-review-conservative-v1'
 VERSION = 1
 GENERIC_BASES = {'通过', '已检查', '同前', '同上', '字段完整', '构图合理', '符合要求'}
 ASSET_ID = re.compile(r'^(?:CHAR|PROP|SET|LOC|SC)\d+$')
+# This is the semantic/render/validation domain for storyboard review. Queue,
+# login, recovery, agent routing and unrelated runtime maintenance are not
+# creative-rule changes. Add new semantic dependencies here when introduced.
+RULE_FILES = (
+    'SKILL.md', 'assets/fixed-header.txt', 'assets/fixed-header-visual-v2.txt',
+    'scripts/director.py', 'scripts/batch_naming.py',
+    'scripts/review_gate.py', 'scripts/scene_review.py',
+    'scripts/shot_review.py', 'scripts/shot_dependencies.py',
+    'scripts/authoring_gates.py', 'scripts/storyboard_preflight.py',
+    'scripts/staging_preflight.py', 'scripts/continuity.py',
+    'scripts/dialogue_layout.py', 'scripts/speech_timing_audit.py',
+    'scripts/prop_reference_review.py', 'scripts/group_reference_review.py',
+    'references/storyboard-authoring.md', 'references/scene-review-workflow.md',
+    'references/cinematic-rules.md', 'references/continuity-state.md',
+    'references/performance-direction.md', 'references/shot-options.md',
+    'references/output-format.md', 'references/runtime.md',
+    'references/intake-assets.md', 'references/asset-image-design.md',
+    'modules/screenplay-standardizer/references/asset-ledger.md',
+    'modules/screenplay-standardizer/scripts/character_variants.py',
+)
 
 
 def digest(value):
@@ -35,13 +55,10 @@ def require(condition, message):
 def rules_digest():
     """Bind reuse to actual installed validation and authoring rules."""
     root = Path(__file__).resolve().parent.parent
-    paths = [root / 'SKILL.md']
-    paths.extend((root / 'scripts').glob('*.py'))
-    paths.extend((root / 'references').rglob('*.md'))
-    return digest({str(path.relative_to(root)).replace('\\', '/'):
-                   hashlib.sha256(path.read_bytes()).hexdigest()
-                   for path in sorted(paths) if path.is_file()
-                   and not path.name.startswith('test_')})
+    missing = [name for name in RULE_FILES if not (root / name).is_file()]
+    require(not missing, '分镜复核规则文件缺失：' + '、'.join(missing))
+    return digest({name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+                   for name in RULE_FILES})
 
 
 def source_binding(state):
@@ -77,6 +94,15 @@ def freeze(state, request, warnings=None, *, partial=False, require_workflow=Fal
     immediately after director.validate succeeds with the recorded partial flag
     (and require_workflow succeeds when requested), as the CLI does below.
     """
+    # Historical v1 snapshots may contain declarations that required a
+    # conservative fallback. New v2/unknown declarations must not acquire that
+    # fallback as a way to bypass their explicit structural contract.
+    from shot_dependencies import POLICY as LEGACY_DEPENDENCIES, validate_request as validate_dependencies
+    if any('review_dependencies' in unit and
+           (not isinstance(unit['review_dependencies'], dict) or
+            unit['review_dependencies'].get('policy') != LEGACY_DEPENDENCIES)
+           for unit in request.get('units', [])):
+        validate_dependencies(request)
     warnings = [] if warnings is None else warnings
     snapshot = {'policy': POLICY, 'version': VERSION,
                 'scope_scene_ids': sorted({sid for u in request.get('units', [])
@@ -254,6 +280,7 @@ def _ledger_dependencies(state, unit):
             for item in values:
                 if isinstance(item, dict) and isinstance(item.get('id'), str):
                     catalog[item['id']] = {'category': category, 'value': item}
+    unit = _review_input(unit)
     needed = _ids(unit) | _catalog_ids(unit, catalog)
     remaining = list(needed)
     while remaining:
@@ -314,38 +341,104 @@ def _trusted_resets(old, new, report, old_targets):
     return result
 
 
-def _external_connections(state, request, index):
-    """Include committed source neighbours when the frozen range omits them."""
-    units = request.get('units', [])
-    unit = units[index]
-    stored = state.get('units', [])
-    return {'previous': [u for u in stored if u.get('span', [None, None])[1] == unit['span'][0]]
-            if index == 0 else [],
-            'next': [u for u in stored if u.get('span', [None, None])[0] == unit['span'][1]]
-            if index == len(units) - 1 else []}
+def _review_input(unit):
+    """Writer review notes are evidence about content, not new creative input."""
+    return {key: copy.deepcopy(value) for key, value in unit.items()
+            if key not in ('staging_review', 'audio_preflight')}
 
 
-def _dependencies(snapshot, index, resets):
+def _connections(state, request):
+    """Resolve real source neighbours, including gaps in a replacement request.
+
+    A stable predecessor disambiguates multiple renditions of the same source.
+    Otherwise all candidates remain dependencies and ambiguity blocks reuse.
+    Array proximity is never evidence of a narrative connection.
+    """
+    selected, stored = request.get('units', []), state.get('units', [])
+    stored_ids = {u.get('id') for u in stored if u.get('id')}
+    saved_by_id = {}
+    for unit in stored:
+        saved_by_id.setdefault(unit.get('id'), []).append(unit)
+    replacement_ids, effective = set(), []
+    for index, unit in enumerate(selected):
+        stable_id = unit.get('id')
+        if request.get('mode') == 'replace' and stable_id not in stored_ids:
+            # The validator supports display names/short names as well as IDs.
+            from director import resolve_unit_id
+            stable_id = resolve_unit_id(state, stable_id)
+        if request.get('mode') == 'replace':
+            replacement_ids.add(stable_id)
+        saved = saved_by_id.get(stable_id, [])
+        predecessor = (saved[0].get('predecessor') if request.get('mode') == 'replace'
+                       and len(saved) == 1 else unit.get('predecessor'))
+        effective.append({'kind': 'selected', 'index': index, 'unit': unit,
+                          'id': stable_id, 'predecessor': predecessor})
+    effective.extend({'kind': 'stored', 'index': index, 'unit': unit,
+                      'id': unit.get('id'), 'predecessor': unit.get('predecessor')}
+                     for index, unit in enumerate(stored) if unit.get('id') not in replacement_ids)
+    result = [{'previous_selected': [], 'next_selected': [],
+               'previous_external': [], 'next_external': [], 'ambiguous': False}
+              for unit in selected]
+    by_end = {}
+    for position, unit in enumerate(effective):
+        by_end.setdefault(unit['unit'].get('span', [None, None])[1], []).append((position, unit))
+    for position, later in enumerate(effective):
+        span = later['unit'].get('span', [None, None])
+        candidates = [earlier for n, earlier in by_end.get(span[0], []) if n != position]
+        explicit = [u for u in candidates if later['predecessor'] is not None
+                    and u['id'] == later['predecessor']]
+        if len(explicit) == 1:
+            candidates = explicit
+        ambiguous = len(candidates) > 1
+        if later['kind'] == 'selected' and ambiguous:
+            result[later['index']]['ambiguous'] = True
+        for earlier in candidates:
+            if later['kind'] == 'selected':
+                field = 'previous_selected' if earlier['kind'] == 'selected' else 'previous_external'
+                value = earlier['index'] if earlier['kind'] == 'selected' else _review_input(earlier['unit'])
+                result[later['index']][field].append(value)
+            if earlier['kind'] == 'selected':
+                field = 'next_selected' if later['kind'] == 'selected' else 'next_external'
+                value = later['index'] if later['kind'] == 'selected' else _review_input(later['unit'])
+                result[earlier['index']][field].append(value)
+                result[earlier['index']]['ambiguous'] |= ambiguous
+    return result
+
+
+def _external_connections(state, request, index, connections=None):
+    item = (connections or _connections(state, request))[index]
+    return {'previous': item['previous_external'], 'next': item['next_external'],
+            'ambiguous': item['ambiguous']}
+
+
+def _dependencies(snapshot, index, resets, connections=None):
     state, request = snapshot['state'], snapshot['request']
     units = request['units']
     unit = units[index]
+    connections = connections or _connections(state, request)
     return {'rules_sha256': snapshot['rules_sha256'], 'source_sha256': snapshot['source_sha256'],
-            'unit': unit, 'sources': _unit_sources(state, unit), 'style_hash': state.get('style_hash'),
+            'unit': _review_input(unit), 'sources': _unit_sources(state, unit), 'style_hash': state.get('style_hash'),
             'entry': state.get('entry'), 'ledger': _ledger_dependencies(state, unit),
-            'previous': units[index - 1] if index > 0 and index not in resets else None,
-            'next': units[index + 1] if index + 1 < len(units) and index + 1 not in resets else None,
-            'external': _external_connections(state, request, index)}
+            'previous': [_review_input(units[i]) for i in connections[index]['previous_selected']]
+                        if index not in resets else [],
+            'next': [_review_input(units[i]) for i in connections[index]['next_selected'] if i not in resets],
+            'external': _external_connections(state, request, index, connections)}
 
 
-def _components(size, resets):
-    result, current = [], []
-    for index in range(size):
-        if index in resets and current:
-            result.append(current)
-            current = []
-        current.append(index)
-    if current:
-        result.append(current)
+def _components(size, resets, connections):
+    result, unseen = [], set(range(size))
+    while unseen:
+        pending, current = [min(unseen)], []
+        while pending:
+            index = pending.pop()
+            if index not in unseen:
+                continue
+            unseen.remove(index)
+            current.append(index)
+            if index not in resets:
+                pending.extend(connections[index]['previous_selected'])
+            pending.extend(i for i in connections[index]['next_selected'] if i not in resets)
+        result.append(sorted(current))
     return result
 
 
@@ -354,10 +447,11 @@ def _known(unit, dependencies):
     return (contract.get('version') == 1
             and all(isinstance(contract.get(key), dict) for key in ('initial', 'final', 'entities'))
             and contract.get('boundary', {}).get('kind') in ('reset', 'continuous')
+            and not dependencies['external'].get('ambiguous')
             and bool(dependencies['sources']) and not dependencies['ledger']['missing'])
 
 
-def _affected_units(old, new, resets, old_deps, new_deps):
+def _affected_units(old, new, resets, old_deps, new_deps, connections=None):
     before, after = old['request']['units'], new['request']['units']
     reasons = {i: set() for i in range(len(after))}
     identities_before, identities_after = list(map(_identity, before)), list(map(_identity, after))
@@ -374,10 +468,11 @@ def _affected_units(old, new, resets, old_deps, new_deps):
         for key in new_deps[i]:
             if old_deps[i].get(key) != new_deps[i][key]:
                 reasons[i].add('dependency_changed:' + key)
-    components = _components(len(after), resets)
+    connections = connections or _connections(new['state'], new['request'])
+    components = _components(len(after), resets, connections)
     for component in components:
-        unknown = any(i >= len(before) or not _known(after[i], new_deps[i])
-                      or not _known(before[i], old_deps[i]) for i in component)
+        unknown = any(not _known(after[i], new_deps[i])
+                      or i < len(before) and not _known(before[i], old_deps[i]) for i in component)
         if unknown:
             for i in component:
                 reasons[i].add('unknown_dependency_connected_component')
@@ -391,26 +486,80 @@ def _affected_units(old, new, resets, old_deps, new_deps):
         carry = contract.get('final')
         carried_entities = contract.get('entities')
         carry_known = isinstance(carry, dict) and _known(unit, new_deps[start])
-        for i in range(start + 1, len(after)):
+        pending = [(i, carry, carried_entities, carry_known) for i in connections[start]['next_selected']]
+        seen = set()
+        while pending:
+            i, carry, carried_entities, carry_known = pending.pop()
+            if i in seen:
+                continue
+            seen.add(i)
             if i in resets:
-                break
+                continue
             reasons[i].add('continuity_change_propagation')
             following = after[i].get('continuity', {})
             inherited = (carry_known and following.get('initial') == carry
                          and following.get('entities') == carried_entities
                          and _known(after[i], new_deps[i]))
+            if not inherited:
+                reasons[i].add('unresolved_continuity_inheritance')
             old_following = before[i].get('continuity', {}) if i < len(before) else {}
             if (inherited and following.get('final') == old_following.get('final')
                     and following.get('entities') == old_following.get('entities')):
-                break
-            carry_known = inherited
-            carry = following.get('final')
-            carried_entities = following.get('entities')
+                continue
+            pending.extend((j, following.get('final'), following.get('entities'), inherited)
+                           for j in connections[i]['next_selected'])
     return reasons
+
+
+def _explicit_warning_scope(warning, units):
+    """Resolve generated stable references, never infer a scope from prose."""
+    from shot_dependencies import WARNING_SCOPE_POLICY
+    scope = warning.get('review_scope')
+    if (not isinstance(scope, dict) or set(scope) != {'policy', 'units'} or
+            scope.get('policy') != WARNING_SCOPE_POLICY or
+            not isinstance(scope.get('units'), list) or not scope['units']):
+        return None
+    result, seen = [], set()
+    for entry in scope['units']:
+        if (not isinstance(entry, dict) or not {'span', 'scene_ids'} <= set(entry) or
+                set(entry) - {'span', 'scene_ids', 'unit_id', 'review_ids'} or
+                not isinstance(entry['span'], list) or len(entry['span']) != 2 or
+                not all(type(x) is int for x in entry['span']) or
+                not isinstance(entry['scene_ids'], list) or not entry['scene_ids']):
+            return None
+        candidates = [i for i, unit in enumerate(units)
+                      if unit.get('span') == entry['span'] and unit.get('scene_ids') == entry['scene_ids']
+                      and ('unit_id' not in entry or unit.get('id') == entry['unit_id'])]
+        if len(candidates) != 1 or candidates[0] in seen:
+            return None
+        i = candidates[0]
+        seen.add(i)
+        ids = entry.get('review_ids')
+        shots = units[i].get('shots', [])
+        if ids is None:
+            keys = [f'{i+1}:{n+1}' for n in range(len(shots))]
+        else:
+            if (not isinstance(ids, list) or not ids or
+                    not all(isinstance(sid, str) and sid.strip() for sid in ids) or
+                    len(ids) != len(set(ids))):
+                return None
+            keys = []
+            for sid in ids:
+                indexes = [n for n, shot in enumerate(shots) if shot.get('review_id') == sid]
+                if len(indexes) != 1:
+                    return None
+                keys.append(f'{i+1}:{indexes[0]+1}')
+        if not keys:
+            return None
+        result.append((i, keys))
+    return result
 
 
 def _warning_units(warning, units):
     """Unresolvable diagnostic scope depends on the whole request."""
+    if 'review_scope' in warning:
+        scoped = _explicit_warning_scope(warning, units)
+        return sorted(i for i, _ in scoped) if scoped is not None else list(range(len(units)))
     names = warning.get('units', [])
     names = list(names) if isinstance(names, list) else []
     if 'unit' in warning:
@@ -419,6 +568,22 @@ def _warning_units(warning, units):
     if names and all(name in lookup for name in names):
         return sorted({lookup[name] for name in names})
     return list(range(len(units)))
+
+
+def _scoped_warning_dependencies(snapshot, warning, unit_dependencies, shot_dependencies):
+    scope = _explicit_warning_scope(warning, snapshot['request']['units'])
+    if scope is None:
+        return None
+    result = {}
+    for i, keys in scope:
+        if not _known(snapshot['request']['units'][i], unit_dependencies[i]):
+            return None
+        for key in keys:
+            dependency = shot_dependencies.get(key)
+            if dependency is None or dependency['unknown']:
+                return None
+            result[key] = dependency
+    return {'review_scope': warning['review_scope'], 'dependencies': result}
 
 
 def prepare_incremental(old_snapshot, old_report, state, request, warnings=None, *, partial=False,
@@ -438,22 +603,18 @@ def prepare_incremental(old_snapshot, old_report, state, request, warnings=None,
     report = gate.pending(state, request, current['warnings'])
     resets = _trusted_resets(old_snapshot, current, old_report, old_targets)
     before, after = old_snapshot['request']['units'], request['units']
-    old_deps = [_dependencies(old_snapshot, i, resets) for i in range(len(before))]
-    new_deps = [_dependencies(current, i, resets) for i in range(len(after))]
-    reasons = _affected_units(old_snapshot, current, resets, old_deps, new_deps)
+    old_connections = _connections(old_snapshot['state'], old_snapshot['request'])
+    new_connections = _connections(state, request)
+    old_deps = [_dependencies(old_snapshot, i, resets, old_connections) for i in range(len(before))]
+    new_deps = [_dependencies(current, i, resets, new_connections) for i in range(len(after))]
+    reasons = _affected_units(old_snapshot, current, resets, old_deps, new_deps, new_connections)
     from shot_dependencies import reasons as shot_reasons
     granular = shot_reasons(old_snapshot, current, old_report, expected_report_sha256, resets)
-    unknown_carry = False
+    from shot_dependencies import request_diagnostics
+    dependency_diagnostics = {'old': request_diagnostics(old_snapshot['request']),
+                              'current': request_diagnostics(request)}
     for i, unit in enumerate(after):
-        if i in resets:
-            unknown_carry = False
-        if i and 'continuity_change_propagation' in reasons[i]:
-            previous_contract = after[i-1].get('continuity', {})
-            contract = unit.get('continuity', {})
-            if (contract.get('initial') != previous_contract.get('final') or
-                    contract.get('entities') != previous_contract.get('entities')):
-                unknown_carry = True
-        if unknown_carry:
+        if 'unresolved_continuity_inheritance' in reasons[i]:
             for target in report['shot_reviews']:
                 if target['unit_index'] == i+1 and target['key'] in granular:
                     granular[target['key']][0].add('unresolved_continuity_inheritance')
@@ -486,13 +647,32 @@ def prepare_incremental(old_snapshot, old_report, state, request, warnings=None,
                            'previous_basis': previous['basis'] if not why else None})
     old_warnings = {w['warning_sha256']: w for w in old_report['warning_decisions']}
     warning_provenance = []
+    scoped_shot_dependencies = None
+    if any('review_scope' in item['warning'] for item in report['warning_decisions']):
+        from shot_dependencies import dependencies as dependency_payloads
+        scoped_shot_dependencies = (dependency_payloads(old_snapshot, resets),
+                                    dependency_payloads(current, resets))
     for item in report['warning_decisions']:
+        # gate.pending may already carry an exact CURRENT writer decision.
+        # That is different evidence from reusing the previous final review.
+        current_authoring = copy.deepcopy(item) if item.get('decision') == 'accepted' else None
         previous = old_warnings.get(item['warning_sha256'])
         scope = _warning_units(item['warning'], after)
+        warning_dependency = [new_deps[i] for i in scope]
         why = []
         if granular and expected_report_sha256 is None:
             why.append('old_review_digest_required')
-        if any(reasons[i] for i in scope):
+        if 'review_scope' in item['warning']:
+            old_scope = _scoped_warning_dependencies(old_snapshot, item['warning'], old_deps,
+                                                     scoped_shot_dependencies[0])
+            new_scope = _scoped_warning_dependencies(current, item['warning'], new_deps,
+                                                     scoped_shot_dependencies[1])
+            warning_dependency = new_scope if new_scope is not None else warning_dependency
+            if old_scope is None or new_scope is None:
+                why.append('warning_scope_dependencies_unknown')
+            elif old_scope != new_scope or any('unresolved_continuity_inheritance' in reasons[i] for i in scope):
+                why.append('warning_dependencies_changed')
+        elif any(reasons[i] for i in scope):
             why.append('warning_dependencies_changed')
         if (previous is None or previous.get('warning') != item['warning']
                 or previous.get('decision') not in ('accepted', 'resolved')
@@ -500,10 +680,14 @@ def prepare_incremental(old_snapshot, old_report, state, request, warnings=None,
             why.append('no_exact_warning_judgment')
         if not why:
             item.update(decision=previous['decision'], basis=previous['basis'])
+        status = 'reused' if not why else ('authoring_reused' if current_authoring else 'pending')
         warning_provenance.append({'warning_sha256': item['warning_sha256'],
-                                   'status': 'reused' if not why else 'pending', 'reasons': why,
-                                   'dependency_sha256': digest([new_deps[i] for i in scope]),
-                                   'previous_reviewer': reviewer if not why else None})
+                                   'status': status, 'reasons': why,
+                                   'dependency_sha256': digest(warning_dependency),
+                                   'previous_reviewer': reviewer if not why else None,
+                                   'current_authoring_decision': current_authoring if status == 'authoring_reused' else None,
+                                   'decision_source': 'current_audio_preflight' if status == 'authoring_reused' else
+                                                      ('previous_final_review' if status == 'reused' else None)})
     reused = sum(item['status'] == 'reused' for item in provenance)
     sidecar = {'policy': POLICY, 'old_snapshot_sha256': old_snapshot['snapshot_sha256'],
                'old_request_sha256': old_snapshot['request_sha256'],
@@ -512,10 +696,12 @@ def prepare_incremental(old_snapshot, old_report, state, request, warnings=None,
                'validation': current['validation'],
                'prepared_report_sha256': digest(report), 'shot_provenance': provenance,
                'warning_provenance': warning_provenance,
+               'dependency_diagnostics': dependency_diagnostics,
                'stats': {'total_shots': len(provenance), 'reused_shots': reused,
                          'pending_shots': len(provenance) - reused, 'reasons': counts,
                          'reused_warnings': sum(w['status'] == 'reused' for w in warning_provenance),
-                         'pending_warnings': sum(w['status'] != 'reused' for w in warning_provenance)}}
+                         'authoring_reused_warnings': sum(w['status'] == 'authoring_reused' for w in warning_provenance),
+                         'pending_warnings': sum(w['status'] == 'pending' for w in warning_provenance)}}
     if granular and attach_evidence and (reused or any(p['status'] == 'reused' for p in warning_provenance)):
         report['reuse_evidence'] = {
             'old_snapshot': copy.deepcopy(old_snapshot), 'old_report': copy.deepcopy(old_report),
@@ -572,6 +758,9 @@ def _write_new(path, value):
 
 
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('freeze', 'merge-issues', 'revise-plan', 'prepare-incremental'))
     parser.add_argument('--project', type=Path)
@@ -639,6 +828,4 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8')
     raise SystemExit(main())

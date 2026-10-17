@@ -5,12 +5,14 @@ import argparse
 import copy
 import json
 import re
+import sys
 from pathlib import Path
 from character_variants import scene_character_ids
 
 from asset_ledger import HEADING, GENERIC_ROLE, digest, fact_list, parse_script, scene_ranges, source_paragraphs, split_cast_entry
 from asset_visual_design import (PROP_POLICY, GROUP_POLICY, group_minimum_visible_uses, is_group, is_speaking_ensemble,
-                                 validate_group_policy, validate_prop_coverage, validate_visual_design)
+                                 validate_group_policy, validate_prop_coverage, validate_visual_design,
+                                 scene_source_digests, design_review_status)
 from asset_review import verify_review_decisions, fingerprint as decision_fingerprint
 from scene_observations import (MIGRATION_PENDING_KIND, PENDING_KIND, observation_history_digest,
                                 validate_imported_observations)
@@ -682,16 +684,17 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
             item["visual_facts"] = facts
             if item["variant"] != "base" and not any(s["scene_asset_id"] == item["id"] for s in scenes):
                 pending.append({"kind": "未用布景版本去向待核", "asset_id": item["id"]})
+    if "design_source_scene_digests" in old:
+        result["design_source_scene_digests"] = scene_source_digests(result, new_paragraphs)
     preserve_group_reviews(old, result, new_paragraphs, bases, pending)
     preserve_prop_coverage(old, result, new_paragraphs, pending)
     preserve_asset_review_history(old, result, pending)
     preserve_observations(old, result, new_paragraphs, bases, pending)
     if "image_design_version" in old:
-        try:
-            validate_visual_design(result)
-        except (ValueError, KeyError, TypeError, StopIteration) as exc:
-            pending.append({"kind": "资产制作设计待复核", "detail": str(exc),
-                            "action": "保留原设计，审阅新事实与身份后重新运行design；不得直接清空待核项交付"})
+        design_status = design_review_status(result)
+        if design_status["review_required"] or design_status["shared_errors"]:
+            pending.append({"kind": "资产制作设计待复核", "design_status": design_status,
+                            "action": "仅审阅失效资产及共享依赖；可复用项保留旧设计，候选审阅通过后用design --patch重编变化项"})
     report = {"status": "迁移草稿", "scene_lineage": lineage, "primary_ids": primary,
               "retired_scene_ids": sorted(set(old_by_id) - set(primary.values())),
               "pending_reviews": pending,
@@ -701,10 +704,15 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
                              old_paragraphs[old_by_id[sid]["source_range"][0] - 1:old_by_id[sid]["source_range"][1]] ==
                              new_paragraphs[new_by_number[numbers[0]]["source_range"][0] - 1:new_by_number[numbers[0]]["source_range"][1]]
                              for sid, numbers in lineage.items() if len(numbers) == 1)}}
+    if "image_design_version" in old:
+        report["design_status"] = design_status
     return result, report
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("old_ledger", type=Path)
     parser.add_argument("old_source", type=Path)

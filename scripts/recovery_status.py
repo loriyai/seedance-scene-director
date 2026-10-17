@@ -13,14 +13,24 @@ def summarize(project, state, queue=None):
     manifests = {job['job_id']: job for job in jobs.manifests(project)}
     current = []
     historical = []
+    # One read-only status view uses one observation per dependency set/folder.
+    # Do not persist this cache: the next status call must see fresh inputs.
+    input_digests, image_inventories = {}, {}
     for row in queue['jobs']:
         job = manifests[row['job_id']]
         try:
             valid = (job['manifest_digest'] == c.digest({key: value for key, value in job.items() if key != 'manifest_digest'})
-                     and job['binding'] == binding and job['input_digest'] ==
-                     c.digest(jobs.input_scope(state, job['kind'], job['options']['ids'])))
+                     and job['binding'] == binding)
+            if valid:
+                key = (job['kind'], tuple(job['options']['ids']))
+                if key not in input_digests:
+                    input_digests[key] = c.digest(jobs.input_scope(state, *key))
+                valid = job['input_digest'] == input_digests[key]
             if valid and job['kind'] == 'images':
-                valid = jobs.image_inventory(job['options']['folder']) == job['options']['images']
+                folder = job['options']['folder']
+                if folder not in image_inventories:
+                    image_inventories[folder] = jobs.image_inventory(folder)
+                valid = image_inventories[folder] == job['options']['images']
         except (OSError, ValueError, KeyError, TypeError):
             valid = False
         if not valid:

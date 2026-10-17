@@ -14,6 +14,14 @@ ASSET_RETRY_ATTEMPTS = 3
 ASSET_READY_DELAY = 0.5
 
 
+def check_boundary(cli):
+    callback = getattr(getattr(cli, "check_control", None), "boundary", None)
+    if callable(callback):
+        callback()
+    else:
+        c.check_control(cli)
+
+
 def business_ready(doc, node_id, kind):
     """Canvas node existence alone does not establish the business asset."""
     return (node_id in c.nodes(doc) and c.kind_of(c.nodes(doc)[node_id]) == kind
@@ -307,7 +315,7 @@ def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
     positions = c.layout_positions(doc, pending)
     created = 0
     for offset in range(0, len(pending), batch_size):
-        c.check_control(cli)
+        check_boundary(cli)
         group = pending[offset:offset + batch_size]
         fresh = c.document(cli, state["binding"])
         for item in group:
@@ -380,6 +388,7 @@ def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
                                 [{"action": "prompt", "node_id": node_id, "value": item["description"]}])
             item["node_id"] = node_id
         # All fields for every node are checked together; no sampling or skipped fields.
+        check_boundary(cli)
         doc = c.document(cli, state["binding"])
         c.reconcile(project, cli, state, doc)
         for item in group:
@@ -406,6 +415,7 @@ def run_job(project, manifest, check_control, progress):
         total = sum(not options["decisions"].get(item["key"], {}).get("skip") for item in matched)
         progress({"total": total, "stage": "uploading_images"})
         result = c.media.images(project, cli, Path(options["folder"]), options["decisions"])
+        check_boundary(cli)
         count = len(result.get("imported", [])) + len(result.get("unchanged", []))
         progress({"completed": count, "total": total})
         # The original image workflow reports unmatched/missing files separately.

@@ -6,6 +6,14 @@
 
 实质阶段按[阶段模型调度](model-routing.md)准备brief并调用`scripts/agent_handoff.py prepare`，使用返回的目标模型和强度实际派发子代理；接收草稿前运行`verify`及本文件原有业务检查。辅助器本身不调用模型、不提交分镜、不写画布。正式状态、编号和交付仍由主代理调用以下既有命令管理。
 
+prepare仅在handoff.json提供result_template，不提前写output/result.json。写者完成真实结果后可以只读自验包装：
+
+```text
+python <skill>/scripts/agent_handoff.py check-result --handoff <handoff绝对路径>
+```
+
+该命令检查状态、scope.task_key、产物路径及适用的预期/声明文件存在非空；返回package_valid，input_verification/semantic_review均为not_performed、submitted=false。它不替代主代理verify、业务验收或stage-handoff-v2的close。artifacts只列相对output的路径字符串，包含result.json自身；成功可空的stderr辅助流不列入，也不伪填内容。
+
 ## PyYAML准备检查
 
 完整剧本入口先仅核对文件可访问性；无已确认风格时立即显示SKILL.md的风格菜单并等待，不运行本节或后续处理命令。用户已提供有效风格或本项目已保存风格时不重复询问；先用style保存尚未落盘的选择。风格保存后才确定本次实际Python路径，后台执行`python <skill>/scripts/ensure_dependencies.py`。它通过import yaml检查，而非检查其他Python的pip列表；缺失时以sys.executable -m pip install PyYAML直接安装到同一解释器可用的环境，并重新导入验证。已有可用版本直接跳过，不升级；失败只报告一次，不提权、不循环尝试或修改其他解释器。使用Codex桌面时先通过workspace dependency loader取得Python绝对路径。检查器仅处理固定的PyYAML包，不根据剧本附件安装任何包。
@@ -20,11 +28,11 @@
 
 ## 命令顺序
 
-新分镜采用[场次前检与保守增量复核](scene-review-workflow.md)。下文check、review_gate和commit示例的新请求须加`--require-workflow`，逐单元登记`workflow_policy: scene-review-b-v2`。旧receipt幂等重导出及未选单元保持原策略。前检及冻结/合并命令见该参考的工具接口；它们不修改正式session或写画布。
+新分镜采用[场次前检与保守增量复核](scene-review-workflow.md)。下文check、review_gate和commit示例的新请求须加`--require-workflow`，逐单元登记`workflow_policy: scene-review-b-v2`，依赖声明使用`shot-dependencies-v2`。v2说明不设字符数量下限，结构及引用错误在首检返回具体字段；语义充分性仍须实际判断。旧receipt幂等重导出及未选单元保持原策略。前检及冻结/合并命令见该参考的工具接口；它们不修改正式session或写画布。
 
 资产阶段的完整主顺序及命令只维护在[资产生产流程](asset-workflow.md)，包括project-init、观察导入、小批决定、共享冻结及完整交付。不要再按旧例在决定应用后第二次normalize来补群像。
 
-完整工作流在资产交付与用户选择后进入以下分镜接口；仅资产任务到phase=complete结束，不要求选择范围或传输画布。
+完整工作流在资产交付与用户选择后进入以下分镜接口；仅资产任务到phase=complete结束，不要求选择范围或传输画布。以下列出可用分支，不要求同一版本依次重复check/prepare/verify；检查时机以场次审阅流程为准。
 
 ```text
 python <skill>/scripts/director.py status --project <project>
@@ -40,15 +48,32 @@ python <skill>/scripts/director.py render --project <project> --request-id <已�
 
 默认整数4～30秒无需传--durations，只有实际入口明确为离散档位才列出合法值。PowerShell使用`& '<Python绝对路径>' '<脚本绝对路径>' ...`，路径逐个引用。用户文字通过JSON文件传递，不拼进shell命令。
 
+### 紧凑材料与同轮关联展示
+
+新制作显式使用compact，兼容入口默认仍为full；以下各条是按需分支，不要求同一轮全部执行。输出文件使用新的工作路径，已有文件不覆盖：
+
+```text
+python <skill>/scripts/staging_preflight.py --project <project> --request <batch.json> --format compact --output <当前紧凑材料.json>
+python <skill>/scripts/staging_preflight.py --expand <当前紧凑材料.json> --unit 1 --shot 2 --output <单镜完整展开.json>
+python <skill>/scripts/staging_preflight.py --expand <当前紧凑材料.json> --related --unit 1 --shot 2 --output <单镜关联展示.json>
+python <skill>/scripts/staging_preflight.py --expand <当前紧凑材料.json> --related --previous <既有冻结紧凑材料.json> --output <本轮关联对比.json>
+```
+
+--unit为请求内1起算序号，可重复选择；--shot须同时且仅选择一个unit。--previous隐含--related，二者仅适用于--expand，不用于准备full/compact。来源路径、哈希、快照或重投影不符即拒绝，不能修改视图或来源后继续当作有效材料。只有能验证并重建的既有compact才可作previous；不为展示伪造或改写冻结旧材料。
+
+related视图把当前原字段、镜窗、机位/构图/景深/visibility、changes、真实进入状态及重叠或接边的动作/声音窗口放在同轮材料中；提供previous时附旧值和difference。按稳定unit ID、span、场景与来源及review_id对齐，缺失或歧义标unmatched，不按列表位置猜配。输出为staging-related-display-v1、status=pending、evidence_use=display_only_not_approval、dependency_scope=not_computed；不生成审批或正式依赖闭包，也不缩小首次逐镜实读或真实状态传播范围。原full/compact、默认expand和--shot的结构及原staging_review摘要保持兼容；最终绑定仍来自完整材料，展示视图不作为通过证据。
+
+预览采用与authoring_gates相同的header_policy=visual-only-v2，可保存同版compact的actual.rendered。旧receipt和冻结任务继续原抬头，不以新默认重新解释历史。
+
 ### 最终稿复核与估时诊断
 
-`check`的passed仅表示结构和可靠约束通过，另返回`semantic_review: not_performed`。全批完整check后调用`review_gate.py prepare`生成pending清单；B流程已有冻结审阅时可用scene_review prepare-incremental生成绑定当前稿的清单，复制经严格核对仍有效的实际逐镜证据。复核者实读首次镜头、变化镜头及依赖影响，并核对最终来源覆盖、邻接状态和全部当前警告，逐项填写`source_coverage`、`fragment_timing`、`continuity`、`staging_performance`的status=passed及具体basis，登记reviewer和总status=passed。warning_decisions须覆盖本次全部警告，各项选择resolved或accepted并说明依据；不要用统一套话自动改为通过。这里是执行者复核，不增加用户确认菜单。
+`check`的passed仅表示结构和可靠约束通过，另返回`semantic_review: not_performed`。作者成稿时仍按场次审阅流程完成一次适用的check；主代理的`review_gate.py prepare`会执行全批完整check并生成pending清单，完整prepare后无需再另跑同一版本的check；B流程已有冻结审阅时可用scene_review prepare-incremental生成绑定当前稿的清单，复制经严格核对仍有效的实际逐镜证据。复核者实读首次镜头、变化镜头及依赖影响，并核对最终来源覆盖、邻接状态和全部当前警告，逐项填写`source_coverage`、`fragment_timing`、`continuity`、`staging_performance`的status=passed及具体basis，登记reviewer和总status=passed。warning_decisions须覆盖本次全部警告，各项选择resolved或accepted并说明依据；不要用统一套话自动改为通过。这里是执行者复核，不增加用户确认菜单。
 
 新复核记录采用final-request-review-v2，另含shot_reviews，按请求内单元/镜头序号覆盖每一镜。prepare附入选定原文、起始人物站位、该镜进入状态和完整镜头快照，只生成pending，不判断摄影是否合理。复核者填写各项status=passed和具体basis；画外/遮挡核对真实位置与取景边界，运动镜头覆盖起止和途中，固定镜头核对原有动作或保持用途、时长及切点，景深核对具体清晰对象。不能根据标签、subjects或camera自动拼出通过依据。verify拒绝缺镜、重复/乱序、快照变更、未完成或仅写“字段完整”等空泛结论；相同机位或景深不因此失败。有限的模板化描述会产生审查提示，不宣称能够自动理解中文空间。旧v1复核若要用于新的提交须重新prepare复核；已提交receipt按原记录重导出，不补写历史。
 
-复核记录绑定请求内容及来源、台账、风格、邻接单元的摘要；任何草稿内容变动后重新check并复核变化及其影响，重新生成记录。旧记录保留，不手改摘要绕过复核。`verify`和`commit --review`都核对摘要及警告清单；新append/replace提交缺记录或记录过期时拒绝。receipt保存本次复核证据，旧receipt的读取、幂等重导出不要求补记录。该机制证明复核对应哪个版本，不证明填写者的判断必然正确。
+复核记录绑定请求内容及来源、台账、风格、邻接单元的摘要；任何草稿内容变动后重新check并复核变化及其影响，重新生成记录。旧记录保留，不手改摘要绕过复核。`verify`和`commit --review`都核对摘要及警告清单，常规直接commit即可，单独verify用于诊断或交接边界；新append/replace提交缺记录或记录过期时拒绝。receipt保存本次复核证据，旧receipt的读取、幂等重导出不要求补记录。该机制证明复核对应哪个版本，不证明填写者的判断必然正确。
 
-逐片段估时诊断仅用于后台，不渲染到提示词。默认以既有event.units、speed和pause检查；纯中文多片段可按发音字数分配，数字/英文多片段须由执行者另填`spoken_units`及`spoken_basis`说明实际念法，不能把数字位数当发音数。各片段可全部填写`pause`，其合计加片段间隙应等于event.pause；全部省略时按标点权重估计片内停顿并标记estimated_distribution，供复核者判断。检查逐片段的净语速、单位合计、过长接句间隙及停顿账目；语速和气口诊断是警告，不按比例切字，也不强制零间隔。纯中文计数与数字读法仍需复核。当前分镜流程只要求文本估时，不要求先有实际配音或自动获取生成音频；既有可选录音依据路径保持兼容。
+逐片段估时诊断仅用于后台，不渲染到提示词。默认以既有event.units、speed和pause检查；纯中文多片段可按发音字数分配，数字/英文多片段须由执行者另填`spoken_units`及`spoken_basis`说明实际念法，不能把数字位数当发音数。各片段可全部填写`pause`，其合计加片段间隙应等于event.pause；全部省略时按标点权重估计片内停顿并标记estimated_distribution，供复核者判断。检查逐片段的净语速、单位合计、过长接句间隙及停顿账目；语速和气口诊断是警告，不按比例切字，也不强制零间隔。纯中文计数与数字读法仍需复核。v2以storyboard_preflight为声音诊断唯一来源，以上旧版估算分配不用于新v2；当前绑定已接受且未变的声音警告沿用作者依据，独立审阅仍核对实际呈现。当前分镜流程只要求文本估时，不要求先有实际配音或自动获取生成音频；既有可选录音依据路径保持兼容。
 
 连续性和摄影复核包含临时动作的完成/解除、道具当前持有状态、口型与声源、接话先后、动作结束后的姿态，以及机位是否支持当前事件。程序不以字段齐全、景别变化或低于特写参考比例代替这些语义判断。交接`agent_handoff.verify`仅核对输入与产物完整性，返回artifact_sha256供追溯，仍不代表最终稿复核。
 
@@ -74,7 +99,7 @@ phase只记录前台交互位置，不代表外部授权。以下菜单仅适用
 
 新设计默认`gpt-image-2-v2`，群像使用`group_members`和`group_wardrobe`生成各成员正面全身参考，单人使用身份参考板；遮面设计使用`covering`和`visible_identity`。已有v1设计默认保留v1，升级须显式提供image_design_version并审阅。完整字段及示例见[资产美术设计](asset-image-design.md)。
 
-有原文佩戴变化时，先执行内置`asset_ledger.py variants <标准剧本.txt> <source.json> <台账.json> <佩戴审阅.json> --output <新台账.json>`，通过source-masked-v1登记appearance_variant与scene.character_appearances，再design、校验、render和明确bind。source_entry/source_speaker及scenes.character_ids仍是源人物名单，不混入制作版本；分镜允许引用已审阅的同场版本，连续性只登记同一人物实体并在原文戴上/摘下处切换asset_ids。单元边界不得切断佩戴事件，不能遗漏或提前切换。未采用策略的旧台账及receipt保持兼容；已有项目不自动迁移。详见[佩戴形象](../modules/screenplay-standardizer/references/asset-ledger.md)。
+有原文佩戴变化时，先执行内置`asset_ledger.py variants <标准剧本.txt> <source.json> <台账.json> <佩戴审阅.json> --output <新台账.json>`，通过source-masked-v1登记appearance_variant与scene.character_appearances，再design、校验、render和首次bind；已有项目按[绑定变更边界](binding-changes.md)处理，不存在同目录rebind命令。source_entry/source_speaker及scenes.character_ids仍是源人物名单，不混入制作版本；分镜允许引用已审阅的同场版本，连续性只登记同一人物实体并在原文戴上/摘下处切换asset_ids。单元边界不得切断佩戴事件，不能遗漏或提前切换。未采用策略的旧台账及receipt保持兼容；已有项目不自动迁移。详见[佩戴形象](../modules/screenplay-standardizer/references/asset-ledger.md)。
 
 ## 范围坐标
 
@@ -129,7 +154,7 @@ replace请求：mode=`replace`，新的request_id，units列出要替换的原ID
 
 | 字段 | 内容 |
 |---|---|
-| start / end | 相邻整数秒，单镜1～5秒，全单元从0连续至duration |
+| start / end | 相邻整数秒，单镜1～6秒，全单元从0连续至duration |
 | continuity | 新提交每镜必填状态变化与可见范围，结构及继承/边界检查见[连续性后台接口](continuity-state.md)；没有变化用空变化列表，持续在场者可在画外或被遮挡。实际可见参与者仍须落实到subjects、构图及正文 |
 | scene_id | 当前实际场景SC ID，属于scene_ids |
 | framing | 大远景、大全景、远景、全景、中景、中近景、近景、特写之一 |
@@ -204,7 +229,7 @@ replace请求：mode=`replace`，新的request_id，units列出要替换的原ID
 
 真实威胁出现、情绪反转、动作爆发及关键信息揭示处主动比较快推、突拉、快速跟随、细节或空间展开，按剧情决定是否使用，写清运动方向、速度、落点及最终焦点，不设快镜头数量配额。短镜头一般只执行一个明确主要运动。静态镜头在能保留表演或空间信息时有依据地使用。动作匹配写清同一动作进行中的切出阶段与后镜接续阶段，整组接续到结果、只完成一次；多动作压缩用具体硬切、跳切或蒙太奇，无实际锚点不泛称动作匹配。视线匹配须写视线方向和所看对象。连续呈现位移时写清接续进度，省略非关键中段时交代必要位置与状态，详见[摄影规则](cinematic-rules.md#动作节奏与压缩)；容易混淆的画面说明相机、人物和物体的前中后景关系，人物的“身后”不能代替相机的“前景/后景”。
 
-常规单元在26～30秒、8～13镜范围内按内容选择，单镜仍为1～5秒；26～30秒仅优选；4～25秒自然完成单元可用natural_beat并填写short_basis，不补动作凑时长。按[摄影规则](cinematic-rules.md#动作节奏与压缩)依当前情境区分机械过渡、情节关键动作与情绪氛围动作，分别压缩非关键过程、保留关键行为和结果、保护已有情绪变化及必要停顿，不默认慢演、不自动改稿。参照模板不增加固定镜数、固定时长、不同景别轮换、强制高潮或环境破坏。旧单元的subjects继续按原有主体声明读取；没有output_format/focus/purpose及四项摄影字段的旧receipt不强制迁移，替换仅作用于用户选定单元。
+常规单元在26～30秒、8～13镜范围内按内容选择，单镜仍为1～6秒；固定镜头仅1～3秒，4～6秒须有服务观看重点的实际相机位置或朝向变化，允许运动后短暂稳定，仅移焦或主体运动不算；26～30秒仅优选；4～25秒自然完成单元可用natural_beat并填写short_basis，不补动作凑时长。按[摄影规则](cinematic-rules.md#动作节奏与压缩)依当前情境区分机械过渡、情节关键动作与情绪氛围动作，分别压缩非关键过程、保留关键行为和结果、保护已有情绪变化及必要停顿，不默认慢演、不自动改稿。参照模板不增加固定镜数、固定时长、不同景别轮换、强制高潮或环境破坏。旧单元的subjects继续按原有主体声明读取；没有output_format/focus/purpose及四项摄影字段的旧receipt不强制迁移，替换仅作用于用户选定单元。
 
 reference-v3逐镜渲染为`·00秒-03秒[镜头1-label]：（@主焦点完整名 的framing；转场：transition）camera，composition，depth_of_field，lighting；text [本镜对白]。音效：前景+环境。`。每镜使用中文外括号，括号内不写“景别：”、不放运镜；四项摄影字段按固定顺序放在括号外。镜头时码为两位整数秒，编号由程序从1递增。需图片的群像焦点用多个@主名连接，仅提示词群像焦点使用普通完整名称，空focus原有环境镜使用相应环境景别。global紧随场景行渲染为独立“人物站位：”行，connector并入本镜正文，purpose不输出。label是可见短标签，不等于后台purpose。音效缺一项省略空项和+，两项均空写“无”。
 
@@ -224,7 +249,9 @@ commit、幂等重试及render成功后返回unit_count、total_seconds、minute
 
 写完第一个单元，用相同顶层span和当前units前缀执行check --partial；通过并人工检查后追加下一单元，再检查。partial不要求覆盖选定范围尾部；完整check与commit仍须覆盖所选完整范围。单元超过两镜特写、累计特写超过15%及摄影重复均只返回warnings，partial、完整check和commit一致允许提交，不再禁止相邻近景/特写。15%是诊断参考，不是数量配额，不用补宽镜头稀释比例，也不因低于参考值免除人工检查。partial结果不能作为全批交付依据。
 
-程序硬检查：来源与台词、归属、资产关联与引用、focus/subjects合法性与主焦点绑定、重名及引用归属、reference-v3所需label/transition/focus/purpose、四项摄影字段的非空单行与引用归属、音效字段类型、场景硬切、短段边界、镜数/镜时长/声音合法性、范围异常确认、版本与固定抬头。不把purpose文字当作摄影质量证明。语速估计超档仅返回warnings；应后台复核，明确实际不自然时修正，不把估计误差当确定错误。
+首次草稿的现有前检集中列出同镜非焦点可见资产引用缺项，供作者在同一次关联核对中处理；不根据登记身份或focus自动补造引用/通过结论，不另开一轮审阅。
+
+程序硬检查：来源与台词、归属、资产关联与引用、focus/subjects合法性与主焦点绑定、重名及引用归属、reference-v3所需label/transition/focus/purpose、四项摄影字段的非空单行与引用归属、音效字段类型、场景硬切、短段边界、镜数/镜时长/声音合法性、范围异常确认、版本与固定抬头。1～6秒、整数轴和镜数属于数值硬校验；4～6秒的实际运镜属于同轮逐镜语义验收，程序只汇总所涉镜头的摄影审阅提醒，不通过关键词自动放行或拒绝。整镜固定、仅移焦、主体运动及空泛运镜词均不能满足长镜头要求；真实运动后短暂稳定允许。不把purpose文字当作摄影质量证明。语速估计超档仅返回warnings；应后台复核，明确实际不自然时修正，不把估计误差当确定错误。
 
 摄影软审查：连续三镜framing、focus、angle和camera相同，提示检查新增看点；连续两镜明确的正面面部近景/特写，以及同人物连续三镜正面面部中近景/近景/特写，提示审查表演变化、空间与关系。审查延伸到来源连续的单元/批次边界，不把重复渲染批次拼接成故事。首镜面部近景、数量和累计比例也仅提醒。面部识别要求单一CHAR主焦点，依赖face_closeup=true或构图/标签中有限的明确面部描述，再结合正面angle；道具focus不会当作脸，普通“微笑/眼神”动作文字或只有CHAR+正面+近景不足以确定脸主导。缺少明确信号不代表没有怼脸画面，程序不分析图像、不承诺识别所有面部镜。换成斜侧或改景别标签后仍重复看脸的情况必须人工复核；合法近景正反打与重要反应允许保留，不靠警告数或配额验收。
 
@@ -244,4 +271,4 @@ commit先原子保存session，再渲染交付；同request_id、同内容重试
 
 内置asset_ledger.py init产生草稿；地点身份核实及别称归并后运行build-scenes，按确认的LOC归组，不按标题字符串/日夜猜测归并。真实布景版本需手动添加decor、parent_id及visual_facts原文证据，具体字段见内置资产台账参考。旧schema 2可供读取审计，但画布资产和视频写入须先通过离线方案升级，不复用SC映射冒充SET。
 
-新v2声音readiness、冻结前渲染/状态核对、可选逐镜依赖图及返修指标统一按[场次前检](scene-review-workflow.md)执行。历史v1入口兼容，已交付receipt不升级。新提交黑幕模式为none-v1。
+新v2声音readiness、冻结前渲染/状态核对、逐镜依赖图及返修指标统一按[场次前检](scene-review-workflow.md)执行。新制作的`staging_preflight`使用`--format compact`，由`--expand`按需重建并核验完整材料；旧`full`入口及原staging_review校验方式保留。依赖策略v2与声音/工作流v2分别登记，不混用版本标识；历史依赖v1入口兼容，已交付receipt不升级。新提交黑幕模式为none-v1。

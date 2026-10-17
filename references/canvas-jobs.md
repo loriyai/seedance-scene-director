@@ -18,7 +18,7 @@ python <skill>/scripts/canvas_jobs.py image-choice --project <project> --choice 
 python <skill>/scripts/canvas_jobs.py image-choice --project <project> --choice 2
 ```
 
-`enqueue`不带`--start`只输出不可变任务JSON；`start`启动隐藏后台Python进程并立即返回，`worker`为该进程内部入口。不得用宿主反复等待进程退出来模拟后台。`status`只读本地状态，在交付分镜、处理节点菜单等交互边界读取即可，不循环核对远端或占住对话等待。
+`enqueue`不带`--start`只输出不可变任务JSON；`start`启动隐藏后台Python进程并立即返回，`worker`为该进程内部入口。不得用宿主反复等待进程退出来模拟后台。`status`只读本地状态，在交付分镜、处理节点菜单等交互边界读取即可，不循环核对远端或占住对话等待。单次恢复查询内，相同依赖摘要和同目录图片清单只核算一次，不跨查询沿用过期内容。
 
 任务排队时即保存total，视频/引用任务按所选单元数计数。新none-v1任务不执行黑幕ID/节点/连线/素材检查；冻结的历史任务保持原模式。视频在准备、逐节点处理和整节点回读通过时保存stage、current_unit、真实ID及updated_at；每个完整节点通过后立即更新completed和node_ids，不等整批返回。创建ACK、名称/时长单步通过、引用未通过均不能推进完整节点计数。恢复执行会重新读取目标并核验节点，本轮completed随实际核验重建；旧回执和旧进度记录仍用于同一ID续接，计数重核不代表重建节点。后台任务终态仍由完整结果决定，不能仅凭completed==total宣称完成。
 
@@ -77,3 +77,7 @@ python <skill>/scripts/canvas_jobs.py recover-assets --project <project> --opera
 不把通用apply_mutations的dryRun当业务验收，不为批量化改用浅层generation补丁写提示词。已注册描述/提示词命令保持官方业务入口；首版不启用纯创建批事务或自写MCP。未知ACK保留allocated/pending/acknowledged/uncertain等操作状态，只有回读证明目标已生效才跳过；未证明的项不能当普通失败自动重试。
 
 完成和需要处理事件都会尝试在Windows显示短暂桌面提示。失败提示包含已核验计数及具体原因，不宣称任务完成；暂停和替代不触发失败提示。相同失败事件不重复通知，恢复成功仍另发完成事件。通知失败不影响已保存结果；宿主没有事件回调时，脚本不能主动向聊天追加消息，Codex在下一交互边界读取本地事件后简短报告。只有全部任务目标核验成功才提示完成，不能把部分成功计为整批完成。
+
+## 输入校验的执行边界
+
+worker在任务开始、资产组及视频节点的写入/核验边界执行完整输入校验；组内控制检查对文件/目录元数据作轻量比对，变化立即触发完整内容校验。没有跨任务永久缓存，来源摘要仍是有效性依据。图片实际上传前后原有逐文件内容hash检查、官方ACK和写后回读继续执行；减少本地反复读取不改变未知写入停止、人工冲突保护或用户暂停语义。

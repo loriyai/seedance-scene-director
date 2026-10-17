@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 POLICY = 'scene-review-b-v2'
-GENERIC = {'通过', '已检查', '符合剧情', '为了节奏', '符合要求', '无问题', '同前'}
+GENERIC = {'通过', '已检查', '符合剧情', '为了节奏', '符合要求', '无问题', '同前', '同上'}
 FIELDS = ('text', 'composition', 'depth_of_field', 'visibility', 'continuity.changes',
           'initial/final', 'start/end_state')
 
@@ -22,12 +22,13 @@ def digest(value):
 
 
 def concrete(text):
-    if not isinstance(text, str) or len(text.strip()) < 12:
+    """Reject empty/template-only evidence, never infer quality from length."""
+    if not isinstance(text, str) or not text.strip():
         return False
-    residual = text
+    residual = re.sub(r'[\W_]+', '', text)
     for phrase in sorted(GENERIC, key=len, reverse=True):
         residual = residual.replace(phrase, '')
-    return len(re.sub(r'[\W_]+', '', residual)) >= 8
+    return bool(residual)
 
 
 def error(code, kind, **kw):
@@ -42,6 +43,11 @@ def audio_payload(state, unit):
     normalized = {rid: [{k: v for k, v in p.items() if k != 'record'} for p in ps]
                   for rid, ps in parts.items()}
     ids = {e.get('record') for e in unit.get('audio', [])}
+    span = unit.get('span')
+    if isinstance(span, list) and len(span) == 2 and all(type(n) is int for n in span):
+        ids.update(r.get('id') for r in state.get('records', [])
+                   if type(r.get('start')) is int and type(r.get('end')) is int
+                   and r['start'] < span[1] and r['end'] > span[0])
     rules = {name:hashlib.sha256((Path(__file__).parent/name).read_bytes()).hexdigest()
              for name in ('authoring_gates.py','storyboard_preflight.py','dialogue_layout.py','speech_timing_audit.py','audio_sources.py')}
     return {'policy':POLICY, 'rules':rules, 'audio': unit.get('audio', []), 'parts': normalized,
@@ -62,20 +68,24 @@ def audio_ready(state, unit, checked):
     input. No generic warning exemptions, timing padding or automatic approvals.
     """
     from storyboard_preflight import _number, _parts, _source_audio
-    if not unit.get('audio'):
-        return {'status': 'ready', 'errors': [], 'pending_warnings': [], 'input_sha256': None}
     errors = []
     errors.extend(_source_audio(state, unit))
     if not state.get('records'):
         errors.append(error('AUDIO_SOURCE_UNVERIFIED', '离线计划只证明内部结构；进入详细摄影须提供绑定来源'))
+    span = unit.get('span')
+    source_end = state.get('length', max((r.get('end', 0) for r in state.get('records', [])), default=0))
+    if not (isinstance(span, list) and len(span) == 2 and all(type(n) is int for n in span)
+            and type(source_end) is int and 0 <= span[0] < span[1] <= source_end):
+        errors.append(error('AUDIO_SOURCE_SPAN', '动作/声音计划须先锁定合法且非空的来源范围'))
     duration = unit.get('duration')
+    window_end = duration if _number(duration) else 0
     if type(duration) is not int or not 4 <= duration <= 30:
         errors.append(error('AUDIO_PLAN_DURATION', '先确定4至30秒合法整数单元时长'))
     entry = state.get('entry', {})
     if (type(duration) is int and (duration < entry.get('min', 4) or
             entry.get('durations') and duration not in entry['durations'])):
         errors.append(error('AUDIO_ENTRY_DURATION', '声音计划时长不在本项目已确认入口档位'))
-    if not isinstance(unit.get('audio_plan'), list) or not unit['audio_plan']:
+    if unit.get('audio') and (not isinstance(unit.get('audio_plan'), list) or not unit['audio_plan']):
         errors.append(error('AUDIO_CANONICAL_PLAN', '有声新单元须保留唯一audio_plan并从该计划同步dialogue_parts'))
     actions = unit.get('action_plan')
     if not isinstance(actions, list):
@@ -94,7 +104,7 @@ def audio_ready(state, unit, checked):
         if (not isinstance(a.get('quote'), str) or not a['quote'] or
                 a['quote'] not in selected or
                 not all(_number(a.get(k)) for k in ('start', 'end')) or
-                not 0 <= a['start'] < a['end'] <= (duration or 0)):
+                not 0 <= a['start'] < a['end'] <= window_end):
             errors.append(error('AUDIO_ACTION_WINDOW', '动作骨架须绑定原文及合法时间窗', record=a.get('record')))
             continue
         for relation in ('before', 'after'):
@@ -107,19 +117,27 @@ def audio_ready(state, unit, checked):
     for rid, parts in all_parts.items():
         for index, part in enumerate(parts, 1):
             if all(_number(part.get(k)) for k in ('start', 'end')):
-                if (not 0 <= part['start'] < part['end'] <= (duration or 0) or
-                        math.ceil(part['end'] - .001) - math.floor(part['start'] + .001) > 5):
-                    errors.append(error('AUDIO_CUT_WINDOW', '片段无法完整容纳于1至5秒整数切点镜头；先调整自然分句或时间安排', record=rid, part=index))
+                if (not 0 <= part['start'] < part['end'] <= window_end or
+                        math.ceil(part['end'] - .001) - math.floor(part['start'] + .001) > 6):
+                    errors.append(error('AUDIO_CUT_WINDOW', '片段无法完整容纳于1至6秒整数切点镜头；先调整自然分句或时间安排', record=rid, part=index))
     if type(duration) is int and 4 <= duration <= 30:
         windows = [p for ps in all_parts.values() for p in ps
                    if all(_number(p.get(k)) for k in ('start','end'))]
         allowed = {t for t in range(duration+1) if not any(p['start']+.001 < t < p['end']-.001 for p in windows)}
-        reachable = {0}
+        # Keep counts as well as reachability: legal shot durations alone
+        # do not establish a partition satisfying the existing 8-13 rule.
+        reachable = {0: {0}}
         for t in range(1,duration+1):
-            if t in allowed and any(t-k in reachable for k in range(1,6)):
-                reachable.add(t)
+            if t in allowed:
+                counts = {n + 1 for k in range(1, 7)
+                          for n in reachable.get(t - k, set())}
+                if counts:
+                    reachable[t] = counts
         if duration not in reachable:
-            errors.append(error('AUDIO_CUT_PARTITION', '所有语义片段无法共同构成1至5秒整数镜头分区；须在摄影前调整分句/切点'))
+            errors.append(error('AUDIO_CUT_PARTITION', '所有语义片段无法共同构成1至6秒整数镜头分区；须在摄影前调整分句/切点'))
+        elif duration >= 26 and not reachable[duration].intersection(range(8, 14)):
+            errors.append(error('AUDIO_CUT_COUNT', '当前片段只允许与8至13镜规则冲突的整数切点组合；须在摄影前调整自然分句/切点',
+                                feasible_counts=sorted(reachable[duration])))
     payload = audio_payload(state, {**unit, 'action_plan': actions})
     binding = digest(payload)
     review = unit.get('audio_preflight', {})
@@ -156,7 +174,7 @@ def audio_ready(state, unit, checked):
 
 def staging_material(state, unit):
     """Actual rendered text plus backend time/state, never purpose alone."""
-    from director import render_unit
+    from director import render_unit, HEADER_POLICY
     from shot_review import targets
     from continuity import validate_unit
     replay = validate_unit(state, unit, required=True)
@@ -166,10 +184,18 @@ def staging_material(state, unit):
     if not isinstance(current.get('style'), str) or sha(current['style']) != state.get('style_hash'):
         raise ValueError('冻结前预览须填写与已保存video-style.txt摘要一致的style')
     current['black_reference_mode'] = 'none-v1'
+    current['header_policy'] = HEADER_POLICY
     rendered = render_unit(state, current)
     shots = targets(state, {'units': [unit]})
     fields = {k: v for k, v in unit.items() if k not in
               ('staging_review', 'audio_preflight', 'identity_decisions', 'review_dependencies')}
+    # A per-unit target projection cannot carry an edge whose destination is in
+    # another unit. Bind the complete declaration once at its owning unit in v2;
+    # historical v1 material and digests retain their original shape.
+    from shot_dependencies import POLICY_V2
+    declaration = unit.get('review_dependencies')
+    if isinstance(declaration, dict) and declaration.get('policy') == POLICY_V2:
+        fields['review_dependencies'] = copy.deepcopy(declaration)
     return {'rendered': rendered, 'timing_and_state': fields, 'targets': shots,
             'replay': replay}
 

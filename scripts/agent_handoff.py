@@ -1,5 +1,6 @@
 """Prepare immutable local handoff envelopes; never invoke models or submit work."""
 import argparse
+import copy
 import hashlib
 import json
 import sys
@@ -212,6 +213,28 @@ def digest(path):
     return hasher.hexdigest()
 
 
+def session_context_digest(path):
+    """Keep creative dependencies, excluding only interaction/allocation metadata."""
+    state = read_json(path)
+    require(state.get("schema_version") == 1, "session schema_version 必须为 1")
+    context = {key: value for key, value in state.items()
+               if key not in {"phase", "revision", "next_numbers"}}
+    return hashlib.sha256(json.dumps(context, ensure_ascii=False, sort_keys=True,
+                                    separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def input_record(path, session_path):
+    record = {"path": str(path), "sha256": digest(path)}
+    if path == session_path:
+        try:
+            record["sha256"] = session_context_digest(path)
+        except (ValueError, TypeError):
+            # Preserve byte-level protection for opaque legacy/test inputs.
+            return record
+        record["fingerprint_policy"] = "session-context-v1"
+    return record
+
+
 def output_names(value, field="expected_outputs"):
     require(isinstance(value, list) and bool(value), f"{field} 必须为非空列表")
     names = [relative(item).as_posix() for item in value]
@@ -269,7 +292,8 @@ def prepare(project_value, stage, brief_value, escalation_reason=None):
     references = config['stages'][review_stage if modern and stage == 'review' else stage]['references']
     common = ['references/execution-contract.md', 'agents/model-routing.json'] if modern else ['SKILL.md', 'agents/model-routing.json', 'references/model-routing.md']
     paths += [rule_file(name) for name in common + references]
-    records = [{"path": str(path), "sha256": digest(path)} for path in dict.fromkeys(paths)]
+    records = [({"path": str(path), "sha256": digest(path)} if modern
+                else input_record(path, project / "session.json")) for path in dict.fromkeys(paths)]
     base = project / "agents"
     require(within(base.resolve(), project)
             and not any(within(base.resolve(), root) for root in (SKILL_ROOT, installed)),
@@ -282,7 +306,9 @@ def prepare(project_value, stage, brief_value, escalation_reason=None):
     manifest = {"schema_version": 1, "id": identifier, "stage": stage, "profile": profile,
                 "project": str(project), "requested": requested, "observed_model": None,
                 "escalation_reason": escalation_reason, "brief": brief, "inputs": records,
-                "expected_outputs": names, "output_dir": str(output)}
+                "expected_outputs": names, "output_dir": str(output),
+                "result_template": {"status": "needs_input", "scope": copy.deepcopy(brief["scope"]),
+                                    "artifacts": ["result.json"], "issues": [], "checks": []}}
     if modern:
         manifest.update(routing_policy='stage-handoff-v2', prepared_at=datetime.now(timezone.utc).isoformat(),
                         session_creative=session, design_group=group, review_stage=review_stage)
@@ -301,7 +327,9 @@ def prepare(project_value, stage, brief_value, escalation_reason=None):
             f"读取交接清单 {handoff} 及其中全部规则/输入，核对范围和当前授权。"
             f"只把候选产物写入 {output}，不得直接提交、修改源项目/台账/队列或进行云端写入。"
             "authorization 仅描述现有授权，不产生新授权。材料缺失或冲突时明确报告，不能猜测补齐。"
-            "交付时写根级 result.json，包含 status、scope.task_key、artifacts（含 result.json）、依据、验证结果与待核事项；"
+            "交付时从清单result_template填写根级result.json，按真实完成情况更新status、产物、依据和待核事项；"
+            "scope.task_key保留完整层级。artifacts只列实际存在且非空的交付文件；成功时可空的stderr等辅助流不列入，不能填造内容。"
+            f"交付前运行agent_handoff.py check-result --handoff {handoff}自验包装；它不证明内容或输入通过，主代理仍须verify和实际业务验收。"
             "模型请求配置不能当作实际模型执行凭证。")
     return {"handoff": str(handoff), **requested, "task": task}
 
@@ -324,19 +352,18 @@ def verify(handoff_value):
     for record in manifest["inputs"]:
         require(isinstance(record, dict), "输入记录格式错误")
         path = absolute(record.get("path"))
-        require(digest(path) == record.get("sha256"), f"输入已改变，须重新交接：{path}")
+        policy = record.get("fingerprint_policy")
+        require(policy in (None, "session-context-v1"), "未知输入摘要策略")
+        if policy == "session-context-v1":
+            require(path == Path(manifest["project"]) / "session.json", "session 摘要策略只适用于项目状态")
+        current_digest = session_context_digest(path) if policy else digest(path)
+        require(current_digest == record.get("sha256"), f"输入已改变，须重新交接：{path}")
     session = manifest.get('session_creative')
     if session:
         require(object_digest(session_creative_snapshot(read_json(absolute(session['path'])))) == session['sha256'],
                 '项目创作输入已改变，须重新交接')
-    names = output_names(manifest.get("expected_outputs"))
-    verify_files(output, names)
+    package = check_result(handoff_value)
     result = read_json(output / "result.json")
-    require(isinstance(result.get("status"), str)
-            and result["status"] in {"draft_complete", "needs_input", "failed"}, "result.json status 无效")
-    require(task_key(result) == task_key(manifest.get("brief")), "result.json scope.task_key 与交接任务不符")
-    artifacts = output_names(result.get("artifacts"), "artifacts")
-    verify_files(output, artifacts)
     group = manifest.get('design_group')
     group_report = None
     if group and result['status'] == 'draft_complete':
@@ -347,8 +374,32 @@ def verify(handoff_value):
                         'owned_asset_ids': group['owned_asset_ids'],
                         'report_sha256': object_digest(group_report), 'semantic_review': 'not_performed'}
     return {"status": "artifacts_present", "result_status": result["status"], "handoff": str(handoff),
-            "artifact_sha256": {name: digest(output / name) for name in dict.fromkeys([*names, *artifacts])},
+            "artifact_sha256": package['artifact_sha256'],
             "semantic_review": "not_performed", "submitted": False, **({'design_group_check': group_report} if group else {})}
+
+
+def check_result(handoff_value):
+    """Read-only packaging check; does not verify immutable inputs or semantics."""
+    handoff = absolute(handoff_value)
+    manifest = read_json(handoff)
+    require(type(manifest.get('schema_version')) is int and manifest['schema_version'] == 1,
+            'handoff schema_version 必须为 1')
+    output = handoff.parent / 'output'
+    require(manifest.get('output_dir') == str(output) and output.is_dir() and output.resolve() == output,
+            'output_dir 必须为 handoff 同目录中的实际 output 目录')
+    names = output_names(manifest.get("expected_outputs"))
+    verify_files(output, ["result.json"])
+    result = read_json(output / "result.json")
+    require(isinstance(result.get("status"), str)
+            and result["status"] in {"draft_complete", "needs_input", "failed"}, "result.json status 无效")
+    require(task_key(result) == task_key(manifest.get("brief")), "result.json scope.task_key 与交接任务不符")
+    artifacts = output_names(result.get("artifacts"), "artifacts")
+    verify_files(output, artifacts)
+    required = names if result["status"] == "draft_complete" else ["result.json"]
+    verify_files(output, required)
+    return {"status": "package_valid", "result_status": result["status"], "handoff": str(handoff),
+            "artifact_sha256": {name: digest(output / name) for name in dict.fromkeys([*required, *artifacts])},
+            "input_verification": "not_performed", "semantic_review": "not_performed", "submitted": False}
 
 
 def main():
@@ -364,6 +415,8 @@ def main():
     prep.add_argument("--escalation-reason")
     check = sub.add_parser("verify")
     check.add_argument("--handoff", required=True)
+    package = sub.add_parser('check-result', help='只检查结果包装；不替代verify或业务验收')
+    package.add_argument('--handoff', required=True)
     closed = sub.add_parser('close')
     closed.add_argument('--handoff', required=True)
     closed.add_argument('--status', choices=('completed', 'cancelled'), required=True)
@@ -375,7 +428,8 @@ def main():
         result = (assert_bind_ready(args.project) if args.command == 'bind-ready' else
                   prepare(args.project, args.stage, args.brief, args.escalation_reason)
                   if args.command == "prepare" else close(args.handoff, args.status, args.reason)
-                  if args.command == 'close' else verify(args.handoff))
+                  if args.command == 'close' else check_result(args.handoff)
+                  if args.command == 'check-result' else verify(args.handoff))
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (ValueError, OSError, TypeError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)

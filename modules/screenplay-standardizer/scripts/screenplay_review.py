@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
 
 from asset_ledger import digest, scene_ranges, source_paragraphs, split_cast_entry
@@ -778,6 +779,9 @@ def make_report(workdir, decisions, previous=None, scope="full", scene_numbers=N
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("workdir", type=Path)
     parser.add_argument("--report", type=Path, required=True)

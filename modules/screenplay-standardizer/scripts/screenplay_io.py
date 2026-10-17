@@ -160,6 +160,9 @@ def assemble(workdir: Path, output: Path, review_report: Path) -> None:
 
 
 def main() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     prep = sub.add_parser("prepare", help="提取原文并生成内部段落编号")

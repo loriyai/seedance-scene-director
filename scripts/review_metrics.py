@@ -1,6 +1,7 @@
 """Record measured post-photography speech rework, without estimating savings."""
 import argparse
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from scene_review import digest
@@ -28,6 +29,9 @@ def measure(before, after, proof, started_at, finished_at):
             'limits':'本次实际返修区间耗时；不推算节省比例，不等同纯模型生成时间'}
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
     p=argparse.ArgumentParser(description=__doc__)
     for k in ('before','after','provenance','output'): p.add_argument('--'+k,type=Path,required=True)
     for k in ('started-at','finished-at'): p.add_argument('--'+k,required=True)
