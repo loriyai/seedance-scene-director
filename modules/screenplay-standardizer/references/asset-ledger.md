@@ -1,5 +1,7 @@
 # 资产台账结构
 
+主顺序、项目契约与新命令组合以[资产生产流程](../../../references/asset-workflow.md)为准。本页保留字段语义；下方旧命令仅作单独接口示例，新任务不以第二次normalize代替review-check/集中review-apply。
+
 ## 发声群体资产
 
 仅在原文明示集合共同发声、且不能唯一展开为全部已知成员时，按独立集合人物保留CHAR与原集合称谓。新增`character_kind: speaking_ensemble`、`visual_mode: image_asset`及逐字对应标准台词标签的`source_speaker`；source_entry保留完整集合条目，不加背景群像的`-群像-`标记。该类型不参加背景群像筛选，不允许prompt_only，也不创建个人佩戴变体。原文能唯一确定全部成员时可沿用多声源标签，不为了工具格式强拆不确定集合或新增成员。
@@ -14,10 +16,54 @@
 python scripts/asset_ledger.py init <standard-script.txt> <task-work-dir> --output <asset-ledger.json>
 python scripts/asset_ledger.py normalize <identity-and-time-reviewed-ledger.json> --output <normalized-ledger.json> --report <naming-audit.json>
 python scripts/asset_ledger.py build-scenes <normalized-ledger.json> --source <task-work-dir>/source.json --output <sets-draft.json>
-python scripts/asset_ledger.py normalize <sets-draft.json> --group-review <group-review.json> --source <task-work-dir>/source.json --output <group-reviewed-ledger.json> --report <group-review-report.json>
-python scripts/asset_ledger.py design <standard-script.txt> <task-work-dir>/source.json <group-reviewed-ledger.json> <asset-design.json> --style-file <project>/video-style.txt --output <designed-ledger.json> --catalog-output <asset-catalog.txt>
-python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/source.json <asset-ledger.json> --output <asset-catalog.txt>
+python scripts/asset_ledger.py review-template <sets-draft.json> <review-selections.json> --output <review-decisions.json>
+python scripts/asset_ledger.py review-apply <standard-script.txt> <task-work-dir>/source.json <sets-draft.json> <review-decisions.json> --output <reviewed-ledger.json> --report <decision-match-report.json>
+python scripts/asset_ledger.py validate <standard-script.txt> <task-work-dir>/source.json <reviewed-ledger.json> --candidate
+python scripts/asset_ledger.py design <standard-script.txt> <task-work-dir>/source.json <reviewed-ledger.json> <asset-design.json> --style-file <project>/video-style.txt --output <designed-ledger.json> --catalog-output <asset-catalog.txt>
+python scripts/asset_ledger.py validate <standard-script.txt> <task-work-dir>/source.json <designed-ledger.json> --require-designed
+python scripts/asset_ledger.py render <standard-script.txt> <task-work-dir>/source.json <designed-ledger.json> --output <asset-catalog.txt> --require-designed
 ```
+
+先冻结全局身份、地点及归并后的稳定ID，再保存审阅决定。`review-template`生成的是待填模板，须实际审阅并填写后才运行`review-apply`；模板不自动宣称审阅通过。旧的`normalize --group-review`仍兼容背景群像流程，不处理发声集合；新项目已确认的集合、群像或候选分类名单应经下面的决定入口落盘并对账。
+
+## 审阅决定应用与落盘对账
+
+审阅名单与最终台账使用同一组稳定ID，不能仅比较“都是7项”。先由作者核实集合/背景群像边界、每项实际证据和候选归类；`review-selections.json`只列本次已经选定的类型及ID，例如：
+
+```json
+[
+  {"kind": "speaking_ensemble", "asset_id": "CHAR0007"},
+  {"kind": "background_group", "asset_id": "CHAR0012"},
+  {"kind": "candidate_disposition", "candidate_id": "CAND0004"}
+]
+```
+
+`review-template`从当前实际台账生成`input_ledger_digest`、`source_digest`、每条`expected_record_digest`和精确`scope`；前者与记录摘要均为排序键、UTF-8、不转义中文的紧凑JSON的SHA256。不要手填假摘要或用旧台账的对象索引修改新副本。模板保留现有证据供复核，但已有审阅声明会重置为未完成；缺少字段保留null，必须经审阅补齐，不能把模板直接视为通过报告。
+
+决定文件顶层固定为`review_policy: asset-decisions-v1`、上述两个摘要、`scope`和`decisions`。`scope`必须分别列`character_ids`、`candidate_ids`、`archive_ids`，无项用空数组。决定ID与相应范围必须集合相等且无重复；原台账和逐项原记录均未变才允许应用。每项只接受以下固定操作，拒绝任意JSON patch或清空待核字段：
+
+- `speaking_ensemble`：`asset_id`、`expected_record_digest`、`values`；values完整包含`character_kind: speaking_ensemble`、`visual_mode: image_asset`、`source_speaker`、`ensemble_review`、`visible_uses`。源条目必须已保留真实集合称谓，不能把背景群像名称直接换成发声集合。
+- `background_group`：同上，但values完整包含`visual_mode`、`extraction_review`、`visible_uses`；目标须为已经核实的背景群像条目。不能通过此操作替代人物身份判断。
+- `candidate_disposition`：`candidate_id`、`expected_record_digest`、`values`；values只含`disposition`、`target_id`、`requires_reference`、`reason`。候选证据和场次仍取现有记录，完整台账校验继续核对分类目标、出处和图片资格。
+- `archive_inactive`：`asset_id`、`category`、`expected_record_digest`、具体`reason`。只能处理已处于inactive的记录，不能借此删除活动资产；明确排除后保留原记录到独立`asset_archive`并登记退役ID。已有退役ID但误留inactive的记录也可在无活动引用时显式归档。迁移产生的同ID、`kind: 人物可能改名或退场`待核记录，可显式提供`resolved_pending_digests`，逐条精确匹配摘要后存入归档的`resolved_pending_reviews`；其他待核不会自动清除。
+
+`review-apply`先深拷贝、从新副本重建索引，应用固定操作后执行完整原文、台账、身份、生命周期、资产政策及设计检查；全部通过才写两个新文件。输出与报告都不能覆盖输入或旧产物。已设计台账若类型改变导致旧设计失效，会拒绝成为完整交付，不能通过改提示词或审阅摘要掩盖不一致。
+
+`review-apply`是完成审阅后的候选提交入口，不是任意未完成台账的草稿保存器。存在无关pending或其他inactive时，同样不会写结果；可先在独立决定草稿中保存已确认的小批内容，完成其余待核后集中应用，或在一次决定中明确处理全部可归档项。不得为了让小批通过而删除未解决待核、遗漏资产或临时改变政策。
+
+台账保存`asset_decision_receipts`，后续分批决定追加记录；同一稳定ID以最新显式决定为准，未选ID仍保留此前有效决定。`validate`、`render`、`design`和`bind`都会自动核对有效决定的真实字段，而不是相信独立报告。指定原决定文件可再次只读对账：
+
+```text
+python scripts/asset_ledger.py review-verify <standard-script.txt> <source.json> <reviewed-ledger.json> <review-decisions.json>
+```
+
+这个检查能发现已确认名单未写入、同数量错ID、漏一条字段、输入过期或原值冲突；不能从语言自动找齐尚未登记的集合或候选，也不能证明作者的语义判断正确。
+
+## 待核、退役与新项目交付门槛
+
+`pending_reviews`是尚未解决的审阅问题，`inactive_assets`是待决定去向的资产，二者任一非空都统一阻止validate、design、render、bind。inactive可按characters、props、locations、scene_assets、scenes存放记录；不能把已排除道具塞进inactive当作历史归档。`asset_archive`是已经明确退役的历史记录，必须含稳定ID、类别、具体原因及原记录，ID必须在`retired_ids`中且不在活动资产或活动引用中。历史已存在的retired_ids允许继续读取，不为旧合并ID编造原因；新增显式排除通过归档入口保留原因和记录。
+
+新项目正式资产交付使用`validate --require-designed`和`render --require-designed`，并由导演bind的同名标志执行相同门槛：全部应生图资产有有效设计、prompt_only无图片派生字段、来源及设计摘要有效，才是完整图片提示词交付。design自己的最终验证始终使用该门槛。未带标志的validate/render保留旧事实台账读取兼容，不能据此宣称新项目完整设计已交付。
 
 ## JSON 字段
 
@@ -324,11 +370,29 @@ python scripts/asset_ledger.py variants <standard-script.txt> <source.json> <led
 
 迁移保留佩戴ID与一对一可定位的本场轨迹，不让新形象参与原人物槽位匹配。原文版本、原人物映射或事件证据变化时保留旧审阅并登记待核；拆并场轨迹不得猜分配，待作者重审后重新运行variants。不能直接刷新摘要或删除待核项假装审核通过。分类TXT的出现场次按基础关联及本场形象轨迹共同反查。
 
+## 移动载体与地点映射
+
+现有schema 3每个SC仍绑定一个主要叙事LOC及其SET，不新增一SC多地点或第二张车内图协议。连续“酒吧门口看车→上车→启动”可用同一SC：heading地点为酒吧门口，location_id指向酒吧门口LOC，scene_asset_id指向其SET，prop_ids包含已审车辆PROP；车门、座椅和方向盘关系放该PROP的structure/scale。车内外动作及人物出场完整保留。
+
+连续行驶的路径与当前位置变化写入动作或连续性说明；场景标题优先保留原文明示的主要地点，遵循[地点称谓与移动过程](../INSTRUCTIONS.md#地点称谓与移动过程)，不为覆盖行驶范围自行拼接地名。LOC及SET的名称只沿用已审阅的地点称谓或有依据的必要消歧限定，不将移动过程登记为新地点或别名。若真正到达另一独立地点、发生实质转场则在那里拆分；不能为了少建场而把未证同一的路口、道路、金荣街写成同一LOC别名。持续在列车包厢等独立叙事空间发生的新段落可按原文建车厢SC/LOC/SET，车辆是否另需PROP按外观参考用途审阅，不是车辆一律只能当PROP。
+
+单独内景参考需求先放`asset_dependency`观察：ID已稳定时，`target`沿用`{"category":"props", "asset_id":"PROP0001"}`；ID未确定时不填target，用`tentative_subject`保留原文车辆称谓。`basis`写车辆及需要稳定的座椅/出入口关系，附真实段落引用。该记录只保留制作需求；当前单品导出不会自动生成附加内景图，也不能借此伪造新SC。道具内饰本体设计仍写物理属性，图片展示选择遵循下节。
+
 ## 制作设计与图片提示词
 
 原文visual_facts和personality_facts保持事实及出处，未知事实仍留空；完整美术方案另存visual_design，不写回事实字段。生成者结合剧本约束和[资产图片设计规范](../../../references/asset-image-design.md)写设计JSON，脚本只校验并编译，不设计外观、不调用生图模型、不改变ID/名称/形象启用。design覆盖全部图片CHAR/SET/PROP，排除prompt_only群像；其旧生图派生字段仅在显式design时清除。design只接受已核实schema 3台账，旧schema 2须按原显式迁移流程处理；旧schema 3可在用户授权后显式执行design，新政策字段不自动添加。normalize与群像筛选先于design执行。
 
 输入design JSON必须覆盖全部现用CHAR、SET、PROP；即使某基础SET只供版本继承也须设计。设计数组不增加或删除资产。每项attribution固定“制作设计”，basis记简短设计依据，reviewed_source_facts=true表示作者已审阅所有原文明示约束，不代表程序能理解或自动修正语义冲突。
+
+初稿先选择有代表性的小批资产，使用正式的只读`design-check`核对结构及依赖，避免完成全部设计才发现模板不兼容：
+
+```text
+python scripts/asset_ledger.py design-check <standard-script.txt> <source.json> <reviewed-ledger.json> <sample-designs.json> --style-file <video-style.txt> --asset-id CHAR0001 --asset-id SET0001
+```
+
+`--asset-id`可重复，ID不得重复；命令先对完整事实台账执行同一validate，不裁剪台账来绕过缺项，然后检查所选资产及依赖闭包。基础人物/服装、关联佩戴PROP、同LOC布景版本及共享身份依赖必须有本次设计或严格有效的既有设计，不能为了凑样本凭空填默认设计。报告含`input_sha256`及绑定本次ID/依赖的`binding_sha256`；复查可用`--expected-hashes <hashes.json>`传入上次的`input_sha256`，该对象必须含script/source/ledger/design/style五个文件SHA256，变化则重新准备样本。
+
+该命令只向stdout返回partial预览及问题，不写正式台账、不建立绑定；样本通过也不代表全剧语义审阅通过。全部草稿合并后仍运行全覆盖design、render和最终绑定，不放宽完整交付门槛。
 
 ```json
 {
@@ -345,9 +409,11 @@ python scripts/asset_ledger.py variants <standard-script.txt> <source.json> <led
 
 所有视觉文字字段为非空单行。identity_anchors记录共享的年龄与性别感、体型、五官、发型，不填无关背景故事。已登记appearance.identity与incarnation相同的CHAR共享identity_anchor_id，不同世次或身份的身体不得共享；没有appearance的简单或旧人物由作者审阅，不从名字拆分猜身份。已有换装版本只改styling，面部和体型继承同一锚点。已有真实发型等变化可选appearance_overrides对象（age/body/face/hair）及variant_differences文字数组，逐项写明确差异与保持项；这不会创建新CHAR，也不能代替原形象启用规则。覆盖face/body还必须在override_source_facts对象中以相应字段映射到该资产已有、经验证的visual_facts.text，例如face对应明确疤痕事实；程序只检查引用存在，是否证明该变化仍须审阅。跨世次不以覆盖方式借用旧身体锚点。
 
-SET的space必须写主要活动区、出入口和固定相对关系；materials_palette/furnishings/lighting提供可拍材质、陈设与基础受光。普通家具进入SET，单幅无人物主视图；父SET共用事实继承规则保持原规定，不把temporal时间跨度推成自动破败。PROP的structure/materials_palette/scale/state只描写物件本体，不编造未知密码、铭文或剧情线索；单件完整、纯净白底、不夹手部或剧情环境。
+SET的space必须写主要活动区、出入口和固定相对关系；materials_palette/furnishings/lighting提供可拍材质、陈设与基础受光。普通家具进入SET，单幅无人物主视图；父SET共用事实继承规则保持原规定，不把temporal时间跨度推成自动破败。PROP的structure/materials_palette/scale/state只描写物件本体，不编造未知密码、铭文或剧情线索。单件完整、白底、不夹手部等要求属于编译器的展示层，不能填入这四个物理属性；人物佩戴形象只继承物理属性。
 
-需整组参考的多实体PROP，在v2设计中显式填`product_layout: multiple_objects`与非空`layout_basis`（原组合证据、已知数量与参考展示范围），使用整组完整且各实体独立分开的组合版式。只需同款单个样本时沿用默认，并说明剧情实物数量不等于图片样本数。未知总数不凭样本推定；不从名称或数量词自动改版。此显式例外取代该资产的“单件”尾句，未选PROP、人物和旧v1保持原编译字节。
+需整组参考的多实体PROP，在v2设计中显式填`product_layout: multiple_objects`与非空`layout_basis`（原组合证据、已知数量与参考展示范围），使用整组完整且各实体独立分开的组合版式。只需同款单个样本时沿用默认，在`basis`说明剧情实物数量不等于图片样本数。未知总数不凭样本推定；不从名称或数量词自动改版。此显式例外取代该资产的“单件”尾句，未选PROP、人物和旧v1保持原编译字节。
+
+v2 PROP可选`image_presentation: {"view": "front_left_three_quarter"}`，view只接受front/front_left_three_quarter/front_right_three_quarter/top，省略保持原默认。它及product_layout/layout_basis只作用于PROP图片，不复制到CHAR。草稿阶段用`scripts/design_scope.py <设计草稿.json>`提前检查；字段范围、具体例子和历史兼容见[物体属性与图片展示分离](../../../references/asset-image-design.md#物体属性与图片展示分离)。源事实、ID关系和旧回执不由lint修改，检查通过仍不是语义批准。
 
 v2图片群像不使用单个人物identity_anchor_id，改填group_members与group_wardrobe。group_members每人包含sample_id、age、body、face、hair，须有可辨外貌差异；varied/mixed模式另填个人styling。group_wardrobe包含mode（varied/uniform/mixed）、basis、era_region，uniform/mixed还须shared_style；统一服制下成员不另填服装或与shared_style完全一致，mixed保留共有服制及原文明示的等级/职责差异。不要通过样本数新增实际人物或擅改原文年龄、性别构成。完整示例和样本数边界以资产图片设计规范为准。
 
@@ -359,7 +425,7 @@ style-file使用项目原样保存的单行video-style.txt；只去除文件首�
 
 ## 核对
 
-`render` 检查：原文摘要、场景与段落范围、ID 引用、每场人物source_entry（缺省name）与人物行完整条目逐项、逐字、按顺序匹配、场景标题及地点名称与剧本一致、道具source_name和别名在关联正文中出现、全目录制作名称唯一及安全、形象启用区间、资产事实的场景出现关系、证据在原文段落中出现。新策略还检查道具入选路径、使用证据及prop_coverage_review的声明、全部SC覆盖、候选证据与目标关联、全部PROP覆盖。群像按group_policy检查模式、入选路径、参考需求、对应最低可见出场次数及审阅理由字段，v2纯文字模式还须说明文字足够的理由。`pending_reviews` 或 `inactive_assets.characters` 未处理完时不能渲染。它无法判断摘要是否正确表达证据、候选是否语义完整或“性格”是否真的被原文明确写出；这些仍需人工逐条核对。
+`render` 检查：原文摘要、场景与段落范围、ID 引用、每场人物source_entry（缺省name）与人物行完整条目逐项、逐字、按顺序匹配、场景标题及地点名称与剧本一致、道具source_name和别名在关联正文中出现、全目录制作名称唯一及安全、形象启用区间、资产事实的场景出现关系、证据在原文段落中出现。新策略还检查道具入选路径、使用证据及prop_coverage_review的声明、全部SC覆盖、候选证据与目标关联、全部PROP覆盖。群像按group_policy检查模式、入选路径、参考需求、对应最低可见出场次数及审阅理由字段，v2纯文字模式还须说明文字足够的理由。`pending_reviews` 或 `inactive_assets` 任一分类未处理完时不能渲染。它无法判断摘要是否正确表达证据、候选是否语义完整或“性格”是否真的被原文明确写出；这些仍需人工逐条核对。
 
 生成TXT只保留角色列表、场景列表、主要道具列表，各分类从01开始按台账数组顺序编号，超过99自然显示100，不截断。序号只用于查看统计，不写入稳定ID、name、图片名或节点名。完成design时主行为 `01 - 完整资产名：完整image_prompt`，下一行角色写出现的场景、SET/PROP写使用的场次，关联ID反查number后排序去重。旧未design台账仍显示原文核心可见特征，缺信息时保留“未明示”和旧独立production_design行，不静默补设计；新制作须先design，完整图片描述直接可用。TXT不显示后台ID、证据或性格栏；原文事实、出处、完整制作设计与格式元数据同存JSON，不能手工维护第二份提示词。
 
@@ -387,7 +453,7 @@ python scripts/asset_migrate.py <old-ledger.json> <old-source.json> <new-script.
 
 未改场景的原文段落序列完全一致时，证据编号按场景起点偏移直接迁移；只对改动场景重新搜索证据。迁移报告列出 `unchanged_source_scenes` 数量，方便判断复用范围。
 
-旧人物source_entry（缺省name）没有在新剧本人物行出现时，完整记录先放入 `inactive_assets.characters`，同时加入 `pending_reviews`；这表示“可能改名、换形象或退场”，并不立即废弃人物 ID。若实际改名或原有形象条目更名，在映射中用 `characters` 指定旧 ID 对应的新人物行完整条目后重新迁移；迁移更新source_entry及已登记的source_speaker，保留独立制作name与原ID。若出现新形象，则分配新的 `CHAR` ID，不将旧形象 ID 改名挪用。若确认退场，人工把 ID 放入 `retired_ids`，移除暂存记录，并核对其旧事实是否需要保留为历史记录。处理所有待核项后才清空 `pending_reviews` 并渲染。旧版 `schema_version: 1` 可迁移，但每场 `time_basis` 都须复核。
+旧人物source_entry（缺省name）没有在新剧本人物行出现时，完整记录先放入 `inactive_assets.characters`，同时加入 `pending_reviews`；这表示“可能改名、换形象或退场”，并不立即废弃人物 ID。若实际改名或原有形象条目更名，在映射中用 `characters` 指定旧 ID 对应的新人物行完整条目后重新迁移；迁移更新source_entry及已登记的source_speaker，保留独立制作name与原ID。若出现新形象，则分配新的 `CHAR` ID，不将旧形象 ID 改名挪用。若确认退场，使用带稳定ID及证据的archive审阅决定，将完整旧记录移入archived_assets并登记retired_ids；核对无现用引用后逐项消解相应pending，不清空其他待核或直接删除旧记录。详见[审阅决定工作区](asset-decisions.md)。旧版 `schema_version: 1` 可迁移，但每场 `time_basis` 都须复核。
 
 ## 物理地点与布景版本
 

@@ -10,6 +10,7 @@ import json
 import re
 
 from character_variants import scene_character_ids, scene_appearance_tracks
+import design_scope
 
 
 LEGACY_PROP_POLICY = "visible-reuse-v1"
@@ -517,6 +518,7 @@ def validate_design_record(category, item, design, anchors, version=DESIGN_VERSI
         raise ValueError(f"{label}发声群体多人参考板须使用{DESIGN_VERSION}")
     if not isinstance(design, dict) or design.get("attribution") != "制作设计":
         raise ValueError(f"{label}视觉设计须独立标注制作设计")
+    design_scope.validate_presentation(category, design, version)
     nonempty(design.get("basis"), f"{label}设计依据")
     if design.get("reviewed_source_facts") is not True:
         raise ValueError(f"{label}设计作者须审阅原文明示约束并声明 reviewed_source_facts=true")
@@ -698,13 +700,20 @@ def compile_prompt(data, category, item, design, anchors):
         prompt += "单幅清晰广角建立镜头，平视或微俯，前中后层次有秩序，出入口和主要活动区清楚，保留人物行动通道，空间结构自洽。完全无人物、人影或故事动物，无剧情动作、说明文字、水印或签名。"
         form = {"model": "gpt-image-2", "layout": "single_environment_master_view", "subjects": "no_characters"}
     else:
+        view = design.get("image_presentation", {}).get("view")
+        presentation = design_scope.PROP_VIEWS[view] if view else ""
         if data.get("image_design_version") == DESIGN_VERSION and design.get("product_layout") == "multiple_objects":
             prompt = common + f"组合道具资产：{item['name']}。形制与关键结构：{design['structure']}；材质与颜色：{design['materials_palette']}；尺寸关系：{design['scale']}；当前状态：{design['state']}。"
-            prompt += f"本参考图的组合依据与展示范围：{design['layout_basis']}。整组居中完整入镜，各实体独立、清楚分开、不重叠，不能合并成一个物体。原文明确的数量须保留；未明确的剧情总数不由图片样本数推定。四周留白，比例准确，纯净白色背景，柔和均匀棚拍光，轻淡阴影。无人物、手部、组合以外的额外物品、展示架、剧情环境、额外文字、水印或签名；保留原文明示的物件本体文字或图案。"
-            return prompt, {"model": "gpt-image-2", "layout": "multiple_complete_objects", "background": "pure_white"}
+            prompt += presentation + f"本参考图的组合依据与展示范围：{design['layout_basis']}。整组居中完整入镜，各实体独立、清楚分开、不重叠，不能合并成一个物体。原文明确的数量须保留；未明确的剧情总数不由图片样本数推定。四周留白，比例准确，纯净白色背景，柔和均匀棚拍光，轻淡阴影。无人物、手部、组合以外的额外物品、展示架、剧情环境、额外文字、水印或签名；保留原文明示的物件本体文字或图案。"
+            form = {"model": "gpt-image-2", "layout": "multiple_complete_objects", "background": "pure_white"}
+            if view:
+                form["view"] = view
+            return prompt, form
         prompt = common + f"单品道具资产：{item['name']}。形制与关键结构：{design['structure']}；材质与颜色：{design['materials_palette']}；尺寸关系：{design['scale']}；当前状态：{design['state']}。"
-        prompt += "标准产品摄影视角，立体物件微俯3/4视角，扁平物件正俯平铺。单件居中完整入镜，四周留白，比例准确，结构美观清晰，纯净白色背景，柔和均匀棚拍光，轻淡阴影。无人物、手部、其他物品、展示架、剧情环境、额外文字、水印或签名；保留原文明示的物件本体文字或图案。"
+        prompt += (presentation or "标准产品摄影视角，立体物件微俯3/4视角，扁平物件正俯平铺。") + "单件居中完整入镜，四周留白，比例准确，结构美观清晰，纯净白色背景，柔和均匀棚拍光，轻淡阴影。无人物、手部、其他物品、展示架、剧情环境、额外文字、水印或签名；保留原文明示的物件本体文字或图案。"
         form = {"model": "gpt-image-2", "layout": "single_complete_product", "background": "pure_white"}
+        if view:
+            form["view"] = view
     return prompt, form
 
 
@@ -800,6 +809,9 @@ def apply_design(data, payload, style_text):
             item["visual_design"] = design
     # All author designs are installed before any dependent CHAR is compiled;
     # it must consume this payload's PROP design, never an old ledger snapshot.
+    # New writes check physical fields and their inherited context. Historical
+    # validate/render does not retrofit a new scope gate or rewrite old prompts.
+    design_scope.check_context(result)
     for category in ASSET_CATEGORIES:
         for item in visual_assets(result, category):
             design = item["visual_design"]

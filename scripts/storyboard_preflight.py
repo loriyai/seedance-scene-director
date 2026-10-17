@@ -429,6 +429,13 @@ def _source_audio(state, unit):
             errors.append(_issue("AUDIO_SOURCE_CHANGED", "声音计划原台词与选定原文不一致", record=rid))
         if "voice" in record and event.get("voice") != record["voice"]:
             errors.append(_issue("AUDIO_SOURCE_VOICE", "现场/OS等声源类型与原文不一致", record=rid))
+        import audio_sources
+        try:
+            if audio_sources.validate_source(event, record):
+                continue
+        except ValueError as exc:
+            errors.append(_issue("AUDIO_SOURCE_IDENTITY", str(exc), record=rid))
+            continue
         ids = event.get("character_ids", []) if "character_ids" in event else [event.get("character_id")]
         if not isinstance(ids, list) or not ids or any(not _line(cid) or cid not in chars for cid in ids):
             errors.append(_issue("AUDIO_SOURCE_IDENTITY", "声音身份须对应已登记人物", record=rid))

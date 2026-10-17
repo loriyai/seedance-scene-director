@@ -25,21 +25,26 @@
       "profile": "creative",
       "references": [
         "modules/screenplay-standardizer/INSTRUCTIONS.md",
-        "modules/screenplay-standardizer/references/review.md"
+        "modules/screenplay-standardizer/references/review.md",
+        "modules/screenplay-standardizer/references/observations.md"
       ]
     },
     "assets": {
       "profile": "creative",
       "references": [
         "modules/screenplay-standardizer/INSTRUCTIONS.md",
-        "modules/screenplay-standardizer/references/asset-ledger.md"
+        "modules/screenplay-standardizer/references/asset-ledger.md",
+        "references/asset-workflow.md",
+        "modules/screenplay-standardizer/references/asset-decisions.md",
+        "modules/screenplay-standardizer/references/observations.md"
       ]
     },
     "design": {
       "profile": "creative",
       "references": [
         "references/asset-image-design.md",
-        "modules/screenplay-standardizer/references/asset-ledger.md"
+        "modules/screenplay-standardizer/references/asset-ledger.md",
+        "references/design-workspace.md"
       ]
     },
     "storyboard": {
@@ -51,7 +56,8 @@
         "references/performance-direction.md",
         "references/shot-options.md",
         "references/output-format.md",
-        "references/scene-review-workflow.md"
+        "references/scene-review-workflow.md",
+        "references/storyboard-workflow.md"
       ]
     },
     "revise": {
@@ -63,25 +69,20 @@
         "references/performance-direction.md",
         "references/shot-options.md",
         "references/output-format.md",
-        "references/scene-review-workflow.md"
+        "references/scene-review-workflow.md",
+        "references/storyboard-workflow.md"
       ]
     },
     "review": {
       "profile": "creative",
-      "references": [
-        "references/runtime.md",
-        "references/continuity-state.md",
-        "references/cinematic-rules.md",
-        "references/performance-direction.md",
-        "references/output-format.md",
-        "references/scene-review-workflow.md"
-      ]
+      "references": []
     },
     "sync": {
       "profile": "operations",
       "references": [
         "references/canvas.md",
-        "references/canvas-jobs.md"
+        "references/canvas-jobs.md",
+        "references/canvas-workflow.md"
       ]
     }
   },
@@ -105,7 +106,9 @@
     "short_routine_task": "parent_direct",
     "same_verified_parent_configuration": "parent_direct",
     "commit_owner": "parent",
-    "canvas_writer": "existing_canvas_jobs_worker"
+    "canvas_writer": "existing_canvas_jobs_worker",
+    "max_active_design_groups": 2,
+    "design_parallelism": "frozen-disjoint-groups-only"
   },
   "failure_policy": {
     "unavailable_model": "report_once_then_parent_if_capable",
@@ -113,5 +116,6 @@
     "uncertain_spawn": "inspect_existing_agent_before_new_spawn",
     "changed_input": "reject_draft_and_prepare_new_handoff",
     "uncertain_canvas_write": "existing_readback_and_resume_rules"
-  }
+  },
+  "handoff_policy": "stage-handoff-v2"
 }

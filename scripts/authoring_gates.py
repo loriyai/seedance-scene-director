@@ -43,7 +43,7 @@ def audio_payload(state, unit):
                   for rid, ps in parts.items()}
     ids = {e.get('record') for e in unit.get('audio', [])}
     rules = {name:hashlib.sha256((Path(__file__).parent/name).read_bytes()).hexdigest()
-             for name in ('authoring_gates.py','storyboard_preflight.py','dialogue_layout.py','speech_timing_audit.py')}
+             for name in ('authoring_gates.py','storyboard_preflight.py','dialogue_layout.py','speech_timing_audit.py','audio_sources.py')}
     return {'policy':POLICY, 'rules':rules, 'audio': unit.get('audio', []), 'parts': normalized,
             'duration': unit.get('duration'), 'span': unit.get('span'),
             'actions': unit.get('action_plan'),

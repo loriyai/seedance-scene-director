@@ -9,11 +9,105 @@ from pathlib import Path
 from character_variants import scene_character_ids
 
 from asset_ledger import HEADING, GENERIC_ROLE, digest, fact_list, parse_script, scene_ranges, source_paragraphs, split_cast_entry
-from asset_visual_design import (PROP_POLICY, GROUP_POLICY, group_minimum_visible_uses, is_group,
+from asset_visual_design import (PROP_POLICY, GROUP_POLICY, group_minimum_visible_uses, is_group, is_speaking_ensemble,
                                  validate_group_policy, validate_prop_coverage, validate_visual_design)
+from asset_review import verify_review_decisions, fingerprint as decision_fingerprint
+from scene_observations import (MIGRATION_PENDING_KIND, PENDING_KIND, observation_history_digest,
+                                validate_imported_observations)
 
 
 PREFIXES = {"scenes": "SC", "characters": "CHAR", "locations": "LOC", "props": "PROP"}
+
+
+def preserve_observations(old, result, paragraphs, script, pending):
+    """Retain valid source-bound imports; archive stale evidence without rebasing it."""
+    if "observations_history" in old:
+        if not isinstance(old["observations_history"], list):
+            raise ValueError("旧台账 observations_history 须为数组")
+        result["observations_history"] = copy.deepcopy(old["observations_history"])
+    if "observations" not in old:
+        return
+    saved = copy.deepcopy(old["observations"])
+    if not isinstance(saved, dict):
+        raise ValueError("旧台账 observations 须为对象")
+    result["observations"] = saved
+    try:
+        validate_imported_observations(result, paragraphs, script)
+        return
+    except (ValueError, KeyError, TypeError, IndexError) as exc:
+        reason = str(exc)
+    current_facts = []
+    for entry in saved.get("imports", []):
+        targets = [item for item in result.get(entry["category"], []) if item.get("id") == entry["target_id"]]
+        # Migration only relocates evidence. Preserve the exact current copies
+        # as well as the original import so later withdrawal cannot ignore them.
+        facts = [copy.deepcopy(fact) for target in targets for fact in target.get(entry["field"], [])
+                 if all(fact.get(field) == entry["fact"].get(field) for field in ("text", "evidence", "attribution"))]
+        current_facts.append({"observation_id": entry["observation_id"], "category": entry["category"],
+                              "target_id": entry["target_id"], "field": entry["field"], "facts": facts})
+    previous_pending = [copy.deepcopy(item) for item in pending if item.get("kind") == PENDING_KIND
+                        and item.get("observations_digest") == saved.get("payload_digest")]
+    history = {"policy": "observations-v1", "previous_source_digest": old.get("source_digest"),
+               "new_source_digest": result.get("source_digest"), "reason": reason,
+               "observations": saved, "migrated_imported_facts": current_facts,
+               "old_pending_reviews": previous_pending}
+    history["history_digest"] = observation_history_digest(history)
+    result.setdefault("observations_history", []).append(history)
+    result.pop("observations")
+    pending[:] = [item for item in pending if not (item.get("kind") == PENDING_KIND
+                  and item.get("observations_digest") == saved.get("payload_digest"))]
+    pending.append({"kind": MIGRATION_PENDING_KIND, "history_digest": history["history_digest"],
+                    "detail": reason,
+                    "action": "逐项复核归档观察与迁移后旧事实；使用当前源/场稿 prepare 新观察，运行对应场次 review。"
+                              "在新 bundle.reconciliations 指定本 history_digest、basis 及全部旧 observation_id 的"
+                              "reconfirmed/retained_pending/withdrawn 处理；旧事实须已移除或被当前已审阅事实确认。"
+                              "重新 import 仅消解本项，再运行全量 validate；不得改写旧摘要或自动宣称恢复。"})
+
+
+def preserve_asset_review_history(old, result, pending):
+    """Keep audit evidence intact; only currently valid receipts remain active."""
+    for field in ("asset_archive", "asset_decision_history"):
+        if field in old:
+            if not isinstance(old[field], list):
+                raise ValueError(f"旧台账 {field} 须为数组")
+            result[field] = copy.deepcopy(old[field])
+    if "asset_decision_receipts" not in old:
+        return
+    receipts = old["asset_decision_receipts"]
+    if not isinstance(receipts, list):
+        raise ValueError("旧台账 asset_decision_receipts 须为数组")
+    result["asset_decision_receipts"] = copy.deepcopy(receipts)
+    if not receipts:
+        return
+    detail = None
+    if old.get("source_digest") != result.get("source_digest"):
+        detail = "审阅决定对应的原文版本已变化"
+    else:
+        try:
+            verify_review_decisions(result)
+        except (ValueError, KeyError, TypeError, IndexError) as exc:
+            detail = str(exc)
+    if detail is None:
+        return
+    history = {"reason": detail, "previous_source_digest": old.get("source_digest"),
+               "new_source_digest": result.get("source_digest"),
+               "asset_decision_receipts": copy.deepcopy(receipts)}
+    result.setdefault("asset_decision_history", []).append(history)
+    result["asset_decision_receipts"] = []
+    required = {key: set() for key in ("character_ids", "candidate_ids", "archive_ids")}
+    for receipt in receipts:
+        scope = receipt.get("payload", {}).get("scope", {}) if isinstance(receipt, dict) else {}
+        if isinstance(scope, dict):
+            for key in required:
+                values = scope.get(key, [])
+                if isinstance(values, list):
+                    required[key].update(value for value in values if isinstance(value, str))
+    pending.append({"kind": "资产审阅决定待复核", "detail": detail,
+                    "history_digest": decision_fingerprint(history),
+                    "required_scope": {key: sorted(values) for key, values in required.items()},
+                    "action": "按既有改稿迁移人工流程逐项重审原文、资产字段及历史决定；完成后显式移除此待核，"
+                              "以当前版本摘要重建审阅决定并运行review-apply及全量validate。归档历史逐项核对并保留，"
+                              "不得重写旧回执摘要、静默清除待核或宣称自动恢复。"})
 
 
 def compact(value):
@@ -233,16 +327,31 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
 
     used = set(old.get("retired_ids", []))
     inactive = copy.deepcopy(old.get("inactive_assets", {"characters": []}))
-    if not isinstance(inactive, dict) or not isinstance(inactive.get("characters", []), list):
+    lifecycle_prefixes = {**PREFIXES, "scene_assets": "SET"}
+    if not isinstance(inactive, dict) or not set(inactive).issubset(lifecycle_prefixes):
         raise ValueError("旧台账 inactive_assets 无效")
     inactive.setdefault("characters", [])
     for category in PREFIXES:
         used.update(item["id"] for item in old[category])
-    used.update(item["id"] for item in inactive["characters"])
+    for category, records in inactive.items():
+        if not isinstance(records, list) or any(not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                or not re.fullmatch(lifecycle_prefixes[category] + r"\d{4,}", item["id"]) for item in records):
+            raise ValueError(f"旧台账 inactive_assets.{category} 无效")
+        used.update(item["id"] for item in records)
+    archive = old.get("asset_archive", [])
+    if not isinstance(archive, list):
+        raise ValueError("旧台账 asset_archive 须为数组")
+    for entry in archive:
+        if (not isinstance(entry, dict) or entry.get("category") not in lifecycle_prefixes
+                or not isinstance(entry.get("asset_id"), str)
+                or not re.fullmatch(lifecycle_prefixes[entry["category"]] + r"\d{4,}", entry["asset_id"])):
+            raise ValueError("旧台账 asset_archive 分类或ID无效")
+        used.add(entry["asset_id"])
     used.update(item["id"] for item in old.get("scene_assets", []))
     retired = set(old.get("retired_ids", []))
     retired.update(set(old_by_id) - set(primary.values()))
-    pending = [{"kind": "旧台账待核项", "item": item} for item in old.get("pending_reviews", [])]
+    pending = [copy.deepcopy(item) if item.get("kind") in (PENDING_KIND, MIGRATION_PENDING_KIND)
+               else {"kind": "旧台账待核项", "item": item} for item in old.get("pending_reviews", [])]
     characters = copy.deepcopy(old["characters"])
     original_characters = {item["id"]: item for item in old["characters"]}
     locations = copy.deepcopy(old["locations"])
@@ -435,7 +544,8 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
                                      and item.get("extraction_review", {}).get("kind") == "core_continuity") else 2
                 if category == "props" and len(uses) < prop_minimum and old.get("asset_policy"):
                     pending.append({"kind": "主要道具复用门槛待核", "asset_id": item["id"], "remaining_visible_uses": len(uses)})
-                if (category == "characters" and item.get("visual_mode") == "image_asset"
+                if (category == "characters" and is_group(item) and not is_speaking_ensemble(item)
+                        and item.get("visual_mode") == "image_asset"
                         and len(uses) < group_minimum_visible_uses(old, item)):
                     pending.append({"kind": "群像图片复用门槛待核", "asset_id": item["id"], "remaining_visible_uses": len(uses)})
             if (category == "characters" and item.get("extraction_review", {}).get("kind") == "background_group"
@@ -484,7 +594,7 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
     result = {"schema_version": 2, "source_digest": digest(new_paragraphs), "scenes": scenes,
               "characters": characters, "locations": locations, "props": props,
               "retired_ids": sorted(retired), "inactive_assets": inactive, "pending_reviews": pending}
-    for field in ("asset_policy", "group_policy", "character_variant_policy", "image_design_version", "visual_style", "identity_anchors"):
+    for field in ("asset_policy", "group_policy", "character_variant_policy", "image_design_version", "visual_style", "identity_anchors", "delivery_contract"):
         if field in old:
             result[field] = copy.deepcopy(old[field])
     if old.get("schema_version") == 3:
@@ -574,6 +684,8 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
                 pending.append({"kind": "未用布景版本去向待核", "asset_id": item["id"]})
     preserve_group_reviews(old, result, new_paragraphs, bases, pending)
     preserve_prop_coverage(old, result, new_paragraphs, pending)
+    preserve_asset_review_history(old, result, pending)
+    preserve_observations(old, result, new_paragraphs, bases, pending)
     if "image_design_version" in old:
         try:
             validate_visual_design(result)

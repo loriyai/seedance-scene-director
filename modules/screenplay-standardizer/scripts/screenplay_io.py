@@ -12,6 +12,7 @@ import zipfile
 from pathlib import Path
 
 from asset_ledger import HEADING, validate_image_name
+from cast_contract import validate_cast_entries
 
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -98,8 +99,7 @@ def validate_scene(content: str, number: int, path: Path) -> list[str]:
         errors.append(f"{path.name}:{lines[1][0]}：人物行须有条目且以 ； 结尾")
     elif cast != "人物：无；":
         entries = cast[3:-1].split("；")
-        if any(not entry or "-" not in entry or not all(part.strip() for part in entry.split("-")) for entry in entries):
-            errors.append(f"{path.name}:{lines[1][0]}：人物条目应为 角色名-形象；")
+        errors.extend(f"{path.name}:{lines[1][0]}：{error}" for error in validate_cast_entries(entries))
     for line_no, line in lines[2:]:
         if not line.startswith("△ ") and not DIALOGUE.fullmatch(line):
             errors.append(f"{path.name}:{line_no}：正文应为 △ 动作段 或 角色名：台词")
@@ -110,12 +110,13 @@ def assemble(workdir: Path, output: Path, review_report: Path) -> None:
     from screenplay_review import REVIEW_VERSION, fingerprint_workdir
 
     report = json.loads(review_report.read_text(encoding="utf-8-sig"))
-    if report.get("review_version") != REVIEW_VERSION or report.get("status") != "passed":
+    if (report.get("review_version") != REVIEW_VERSION or report.get("status") != "passed"
+            or report.get("scope", "full") != "full"):
         raise ValueError("合并前须提供当前版本且已通过的逐场复核报告")
     if report.get("fingerprint") != fingerprint_workdir(workdir):
         raise ValueError("复核报告与当前原文或逐场稿不一致，请重新复核")
     counts = report.get("counts", {})
-    if any(counts.get(key) != 0 for key in ("missing", "extra", "speaker")):
+    if any(counts.get(key) != 0 for key in ("missing", "extra", "speaker", "scene_boundary")):
         raise ValueError("复核报告仍有未处理项目")
     source_file = workdir / "source.json"
     if not source_file.is_file():

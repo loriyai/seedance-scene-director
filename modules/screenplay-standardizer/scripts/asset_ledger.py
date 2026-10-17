@@ -15,6 +15,10 @@ from asset_visual_design import (PROP_POLICY, GROUP_POLICY, apply_design, apply_
                                  validate_visual_design, visual_assets)
 from character_variants import (apply_variant_review, scene_character_ids,
                                 validate_character_variants)
+from cast_contract import split_cast_entry, validate_cast_entries
+from asset_review import (prepare_review_payload, apply_review_decisions, verify_review_decisions,
+                          validate_asset_lifecycle)
+from project_contract import delivery_contract, requires_design
 
 
 HEADING = re.compile(r"场景(\d+)(?=-(?:日|夜)-(?:内|外)-|：(?:日|夜)·(?:内|外)·)[：-](日|夜)[·-](内|外)[·-](.+)")
@@ -27,19 +31,6 @@ ID_PATTERNS = {
     "scene_assets": re.compile(r"SET\d{4,}"),
 }
 GENERIC_ROLE = re.compile(r"^(?:宾客|同学|女生|男生|医生|男医生|女医生|护士|保镖|工作人员|服务员|路人|司机|助理|店员|老师|教授|大爷|阿姨|侍者|主持人)")
-
-
-def split_cast_entry(entry: str) -> tuple[str, str]:
-    """Keep a source-backed group name such as 百姓-群像 intact."""
-    if "-群像-" in entry:
-        prefix, image = entry.split("-群像-", 1)
-        name = prefix + "-群像"
-    else:
-        name, image = entry.split("-", 1)
-    name, image = name.strip(), image.strip()
-    if not name or not image:
-        raise ValueError(f"人物条目缺少名称或形象：{entry}")
-    return name, image
 
 
 def source_paragraphs(path: Path) -> list[str]:
@@ -78,11 +69,10 @@ def parse_script(path: Path) -> list[dict]:
             names = []
         else:
             entries = cast_line[3:-1].split("；")
-            if any("-" not in entry for entry in entries):
-                raise ValueError(f"场景{number} 人物行条目缺少形象字段")
+            cast_errors = validate_cast_entries(entries)
+            if cast_errors:
+                raise ValueError(f"场景{number} 人物行不合法：" + "；".join(cast_errors))
             names = [split_cast_entry(entry)[0] for entry in entries]
-            if any(not name for name in names) or len(names) != len(set(names)):
-                raise ValueError(f"场景{number} 人物名称为空或重复")
         scenes.append({
             "number": number,
             "heading": line.strip(),
@@ -203,8 +193,14 @@ def normalize_assets(data):
         variant = item.get('appearance_variant', {})
         if variant.get('prop_asset_id') in redirects:
             variant['prop_asset_id'] = redirects[variant['prop_asset_id']]
+    if 'observations' in result:
+        from scene_observations import remap_observation_targets
+        result = remap_observation_targets(result, redirects)
     reference_preflight(result)
-    return result, {'renamed': changes, 'redirects': redirects, 'merged_assets': archived}
+    from asset_review import assert_normalize_review_safe
+    report = {'renamed': changes, 'redirects': redirects, 'merged_assets': archived}
+    report['review_impact'] = assert_normalize_review_safe(data, result, report)
+    return result, report
 
 
 def validate_appearance(item, paragraphs, scenes):
@@ -296,15 +292,19 @@ def fact_list(records: list[dict], paragraphs: list[str], scenes_by_id: dict, la
             raise ValueError(f"{label} 引用了事实关联场景以外的原文段落")
 
 
-def validate(script: list[dict], paragraphs: list[str], data: dict) -> None:
+def validate(script: list[dict], paragraphs: list[str], data: dict, *, require_designed=False) -> None:
     if data.get("schema_version") not in (2, 3):
         raise ValueError("不支持的资产台账 schema_version")
-    if not isinstance(data.get("pending_reviews", []), list):
-        raise ValueError("pending_reviews 必须是数组")
-    if data.get("pending_reviews"):
-        raise ValueError("台账仍有改稿迁移待核项；请处理后再生成资产 TXT")
+    validate_asset_lifecycle(data)
+    verify_review_decisions(data)
+    delivery_contract(data)
+    if require_designed and not data.get("image_design_version"):
+        raise ValueError("新项目完整资产交付须完成design；旧事实台账仅使用兼容读取入口")
     if data.get("source_digest") != digest(paragraphs):
         raise ValueError("资产台账与当前原文版本不匹配")
+    if 'observations' in data:
+        from scene_observations import validate_imported_observations
+        validate_imported_observations(data, paragraphs, script)
     categories = {k: v for k, v in ID_PATTERNS.items() if k != "scene_assets" or data["schema_version"] == 3}
     for category in categories:
         if not isinstance(data.get(category), list):
@@ -320,21 +320,6 @@ def validate(script: list[dict], paragraphs: list[str], data: dict) -> None:
             if asset_id in all_ids:
                 raise ValueError(f"重复的资产 ID：{asset_id}")
             all_ids.add(asset_id)
-    retired = data.get("retired_ids", [])
-    if not isinstance(retired, list) or len(retired) != len(set(retired)) or any(
-        not isinstance(value, str) or value in all_ids for value in retired
-    ):
-        raise ValueError("retired_ids 无效或与现用 ID 冲突")
-    inactive = data.get("inactive_assets", {"characters": []})
-    if not isinstance(inactive, dict) or not isinstance(inactive.get("characters"), list):
-        raise ValueError("inactive_assets 无效")
-    for item in inactive["characters"]:
-        asset_id = item.get("id") if isinstance(item, dict) else None
-        if not isinstance(asset_id, str) or not ID_PATTERNS["characters"].fullmatch(asset_id) or asset_id in all_ids or asset_id in retired:
-            raise ValueError(f"待确认人物 ID 冲突或无效：{asset_id}")
-        all_ids.add(asset_id)
-    if inactive["characters"]:
-        raise ValueError("仍有可能改名或退场的人物；请确认身份后恢复关联或确认退场")
     scenes_by_id = {item["id"]: item for item in data["scenes"]}
     characters = {item["id"]: item for item in data["characters"]}
     locations = {item["id"]: item for item in data["locations"]}
@@ -716,7 +701,7 @@ def build_scene_assets(data, paragraphs=None):
     return result
 
 
-def initialize(script_path: Path, workdir: Path, output: Path) -> None:
+def initialize(script_path: Path, workdir: Path, output: Path, *, observations=None, observations_review=None, project=None) -> None:
     if output.exists():
         raise ValueError("台账已存在；请沿用旧 ID，不要重新初始化覆盖")
     script = parse_script(script_path)
@@ -762,10 +747,21 @@ def initialize(script_path: Path, workdir: Path, output: Path) -> None:
         "prop_coverage_review": {"source_digest": digest(paragraphs), "reviewed_full_script": False,
                                  "reviewed_scene_ids": [], "candidates": []},
     }
+    if project is not None:
+        from project_contract import read_contract
+        contract = read_contract(project)
+        if contract is None:
+            raise ValueError('新项目须先project-init保存交付契约')
+        data['delivery_contract'] = contract
+    if observations is not None:
+        from scene_observations import import_observations
+        payload = json.loads(Path(observations).read_text(encoding='utf-8-sig'))
+        review = json.loads(Path(observations_review).read_text(encoding='utf-8-sig')) if observations_review else None
+        data, _ = import_observations(data, payload, workdir / 'source.json', workdir, review)
     # The index is a draft until each scene's time basis is checked.
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"已建立 {len(scenes)} 场、{len(characters)} 人物、{len(locations)} 地点的空事实台账：{output}")
+    print(f"已建立 {len(scenes)} 场、{len(characters)} 人物、{len(locations)} 地点的资产草稿台账：{output}")
 
 
 def render_fact(fact: dict) -> str:
@@ -789,11 +785,11 @@ def set_visual_facts(item, locations, assets):
     return common + item["visual_facts"]
 
 
-def render(script_path: Path, source_path: Path, ledger_path: Path, output: Path) -> None:
+def render(script_path: Path, source_path: Path, ledger_path: Path, output: Path, *, require_designed=False) -> None:
     script = parse_script(script_path)
     paragraphs = source_paragraphs(source_path)
     data = json.loads(ledger_path.read_text(encoding="utf-8-sig"))
-    validate(script, paragraphs, data)
+    validate(script, paragraphs, data, require_designed=requires_design(data, explicit=require_designed))
     characters = {item["id"]: item for item in data["characters"]}
     locations = {item["id"]: item for item in data["locations"]}
     props = {item["id"]: item for item in data["props"]}
@@ -851,6 +847,9 @@ def main() -> None:
     init.add_argument("script", type=Path)
     init.add_argument("workdir", type=Path)
     init.add_argument("--output", type=Path, required=True)
+    init.add_argument('--project', type=Path, help='新项目的交付契约目录')
+    init.add_argument('--observations', type=Path)
+    init.add_argument('--observations-review', type=Path)
     build = commands.add_parser("build-scenes", help="按已核实LOC及人工审阅时间层建立布景，不扫描全文猜跳时")
     build.add_argument("ledger", type=Path)
     build.add_argument("--source", type=Path, help="时间层/原样复用元数据存在时必需，提供 prepare 生成的 source.json")
@@ -866,6 +865,28 @@ def main() -> None:
     view.add_argument("source", type=Path)
     view.add_argument("ledger", type=Path)
     view.add_argument("--output", type=Path, required=True)
+    view.add_argument("--require-designed", action="store_true", help="新项目完整资产交付门槛；兼容读取旧事实台账时不指定")
+    preflight = commands.add_parser("validate", aliases=["preflight"], help="只读全量前检；新项目契约自动要求完整设计，候选检查显式用--candidate")
+    preflight.add_argument("script", type=Path)
+    preflight.add_argument("source", type=Path)
+    preflight.add_argument("ledger", type=Path)
+    preflight.add_argument("--require-designed", action="store_true")
+    preflight.add_argument('--candidate', action='store_true', help='显式候选前检，不签发完整交付通过')
+    template = commands.add_parser("review-template", help="依据明确的kind及稳定ID生成待填审阅模板和真实摘要，不自动确认语义")
+    template.add_argument("ledger", type=Path)
+    template.add_argument("selections", type=Path)
+    template.add_argument("--output", type=Path, required=True)
+    for command in ("review-apply", "review-verify", "review-check"):
+        decision = commands.add_parser(command, help="按稳定ID应用审阅决定并全量校验" if command == "review-apply" else "只读核对审阅决定与实际台账")
+        decision.add_argument("script", type=Path)
+        decision.add_argument("source", type=Path)
+        decision.add_argument("ledger", type=Path)
+        decision.add_argument("decisions", type=Path)
+        if command != 'review-verify':
+            decision.add_argument('--batch', type=Path, action='append', default=[], help='同一冻结输入的其他非重叠决定草稿')
+        if command == "review-apply":
+            decision.add_argument("--output", type=Path, required=True)
+            decision.add_argument("--report", type=Path, required=True)
     variants = commands.add_parser("variants", help="按已审原文登记同一人物的佩戴形象与同场切换，输出新草稿后重新design")
     variants.add_argument("script", type=Path)
     variants.add_argument("source", type=Path)
@@ -880,14 +901,88 @@ def main() -> None:
     design.add_argument("--style-file", type=Path, required=True)
     design.add_argument("--output", type=Path, required=True)
     design.add_argument("--catalog-output", type=Path)
+    preview = commands.add_parser("design-check", help="只读检查指定设计及依赖闭包；局部预览不能作为交付或绑定")
+    preview.add_argument("script", type=Path)
+    preview.add_argument("source", type=Path)
+    preview.add_argument("ledger", type=Path)
+    preview.add_argument("design_json", type=Path)
+    preview.add_argument("--style-file", type=Path, required=True)
+    preview.add_argument("--asset-id", action="append", required=True)
+    preview.add_argument("--expected-hashes", type=Path, help="script/source/ledger/design/style文件SHA256对象")
+    impact = commands.add_parser('impact', help='只读列出直接、依赖与未知影响；不复用旧语义通过')
+    impact.add_argument('before_ledger', type=Path)
+    impact.add_argument('after_ledger', type=Path)
+    for name in ('before-source', 'after-source', 'before-design', 'after-design'):
+        impact.add_argument('--' + name, type=Path)
     args = parser.parse_args()
     try:
-        if args.command == "init":
-            initialize(args.script, args.workdir, args.output)
+        if args.command == 'impact':
+            from asset_impact import analyze_asset_impact
+            def read_optional(path):
+                return json.loads(path.read_text(encoding='utf-8-sig')) if path else None
+            print(json.dumps(analyze_asset_impact(read_optional(args.before_ledger), read_optional(args.after_ledger),
+                             before_source=read_optional(args.before_source), after_source=read_optional(args.after_source),
+                             before_design=read_optional(args.before_design), after_design=read_optional(args.after_design)), ensure_ascii=False, indent=2))
+        elif args.command == "init":
+            initialize(args.script, args.workdir, args.output, observations=args.observations,
+                       observations_review=args.observations_review, project=args.project)
+        elif args.command == "review-template":
+            if args.output.exists() or args.output.resolve() in {args.ledger.resolve(), args.selections.resolve()}:
+                raise ValueError("审阅模板须保存为新文件，不覆盖台账或选择文件")
+            template = prepare_review_payload(json.loads(args.ledger.read_text(encoding="utf-8-sig")),
+                                              json.loads(args.selections.read_text(encoding="utf-8-sig")))
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            with args.output.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(json.dumps(template, ensure_ascii=False, indent=2) + "\n")
+            print(json.dumps({"status": "review_template", "output": str(args.output.resolve()), "semantic_review": "required"}, ensure_ascii=False))
+        elif args.command in ("validate", "preflight", "review-apply", "review-verify", "review-check"):
+            script = parse_script(args.script)
+            paragraphs = source_paragraphs(args.source)
+            data = json.loads(args.ledger.read_text(encoding="utf-8-sig"))
+            if args.command == 'review-check':
+                from asset_review import check_review_drafts
+                report = check_review_drafts(script, paragraphs, data, [json.loads(path.read_text(encoding='utf-8-sig')) for path in [args.decisions, *args.batch]])
+            elif args.command == "review-apply":
+                outputs = [args.output, args.report]
+                inputs = [args.script, args.source, args.ledger, args.decisions, *args.batch]
+                if any(path.exists() for path in outputs) or len({path.resolve() for path in outputs}) != 2 or any(path.resolve() in {p.resolve() for p in inputs} for path in outputs):
+                    raise ValueError("审阅应用的台账和报告须为不同的新文件，不覆盖输入或既有产物")
+                payload = json.loads(args.decisions.read_text(encoding="utf-8-sig"))
+                if args.batch:
+                    from asset_review import apply_review_batches
+                    result, report = apply_review_batches(data, [payload, *[json.loads(path.read_text(encoding='utf-8-sig')) for path in args.batch]])
+                else:
+                    result, report = apply_review_decisions(data, payload)
+                # Nothing is written until actual fields and all source,
+                # identity, policy, lifecycle and design contracts pass.
+                validate(script, paragraphs, result)
+                report["full_validation"] = "passed"
+                report["output_ledger"] = str(args.output.resolve())
+                serialized = [(args.output, result), (args.report, report)]
+                for path, value in serialized:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    with path.open("x", encoding="utf-8", newline="\n") as stream:
+                        stream.write(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+            else:
+                candidate = getattr(args, 'candidate', False)
+                gate = requires_design(data, explicit=getattr(args, 'require_designed', False)) if args.command != 'review-verify' else False
+                if candidate and getattr(args, 'require_designed', False):
+                    raise ValueError('--candidate与--require-designed不能同时指定')
+                validate(script, paragraphs, data, require_designed=gate and not candidate)
+                report = verify_review_decisions(data, json.loads(args.decisions.read_text(encoding="utf-8-sig"))) if args.command == "review-verify" else verify_review_decisions(data)
+                report = {"status": "candidate_checked" if candidate else "passed", "require_designed": gate and not candidate, "decision_check": report,
+                          **({'formal_ready': False} if candidate else {})}
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        elif args.command == "design-check":
+            from design_preview import preview_from_files
+            expected = json.loads(args.expected_hashes.read_text(encoding="utf-8-sig")) if args.expected_hashes else None
+            print(json.dumps(preview_from_files(args.script, args.source, args.ledger, args.design_json,
+                                                args.style_file, args.asset_id, expected_hashes=expected), ensure_ascii=False, indent=2))
         elif args.command == 'normalize':
             if args.output.resolve() == args.report.resolve() or args.output.exists() or args.report.exists():
                 raise ValueError('归一化输出/报告须为不同的新文件；不覆盖已绑定台账或映射')
-            data, report = normalize_assets(json.loads(args.ledger.read_text(encoding='utf-8-sig')))
+            original = json.loads(args.ledger.read_text(encoding='utf-8-sig'))
+            data, report = normalize_assets(original)
             if args.group_review:
                 if not args.source:
                     raise ValueError('--group-review须提供--source校验原文证据')
@@ -898,6 +993,8 @@ def main() -> None:
                 validate_group_policy(data, paragraphs, fact_list)
                 report['group_reviews'] = [{'id': item['id'], 'visual_mode': item['visual_mode']}
                                            for item in data['characters'] if 'visual_mode' in item]
+                from asset_review import assert_normalize_review_safe
+                report['review_impact'] = assert_normalize_review_safe(original, data, report)
             for path, value in ((args.output, data), (args.report, report)):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
@@ -949,14 +1046,14 @@ def main() -> None:
             validate(script, paragraphs, source_data)
             result = apply_design(data, json.loads(args.design_json.read_text(encoding="utf-8-sig")),
                                   args.style_file.read_text(encoding="utf-8-sig"))
-            validate(script, paragraphs, result)
+            validate(script, paragraphs, result, require_designed=True)
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             if args.catalog_output:
-                render(args.script, args.source, args.output, args.catalog_output)
+                render(args.script, args.source, args.output, args.catalog_output, require_designed=True)
             print(f"已编译完整GPT-image-2资产设计：{args.output}；未调用生图模型")
         else:
-            render(args.script, args.source, args.ledger, args.output)
+            render(args.script, args.source, args.ledger, args.output, require_designed=args.require_designed)
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
         parser.exit(1, f"错误：{exc}\n")
 

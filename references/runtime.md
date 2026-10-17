@@ -22,31 +22,23 @@
 
 新分镜采用[场次前检与保守增量复核](scene-review-workflow.md)。下文check、review_gate和commit示例的新请求须加`--require-workflow`，逐单元登记`workflow_policy: scene-review-b-v2`。旧receipt幂等重导出及未选单元保持原策略。前检及冻结/合并命令见该参考的工具接口；它们不修改正式session或写画布。
 
-先在入口等待风格选择，以下三条style命令只执行用户选定的一条；随后检查依赖并完成prepare、逐场保存、review、assemble和资产提取，再运行normalize及后续命令。
+资产阶段的完整主顺序及命令只维护在[资产生产流程](asset-workflow.md)，包括project-init、观察导入、小批决定、共享冻结及完整交付。不要再按旧例在决定应用后第二次normalize来补群像。
+
+完整工作流在资产交付与用户选择后进入以下分镜接口；仅资产任务到phase=complete结束，不要求选择范围或传输画布。
 
 ```text
-python <skill>/scripts/director.py style --project <project> --choice 1
-python <skill>/scripts/director.py style --project <project> --choice 2
-python <skill>/scripts/director.py style --project <project> --choice 3 --file <自定义风格.txt>
-python <skill>/modules/screenplay-standardizer/scripts/asset_ledger.py normalize <候选资产台账.json> --output <命名预检台账.json> --report <命名预检报告.json>
-python <skill>/modules/screenplay-standardizer/scripts/asset_ledger.py build-scenes <命名预检台账.json> --source <标准化工作目录/source.json> --output <布景候选台账.json>
-python <skill>/modules/screenplay-standardizer/scripts/asset_ledger.py normalize <布景候选台账.json> --group-review <群像筛选审阅.json> --source <标准化工作目录/source.json> --output <完成群像筛选的台账.json> --report <群像筛选报告.json>
-python <skill>/modules/screenplay-standardizer/scripts/asset_ledger.py design <标准剧本.txt> <标准化工作目录/source.json> <完成群像筛选的台账.json> <美术设计.json> --style-file <project>/video-style.txt --output <完成美术设计的资产台账.json> --catalog-output <分类视觉描述.txt>
-python <skill>/scripts/director.py bind --project <project> --script <标准剧本.txt> --source <标准化工作目录/source.json> --review <review.json> --ledger <完成美术设计的资产台账.json> [--min-duration 4] [--durations 4 5 6 ... 30]
 python <skill>/scripts/director.py status --project <project>
-python <skill>/scripts/director.py phase --project <project> --value range
 python <skill>/scripts/director.py locate --project <project> --anchors <anchors.json>
 python <skill>/scripts/director.py range --project <project> --start <起点整数> --end <终点整数>
 python <skill>/scripts/director.py check --project <project> --request <batch.json> --partial --require-workflow
 python <skill>/scripts/director.py check --project <project> --request <batch.json> --require-workflow
 python <skill>/scripts/review_gate.py prepare --project <project> --request <batch.json> --report <最终稿复核.json> --require-workflow
 python <skill>/scripts/review_gate.py verify --project <project> --request <batch.json> --report <最终稿复核.json> --require-workflow
-python <skill>/scripts/director.py commit --project <project> --request <batch.json> --review <最终稿复核.json> --output <新交付文件.txt> --require-workflow [--batch-scope <本聊天批次登记目录>]
-python <skill>/scripts/director.py phase --project <project> --value followup
+python <skill>/scripts/director.py commit --project <project> --request <batch.json> --review <最终稿复核.json> --output <新交付文件.txt> --require-workflow
 python <skill>/scripts/director.py render --project <project> --request-id <已提交request_id>
 ```
 
-示例中的省略号不是可执行参数；默认整数4～30秒无需传`--durations`，只有实际入口明确为离散档位才列出合法值。PowerShell使用`& '<Python绝对路径>' '<脚本绝对路径>' ...`，路径逐个引用。用户文字通过JSON文件传递，不拼进shell命令。
+默认整数4～30秒无需传--durations，只有实际入口明确为离散档位才列出合法值。PowerShell使用`& '<Python绝对路径>' '<脚本绝对路径>' ...`，路径逐个引用。用户文字通过JSON文件传递，不拼进shell命令。
 
 ### 最终稿复核与估时诊断
 
@@ -66,11 +58,9 @@ python <skill>/scripts/director.py render --project <project> --request-id <已�
 
 `director.py status.recovery`只读汇总session的phase、当前有效单元、最近提交和当前绑定/冻结输入匹配的任务，核对manifest摘要；图片任务另核对当前图片清单。旧绑定、被修改的任务或过期输入列入historical_job_ids；不凭其完成事件声称当前任务完成。旧intake-state.json若存在，仅展示已知字段差异及历史快照，不读其next_step派发任务、不修改其历史交接字段。查询不连接云端、不写摘要、不更改phase或解除暂停；所有本地计数都表示最后保存的核验结果，不能当作实时云端巡检。
 
-以上顺序以候选台账的LOC身份、时间层已核实为前提；先normalize归并同地点群像等重复名称，再build-scenes。群像审阅结构见[群像图片筛选](../modules/screenplay-standardizer/references/asset-ledger.md#群像图片筛选)，使用归并后的CHAR ID并覆盖全剧群像；无群像时可跳过第二次normalize，design直接读取布景候选台账。群像筛选由执行者根据全剧填写，次数不由词频或镜头数量推断，也不增加用户确认菜单。
+新项目的来源、候选、设计顺序见[资产生产流程](asset-workflow.md)。bind读取已保存风格及交付契约；assets范围完成后phase=complete，workflow范围进入asset_choice。含image_design_version台账须与video-style.txt的strip文本完全匹配，内部空格保留。style在无session时只保存风格，不伪造绑定；旧项目保持原交互策略。
 
-新项目先确认完整剧本可访问，立即等待风格选择并保存；风格确认前不分析剧本或提取资产。随后完成标准剧本及候选资产台账、身份与命名预检，按内置资产规则审核群像的图片复用需求并保存visual_mode，直接沿用入口风格完成资产美术设计，不再询问风格。`style`在项目尚无session时只保存`video-style.txt`，不建立虚构的绑定、phase或历史。design编译并render最终台账与分类视觉描述后再bind，不在设计摘要确定后静默改名；bind读取并验证预存风格，保存style_hash，初始phase仍为asset_choice。含image_design_version的新台账还须与预存风格匹配：`video_style.strip() == ledger.visual_style.text`，保留内部空格，不改写原风格；缺失或不一致时拒绝绑定。有session时style沿已有更新路径保存风格并进入range，既有单元与receipt保留原样。旧项目没有风格时仍执行风格菜单；预存风格若为空或多行，bind拒绝而不创建session。
-
-phase只记录前台交互位置，不代表外部授权。bind后为asset_choice；选1按[后台同步队列](canvas-jobs.md)提交assets并启动隐藏worker，立即phase→range（无风格则style），不等同步完成。资产菜单选2同样进入range/style。后台状态独立于session；完成事件只进入本地events，不覆盖正在编写分镜的phase。交互边界读取纯本地canvas_jobs status；资产全部核验完成后才显示上传菜单，image-choice记录选择，明确上传并提供目录后排队images。commit后为nodes_choice：选1提交本批videos后台任务，依赖尚未完成的资产任务；提示等待或继续新范围；选2跳过，直接phase→followup及两条续接提示。后台失败不阻塞本地分镜，实际冲突和未知写入需处理后显式resume。分镜生成不依赖登录；不要为查看后台进度执行远端canvas.py status。
+phase只记录前台交互位置，不代表外部授权。以下菜单仅适用于workflow范围或既有完整工作流项目；选1按[后台同步队列](canvas-jobs.md)提交assets并启动隐藏worker，立即phase→range（无风格则style），不等同步完成。资产菜单选2同样进入range/style。后台状态独立于session；完成事件只进入本地events，不覆盖正在编写分镜的phase。交互边界读取纯本地canvas_jobs status；资产全部核验完成后才显示上传菜单，image-choice记录选择，明确上传并提供目录后排队images。commit后为nodes_choice：选1提交本批videos后台任务，依赖尚未完成的资产任务；提示等待或继续新范围；选2跳过，直接phase→followup及两条续接提示。后台失败不阻塞本地分镜，实际冲突和未知写入需处理后显式resume。分镜生成不依赖登录；不要为查看后台进度执行远端canvas.py status。
 
 `commit`返回`canvas_sync`：replace且已有视频映射时自动提交后台任务并立即返回job_id；worker在同一真实ID上依次同步名称、单元时长及正式引用编码的提示词，逐命令记录官方确认，全部完成后统一回读名称、时长、提示词、节点标签和引用连线，再保存整节点回执；不查询、写入或校验模型与分辨率。时长仅更新generation.durationMs，从最新generation合并并保留modelKey、resolution、prompt、references、比例及其他配置，不改已有媒体实际时长。未绑定为not_bound，任务排队/运行状态来自canvas_jobs；实际冲突或失败为needs_attention，本地输出保留。自动局部同步只处理原有映射，不执行显式videos的全台账补建准备。先保留本地已提交版本及TXT，再处理云端待同步项。幂等重放不会用旧receipt单元覆盖更晚的有效版本。TXT渲染默认不含小云雀内部标签；画布引用绑定使用同一render_unit的reference_text入口，仅转换资产位置，保留台词引号内原文。默认videos使用真实节点标签，空资产节点的缺图单独记录；节点引用回读与媒体就绪检查分别判定。
 
@@ -168,8 +158,9 @@ replace请求：mode=`replace`，新的request_id，units列出要替换的原ID
 | 字段 | 内容 |
 |---|---|
 | record | session.records中的标准台词行ID |
-| character_id | 对应标准说话人、对应原场景形象的CHAR ID |
-| voice | 说、内心想法、画外音、旁白，必须与标准记录一致 |
+| character_id | 人物声音必填，对应标准说话人、对应原场景形象的CHAR ID；已审非人物播报禁止此字段及character_ids |
+| source_kind / source_label | 仅已审非人物播报使用non_character及标准记录原样声源名；普通人物保持原结构，不根据名称自动分类 |
+| voice | 说、内心想法、画外音、旁白或已审的非人物播报，必须与标准记录一致 |
 | text | 本单元所覆盖该行的逐字原台词，含原标点 |
 | start / end / pause | 单元局部秒数，至多三位小数；pause为总停顿秒数 |
 | speed | 常速、快节奏、情绪慢速 |
@@ -183,6 +174,8 @@ replace请求：mode=`replace`，新的request_id，units列出要替换的原ID
 台词布局工具：通过`director.dialogue_layout.attach(unit, plans)`登记；plans省略某条record时使用整条声音事件，不自动切文字。任一片段跨切点即报错，必须提供自然分句计划或重排镜头/发声起点。旧reference-v1读取时仍可登记semantic-v1续声，不能用于新提交。人工分句plans为record到`[{text,start,end}]`的映射，text保持原文；片段可另带delivery声音表现，attach原样携带并校验；semantic-v2无原标点的非末片段可另填`breath_basis`人工依据，attach原样携带，validate核对字段及原文拼接，语义完整性仍人工复核。不得给纯标点或孤立尾词加依据绕过检查。
 
 文本估时步骤必须调用`director.dialogue_layout.estimate(text, units, rate)`：先按实际念法核算正整数units（数字/英文不按原字符数硬估），按角色语气在所选speed档内确定rate，得到包括原文标点停顿的基线；计算`基线 - pause_seconds(text) + audio.pause`作为本次含情绪气口的总发声估时，再排镜头与同期动作。`audio.pause`是人工登记的总停顿，只包含原文停顿及有语义依据的必要气口，不重复叠加；切镜、表情变化或填写breath_basis不自动增加停顿。`pause_seconds`先合并全部连续标点，混合簇也只计一次，含句末符时按句末级别处理。check在text_estimate路径实际调用estimate，用speed档上下限与登记pause计算时长范围，超出范围仅给后台估时警告；recording路径保留独立实测校验，不使用文本估时取代录音。不得通过拉长短句绕开单镜要求。新提交缺少semantic-v2会拒绝；旧receipt不会被升级或批量重新编号。
+
+非人物有语义播报须先按内置标准化复核确认为`原声源名(非人物播报)：原话`，不列入人物行、不建立CHAR。build_records只对该明确标记增加`source_kind: non_character`，仍作为必须完整覆盖的dialogue记录。audio填写`source_kind: non_character`、`source_label: 原声源名`、`voice: 非人物播报`，禁止character_id/character_ids。原话及片段、语速、停顿和时序仍执行同一声音检查，source_label必须逐字匹配来源，不能把普通人物对白改成此类型以绕过身份检查。无语义铃声等仍沿用有来源依据的音效字段。新播报渲染为`电话提示音非人物播报：“原话”`，声源不用@，不触发图片或人物口型；旧人物及历史回执的渲染保持原样。
 
 ## 台词表现字段delivery
 
@@ -217,13 +210,13 @@ reference-v3逐镜渲染为`·00秒-03秒[镜头1-label]：（@主焦点完整�
 
 旧reference-v2的render_unit继续输出完整heading、无外括号的`景别：…；转场：…，`及旧text，不读取四项摄影字段；旧reference-v1保留其景别括号与估时/续声，更早无output_format的receipt保留原布局。新提交仅接受reference-v3，有声单元仍必须semantic-v2。replace可将选中的旧v1/v2单元改为v3，但来源span、main_scene和原编号不变；不重新校验或升级未选中的旧单元。
 
-新对白只渲染“@完整人物名 说/内心想法/画外音/旁白：‘本镜原台词片段’”（成稿使用中文双引号）。不渲染发声估时、实配音或同句续声文字。audio事件起止仍覆盖整条声音，各镜片段首尾/停顿在后台校验。旧reference-v1的估时和续声渲染保持原样，重渲染receipt不会升级。
+新人物对白渲染“@完整人物名 说/内心想法/画外音/旁白：‘本镜原台词片段’”（成稿使用中文双引号）；经原文复核的非人物播报渲染“来源标签非人物播报：‘本镜原话片段’”，不加@。不渲染发声估时、实配音或同句续声文字。audio事件起止仍覆盖整条声音，各镜片段首尾/停顿在后台校验。旧reference-v1的估时和续声渲染保持原样，重渲染receipt不会升级。
 
 ## 引用与统计
 
 global、shots[].camera/composition/depth_of_field/lighting、text、connector、transition、sound_foreground与sound_environment中的人物、场景、主要道具名称使用 `@台账完整主名称 `（名称后必须有英文空格），或后台稳定ID形式 `@{CHAR0001}`、`@{SET0001}`、`@{PROP0001}`；程序只解析显式引用，按ID输出 `@完整名称 `，自动补齐名称后的英文空格，不自动替换裸词或台词内的人名、道具词。`visual_mode: prompt_only`群像仍保留CHAR、character_ids、subjects、focus与连续性，引用占位渲染成普通名称，不加@，不进入视觉节点与缺图清单；无需图片的群像不得被误判为无人环境镜。人工复核所有需图片的资产名称均已标记@且使用主名称，不使用别名或简称；程序检查主体引用、ID归属、重名、未知引用与重复@。全局唯一名称在资产render/bind前预检；分镜asset_text只检查本单元相关目录，范围外旧问题不阻塞本地有效单元。全资产传输及全量图片目录仍检查完整目标；本范围重名不得猜图片。
 
-reference-v3人物行渲染为 `人物：@完整name ，@下一完整name ；`，逗号分隔，只有行末一个分号，不重复name@name；无人物为 `人物：无；`。场景行渲染为 `场景：@所关联SET完整name ；时间：…；天气：…；`，删除完整heading，多场景逐项连接；heading仍留在绑定台账中用于来源定位。旧receipt无output_format时人物行及其他布局保持旧版，旧v1/v2场景行保留heading。新append及指定replace单元保存`black_reference_mode: none-v1`，不渲染黑幕文本或标签，也不向画布同步传递BLACK需求；历史edge-only-v1及缺字段receipt保留原行为。不新增镜头或时长，不写入剧本道具。audio结构与校验不变；对白说话人标签加@，dialogue_parts.text原样保留。
+reference-v3人物行渲染为 `人物：@完整name ，@下一完整name ；`，逗号分隔，只有行末一个分号，不重复name@name；无人物为 `人物：无；`。场景行渲染为 `场景：@所关联SET完整name ；时间：…；天气：…；`，删除完整heading，多场景逐项连接；heading仍留在绑定台账中用于来源定位。旧receipt无output_format时人物行及其他布局保持旧版，旧v1/v2场景行保留heading。新append及指定replace单元保存`black_reference_mode: none-v1`，不渲染黑幕文本或标签，也不向画布同步传递BLACK需求；历史edge-only-v1及缺字段receipt保留原行为。不新增镜头或时长，不写入剧本道具。人物audio沿用原结构；人物说话人标签加@，非人物播报按显式source_kind/source_label校验且不加@，dialogue_parts.text均原样保留。
 
 commit、幂等重试及render成功后返回unit_count、total_seconds、minutes、seconds、summary。统计仅使用该receipt.units：unit_count为单元数，total_seconds为duration求和，minutes与seconds为divmod(total_seconds,60)。append的summary为 `本次生成分镜共N个，总时长x分x秒。`；replace为 `本次修改分镜共N个，总时长x分x秒。`。首次交付、重试及局部修改均不累计其他批次或旧版本，只有文件写入成功才向用户显示统计与文件链接。
 

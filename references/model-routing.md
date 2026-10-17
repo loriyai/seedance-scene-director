@@ -20,7 +20,7 @@
 
 短菜单回复、唯一范围定位、单次状态查询、导出、队列提交等直接由主代理调用既有脚本，不为一次命令启动子代理。主代理的实际模型及强度已被宿主可靠确认为目标配置时，可直接完成该阶段；无法确认且需要实质创作/批量审阅时显式分派。不要逐镜或逐条CLI调用创建代理；不让主代理完整重做子代理工作来“验收”。
 
-连续分镜沿前一单元终态顺序推进。每项目最多一个起草代理写自己的输出目录；独立只读复核可以并行，各自用独立输出目录。全剧身份、来源覆盖由主代理统一接受后才能推进设计/分镜；不把不同代理的临时ID各自提交。
+连续分镜沿前一单元终态顺序推进。标准化、身份统筹、连续分镜仍每项目最多一个起草代理；已通过共享基线冻结的 design 可按无交叉可写依赖的责任ID分组，默认最多两个设计组并行。每组只写独立output，完整规则见[设计工作区](design-workspace.md)。独立只读复核可以并行。全剧身份、来源覆盖由主代理统一接受后才能推进设计/分镜；不把不同代理的临时ID各自提交。
 
 新分镜采用[场次前检与保守增量复核](scene-review-workflow.md)。保持一个起草写者和明确的场次主审，按场次冻结版本并合并反馈；不要按镜头重新派发，不因零散意见反复打断同一写者。专项复核仅用于明确复杂问题。主代理负责去重、裁决、证据合并和正式提交，不完整重做独立审阅。可复用同一代理承担后续同类任务，但每次仍给不可变交接、当前原文/资产依据及必要前后状态；不假定它记得新版规则或漏传必要上下文。前序未决状态所影响的后续草稿不得当成已接受材料。
 
@@ -41,14 +41,18 @@
 - `inputs`：本阶段实际所需文件的绝对路径列表；包括剧本、source、已通过的review、台账、当前草稿等适用项。标准化前可只有原文；不要虚构尚未产生的文件。分镜/修改必须含绑定材料、当前有效单元及必要邻接状态；从 `session.json.files` 取得真实路径，将需要的逐场稿也明确列入。
 - `authorization`：用户已经允许的工作及边界，不能仅写“全部允许”；说明未经用户选择的传输、上传、覆盖或删除仍未授权。
 - `expected_outputs`：相对本次 `output/` 的文件名，如 `batch.json`、`review.json`、`result.json`；实际委派至少要求 `result.json`。
+- `review_stage`：stage=review时必填，选standardize/assets/design/storyboard/revise，不能用无领域的通用审阅通过。
+- `design_group`：仅冻结分组design使用，含baseline_path、plan_path、group_id、submission；前两项为真实绝对路径，submission须列入expected_outputs。prepare会核对基线原输入、所有权与并发占用；verify重查提交资产范围和共享依赖。
 - `context_notes`（按需）：固定风格、待核问题、保留编号、前后状态、已经确认的范围异常与真实确认记录等。该字段不替代原材料。
+
+调用前以`Path(value).expanduser().resolve()`生成实际存在的项目、brief及输入绝对路径，见[本地调用与输出保护](execution-contract.md)。标准化的`expected_outputs`遵循`screenplay_io.py prepare`建立的目录及现有场稿命名协议：在本次output内的独立工作目录下`scenes/`写`scene_NNN_start-end.txt`（如`draft/scenes/scene_001_0001-0049.txt`），正文是标准TXT，不约定为逐场JSON。source与必要元数据按当前脚本实际消费的格式交接；不要虚构meta写入命令。复核与合并继续使用该TXT协议。
 
 ```text
 python <skill>/scripts/agent_handoff.py prepare --project <project> --stage storyboard --brief <brief.json>
 python <skill>/scripts/agent_handoff.py prepare --project <project> --stage review --brief <brief.json> --escalation-reason <具体冲突>
 ```
 
-辅助器生成 `<project>/agents/<id>/handoff.json` 与独立 `output/`，记录输入文件和相关规则的SHA256、目标配置及任务要求。已存在的 `session.json` 与 `video-style.txt` 自动纳入；其他必要文件由主代理列全。它只准备交接，不调用模型，不验证目标账号的模型权限，不代表已经派发。哈希用于防止过期稿被接收，不是沙箱；子代理仍必须遵守本文件的写入边界。
+辅助器生成 `<project>/agents/<id>/handoff.json` 与独立 `output/`，记录输入文件和相关规则的SHA256、目标配置及任务要求。自动纳入风格与交付契约。session仅排除行政字段phase/revision，其余来源、有效单元、范围、回执及未知字段仍绑定；phase变化不再单独作废草稿，实际内容变动仍拒绝。其他必要文件由主代理列全。只自动加载execution-contract与本阶段参考，不强制子代理阅读全文SKILL；review必须在brief填review_stage并加载被审阶段规则。它只准备交接，不调用模型，不验证目标账号的模型权限，不代表已经派发。哈希用于防止过期稿被接收，不是沙箱；子代理仍必须遵守本文件的写入边界。
 
 ## 真正调用子代理
 
@@ -71,12 +75,25 @@ python <skill>/scripts/agent_handoff.py prepare --project <project> --stage revi
 ## 验收、提交与画布
 
 ```text
-python <skill>/scripts/agent_handoff.py verify --handoff <project>/agents/<id>/handoff.json
+python <skill>/scripts/run_json.py --output <output>/verify-v1.json --log <output>/verify-v1.log.json -- python <skill>/scripts/agent_handoff.py verify --handoff <project>/agents/<id>/handoff.json
+python <skill>/scripts/run_json.py --output <output>/group-check-v1.json --log <output>/group-check-v1.log.json -- python <skill>/modules/screenplay-standardizer/scripts/design_workspace.py verify-group <baseline.json> <plan.json> <submission.json> --group-id <group-id>
 ```
+
+以上占位路径均替换为当前绝对路径，文件名每次取新的；`verify`的`--handoff`和`verify-group`的`--group-id`不可省略。第二条仅用于分组design，输入沿用本次交接与计划。日志和检查结果不得命名为任何输入模板；仍先看退出码和诊断，再读检查JSON。
+
+prepare及close由主代理串行执行。固定顺序为：候选完成 → verify → 主代理完成本阶段实际业务验收 → `agent_handoff.py close --handoff <handoff.json> --status completed --reason <实际验收依据>` → 写正式文件或bind。需要验收的编译/预览先写独立草稿目录；所有会改变冻结输入或创建session.json的正式操作放在close之后。close再次verify并保存当时的产物摘要，释放占用，但不能替代语义验收。bind会检查仍活动的现代交接；也可先运行`agent_handoff.py bind-ready --project <project>`。未关闭的review也须完成验收与关闭，不能通过先绑定、后取消来规避输入变更检查。
+
+放弃任务前先由宿主停止并确认写者退出，再以cancelled及实际原因关闭。取消不表示产物接受，也不能将已取消的草稿转为有效交付。不要因超时自动释放仍在写入的任务；不要在多个主控进程并发prepare。旧交接保持原读取约定，不自动改写旧哈希、状态或历史。
 
 verify 检查输入未变、预期文件存在且非空、输出路径没有逃出目录，并校验结果报告的状态、任务身份与产物路径。`artifacts_present` 只表示这些结构检查通过，不代表原文、艺术或语义验收通过；`result_status` 为 `needs_input` / `failed` 时仍不得接受为可提交稿。检查失败时不采用草稿，保留记录并按当前材料重新交接，不强行修改旧哈希。
 
 主代理按阶段核对真实产物和 `issues`，然后调用原有验收：标准化按 review→assemble，资产按来源/身份/命名/覆盖/设计校验，分镜按完整check和[最终稿复核记录](runtime.md#最终稿复核与估时诊断)验收，记录须绑定实际提交请求及当前上下文；修改后不能沿用旧摘要。只接收通过的草稿；同一项目的正式文件、style/phase/bind/commit/render及批次编号由主代理单写，保持原ID、范围和历史。新的交接目录及文件不进入资产台账或视频提示词。
+
+## 计时范围与阶段交接
+
+`pipeline_metrics.py status --project <project>`自动读取现代交接已有的prepared_at与closed_at，在handoff_metrics中按每次交接分别统计；同一task_key的重试仍是独立区间。起点是prepare中实际记录的预留时间，终点是close，包含分派、等待及主代理验收，不能称为纯模型执行时间，也不包含更早的风格确认、原文检查或prepare前工作。未关闭、缺少时间的旧交接明确列为不完整或未测量，不补写推测时间。
+
+手工阶段事件仍可记录检查、返工、完成对象；其统计与交接区间分开，禁止相加。报告区分任务区间之和、区间并集、并行重叠、首尾窗口及窗口内未覆盖间隔；已测窗口不等于全流程耗时。手工started登记晚于此前事件时标记late_start，缺少起止则不计算耗时。没有可靠全流程起止证据时total_pipeline_seconds为null；模型、Token、工具执行时间未知时不猜填。先前阶段结束到后续prepare之间的阅读和准备只能称未覆盖间隔，不能擅自归入某一阶段或当成空转。
 
 `sync` 子代理负责已经授权任务的批量准备与结果核对；它不直接写画布。主代理检查已有授权后，调用 `canvas_jobs.py enqueue` 等原入口；云端逐条ACK、回读和续接由既有worker执行。同画布单writer、未知确认停止、原ID续接、人工冲突保护和原有菜单全部保留。常规队列提交很短，由主代理直接执行即可，无须额外开启一个Medium代理。
 

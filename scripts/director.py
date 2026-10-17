@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import dialogue_layout
 import continuity
 import batch_naming
+import audio_sources
 HEADER_SHA = "8001822afdf324cbbfa3eb284b2a03ccbde084b2e70fa66763a26b5c738e5962"
 STYLES = {"1": "3D国风动漫,暗黑武侠/超写实仙侠风格", "2": "3D国风动漫，眷思量风格，东方奇幻唯美风格"}
 SPEEDS = {"常速": (4.0, 5.2), "快节奏": (4.5, 5.8), "情绪慢速": (3.3, 4.4)}
@@ -210,7 +211,13 @@ def dependency(path=None):
     required = {"INSTRUCTIONS.md", "references/asset-ledger.md", "references/review.md",
                 "scripts/asset_ledger.py", "scripts/asset_migrate.py",
                 "scripts/asset_visual_design.py", "scripts/character_variants.py",
-                "scripts/screenplay_io.py", "scripts/screenplay_review.py"}
+                "scripts/asset_review.py", "scripts/design_preview.py",
+                "scripts/design_scope.py", "scripts/design_inputs.py", "scripts/evidence_draft.py",
+                "scripts/cast_contract.py", "scripts/source_compat.py",
+                "scripts/screenplay_io.py", "scripts/screenplay_review.py",
+                "scripts/scene_observations.py", "scripts/project_contract.py",
+                "scripts/asset_impact.py", "scripts/design_workspace.py",
+                "references/observations.md", "references/asset-decisions.md"}
     require(instructions.is_file() and all((found / p).is_file() for p in required if p != "INSTRUCTIONS.md"),
             "剧本标准化模块不完整；请重新解压完整Skill包")
     if not path or (found / "component.json").is_file():
@@ -242,7 +249,7 @@ def build_records(script_text, ledger):
             continue
         else:
             require(scene is not None, "标准剧本正文出现在场景标题之前")
-            label, voice, speaker = "", None, None
+            label, voice, speaker, source_kind = "", None, None, None
             if line.startswith("△ "):
                 kind, text = "action", line[2:]
             else:
@@ -255,12 +262,17 @@ def build_records(script_text, ledger):
                          or cue == "内心" or any(word in cue for word in ("内心想法", "内心独白", "心理独白")))
                 voice = ("内心想法" if inner else "画外音" if "画外音" in cue or speaker == "画外音" else
                          "旁白" if "旁白" in cue or speaker == "旁白" else "说")
+                if cue == audio_sources.ANNOUNCEMENT:
+                    source_kind, voice = audio_sources.NON_CHARACTER, audio_sources.ANNOUNCEMENT
+                    require(speaker and not any(c in speaker for c in "\r\n@{}"), "非人物播报缺少合法来源声源")
                 kind = "dialogue"
             size = len(compact(text))
             require(size > 0, f"第{line_no}行没有可定位正文，请复核标准剧本")
             records.append({"id": f"L{line_no:06d}", "line": line_no, "local_line": line_no - heading_line + 1, "scene": scene["id"],
                             "kind": kind, "speaker": speaker, "label": label, "voice": voice,
                             "text": text, "start": cursor, "end": cursor + size})
+            if source_kind:
+                records[-1]["source_kind"] = source_kind
             cursor += size
     require(records, "标准剧本没有正文")
     return records, cursor
@@ -269,20 +281,26 @@ def build_records(script_text, ledger):
 def bind(args):
     project = args.project.resolve()
     require(not (project / "session.json").exists(), "项目已绑定；使用已有状态或新建项目目录，不覆盖旧历史")
+    from agent_handoff import assert_bind_ready
+    assert_bind_ready(project)
     dep, ledger_mod, review_mod = dependency(args.standardizer)
     paths = {"script": args.script.resolve(), "source": args.source.resolve(),
              "review": args.review.resolve(), "ledger": args.ledger.resolve()}
     report, ledger = read_json(paths["review"]), read_json(paths["ledger"])
+    from project_contract import delivery_contract, requires_design
+    contract = delivery_contract(ledger, project)
     workdir = paths["source"].parent
     require(report.get("review_version") == review_mod.REVIEW_VERSION and report.get("status") == "passed", "标准剧本复核未通过或版本不兼容")
+    require(report.get("scope", "full") == "full", "局部或样本复核不能建立全稿绑定")
     require(all(report.get("counts", {}).get(k) == 0 for k in ("missing", "extra", "speaker")), "复核仍有未处理项")
+    require(report.get("counts", {}).get("scene_boundary", 0) == 0, "复核仍有待核场次边界")
     require(report.get("fingerprint") == review_mod.fingerprint_workdir(workdir), "复核指纹失效；请重新复核")
     merged = "\n\n".join(p.read_text(encoding="utf-8-sig").strip() for _, p in review_mod.scene_files(workdir)) + "\n"
     script_text = paths["script"].read_text(encoding="utf-8-sig")
     require(script_text == merged, "标准剧本与通过复核的逐场稿合并内容不一致")
-    ledger_mod.validate(ledger_mod.parse_script(paths["script"]), ledger_mod.source_paragraphs(paths["source"]), ledger)
+    ledger_mod.validate(ledger_mod.parse_script(paths["script"]), ledger_mod.source_paragraphs(paths["source"]), ledger,
+                        require_designed=requires_design(ledger, project=project, explicit=getattr(args, "require_designed", False)))
     require(ledger.get("schema_version") == 3, "新绑定须使用区分场次与布景的schema 3台账；旧项目先离线审计升级")
-    require(not ledger.get("pending_reviews") and not any(ledger.get("inactive_assets", {}).values()), "资产仍有待核项目")
     records, length = build_records(script_text, ledger)
     style_path = project / "video-style.txt"
     style = style_path.read_text(encoding="utf-8-sig").strip() if style_path.is_file() else None
@@ -298,6 +316,10 @@ def bind(args):
              "ledger": ledger, "entry": {"min": args.min_duration, "max": 30, "durations": args.durations},
              "style_hash": sha(style) if style is not None else None,
              "ranges": [], "units": [], "next_numbers": {}, "receipts": []}
+    if contract:
+        state['delivery_contract'] = contract
+        if contract['scope'] != 'workflow':
+            state['phase'] = 'complete'
     require(4 <= args.min_duration <= 30, "入口下限须在4～30秒内")
     if args.durations:
         require(all(args.min_duration <= d <= 30 for d in args.durations), "合法档位超出入口时长范围")
@@ -310,6 +332,11 @@ def load(project, verify_style=True):
     require(state.get("schema_version") == 1, "项目状态版本不兼容")
     for label, record in state["files"].items():
         require(Path(record["path"]).is_file() and file_hash(record["path"]) == record["sha256"], f"{label}已变化；请按改稿流程重新绑定")
+    if state.get('delivery_contract') is not None:
+        dependency()
+        from project_contract import delivery_contract
+        current_contract = delivery_contract(read_json(Path(state['files']['ledger']['path'])), project)
+        require(current_contract == state['delivery_contract'], '交付契约已变化；不能静默改变任务范围')
     scene_dir = Path(state["files"]["source"]["path"]).parent / "scenes"
     current = {p.name: sha(p.read_text(encoding="utf-8-sig")) for p in scene_dir.glob("*.txt")}
     require(current == state["drafts"], "逐场稿已变化；请重新复核绑定")
@@ -334,7 +361,7 @@ def set_style(args, state=None):
     # Semantic conflicts (including negated requests) are reviewed by the caller.
     atomic_text(args.project / "video-style.txt", style + "\n")
     if state is not None:
-        state["style_hash"], state["phase"] = sha(style), "range"
+        state["style_hash"], state["phase"] = sha(style), ("complete" if state.get("delivery_contract", {}).get("scope") in {"assets", "screenplay"} else "range")
         save(args.project, state)
     return {"status": "style_saved", "style_file": str((args.project / "video-style.txt").resolve())}
 
@@ -697,12 +724,15 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
         used_record_ids.append(record["id"])
         require(event["text"] == portion(record, a, b), "台词与标准剧本所选部分不逐字一致")
         require(event["voice"] == record["voice"], "发声类型与标准剧本不一致")
-        cid = event["character_id"]
-        require(cid in unit["character_ids"] and cid in scene_chars[record["scene"]], "声源未列入本单元/原场景人物")
-        name = chars[cid].get("source_entry", chars[cid]["name"])
-        speaker = name.split("-群像-", 1)[0] + "-群像" if "-群像-" in name else name.split("-", 1)[0]
-        speaker = chars[cid].get("source_speaker", speaker)
-        require(speaker == record["speaker"], "台词说话人与台账声源不一致")
+        non_character = audio_sources.validate_source(event, record)
+        if not non_character:
+            cid = event["character_id"]
+            require(cid in unit["character_ids"] and cid in scene_chars[record["scene"]], "声源未列入本单元/原场景人物")
+            name = chars[cid].get("source_entry", chars[cid]["name"])
+            speaker = name.split("-群像-", 1)[0] + "-群像" if "-群像-" in name else name.split("-", 1)[0]
+            speaker = chars[cid].get("source_speaker", speaker)
+            require(speaker == record["speaker"], "台词说话人与台账声源不一致")
+            voice_ids.add(cid)
         t0, t1, pause = (milliseconds(event[k]) for k in ("start", "end", "pause"))
         require(0 <= t0 < t1 <= duration * 1000 and 0 <= pause < t1 - t0, "声音时间越界、倒序或停顿非法")
         require(t0 >= previous_start, "声音事件须按开始时间排序")
@@ -731,7 +761,6 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
             in_band = low <= rate <= high
         if not in_band:
             warnings.append({"record": record["id"], "kind": "估计净语速超档", "rate": round(rate, 3), **timing})
-        voice_ids.add(cid)
     require(used_record_ids == list(expected), "台词事件顺序与标准剧本不同")
     require(set(unit["character_ids"]) == used_chars | voice_ids, "人物名单存在未出镜/未发声角色，或遗漏主体")
     require(set(unit["prop_ids"]) == used_props, "主要道具名单与镜头主体不一致")
@@ -876,12 +905,14 @@ def render_unit(state, unit, reference_text=None):
             event = next(e for e in unit["audio"] if e["record"] == part["record"])
             timing = dialogue_layout.timing(part, shot, event.get("timing_basis") == "recording") if not current_format and unit.get("dialogue_layout") == dialogue_layout.LEGACY_POLICY else ""
             delivery = dialogue_layout.delivery_text(part, event, unit) if structured_format else ""
-            parts.append(convert(reference_name(state, event["character_id"], chars)) + event["voice"] + timing + delivery + '：“' + part["text"] + '”')
+            source = audio_sources.render_source(event, lambda cid: convert(reference_name(state, cid, chars)))
+            parts.append(source + event["voice"] + timing + delivery + '：“' + part["text"] + '”')
         for link in shot.get("dialogue_continuations", []):
             event = next(e for e in unit["audio"] if e["record"] == link["record"])
             chunks = [p for s in unit["shots"] for p in s.get("dialogue_parts", []) if p["record"] == link["record"]]
             chunk = chunks[link["segment"]]
-            parts.append(convert(reference_name(state, event["character_id"], chars)) +
+            source = audio_sources.render_source(event, lambda cid: convert(reference_name(state, cid, chars)))
+            parts.append(source +
                          f'同句续声至{dialogue_layout.clock(chunk["end"])}秒。')
         speech = (" " + " ".join(parts)) if parts else ""
         body = convert(asset_text(state, unit, shot["text"])[0])
@@ -1057,11 +1088,15 @@ def main():
         sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+    init = sub.add_parser('project-init', help='保存本次交付范围；新项目完整资产门槛自动生效')
+    init.add_argument('--project', type=Path, required=True)
+    init.add_argument('--scope', choices=('assets', 'workflow', 'screenplay'), required=True)
     p = sub.add_parser("bind")
     p.add_argument("--project", type=Path, required=True)
     for name in ("script", "source", "review", "ledger"):
         p.add_argument("--" + name, type=Path, required=True)
     p.add_argument("--standardizer", type=Path)
+    p.add_argument("--require-designed", action="store_true", help="新项目图片资产交付必须具备全部有效设计；旧事实台账兼容读取不自动升级")
     p.add_argument("--min-duration", type=int, default=4)
     p.add_argument("--durations", type=int, nargs="+")
     for command in ("style", "phase", "status", "locate", "range", "check", "commit", "render"):
@@ -1071,7 +1106,7 @@ def main():
             p.add_argument("--choice", choices=("1", "2", "3"), required=True)
             p.add_argument("--file", type=Path)
         elif command == "phase":
-            p.add_argument("--value", choices=("asset_choice", "image_choice", "image_folder", "style", "range", "nodes_choice", "followup"), required=True)
+            p.add_argument("--value", choices=("asset_choice", "image_choice", "image_folder", "style", "range", "nodes_choice", "followup", "complete"), required=True)
         elif command == "locate":
             p.add_argument("--anchors", type=Path, required=True)
         elif command == "range":
@@ -1090,7 +1125,11 @@ def main():
             p.add_argument("--request-id", required=True)
     args = parser.parse_args()
     try:
-        if args.command == "bind":
+        if args.command == 'project-init':
+            dependency()
+            from project_contract import initialize_project
+            result = initialize_project(args.project, args.scope)
+        elif args.command == "bind":
             result = bind(args)
         else:
             args.project = args.project.resolve()
@@ -1108,6 +1147,12 @@ def main():
                 for item, unit in zip(result["units"], state["units"]):
                     item["name"] = unit_name(unit)
                 result["batch_scope"] = state.get("batch_scope")
+                if 'delivery_contract' in state:
+                    result['delivery_contract'] = state['delivery_contract']
+                    result['task_complete'] = state['phase'] == 'complete'
+                if (args.project / 'pipeline-events.jsonl').exists() or (args.project / 'agents').is_dir():
+                    from pipeline_metrics import summarize_project
+                    result['pipeline_metrics'] = summarize_project(args.project)
                 if (args.project / "canvas" / "jobs").is_dir():
                     from canvas_jobs import status as job_status
                     result["canvas_jobs"] = job_status(args.project)
