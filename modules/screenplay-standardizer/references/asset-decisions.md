@@ -1,6 +1,6 @@
 # 资产审阅草稿、集中应用与变更影响
 
-本接口只处理已明确选择的稳定ID和人工决定。它不从称谓猜集合身份，不自动判定重要道具，不替代逐场原文审阅，也不执行画布操作。原有`asset-decisions-v1`决定结构和最终全量交付校验继续使用。
+本接口只处理已明确选择的稳定ID和作者审阅决定。集合身份、道具分类及参考必要性须有原文证据和具体判断，不能由称谓或物件类别自动确定；接口不替代逐场原文审阅，也不执行画布操作。原有`asset-decisions-v1`决定结构和最终全量交付校验继续使用。下文的对象、段号及摘录仅为接口示例，实际决定须引用当前剧本与台账。
 
 ## 冻结候选前准备证据
 
@@ -28,7 +28,7 @@ API `prepare_evidence_draft(paragraphs, selections, source_ref=...)`与CLI一致
 
 ## 固定输入后分批检查，最后集中应用
 
-同一次归并与来源冻结后，各批可从同一完整候选台账生成`review-template`。每批有自己的精确scope、原记录摘要和决定值；批次之间不得重复处理同一资产/候选，人物修改和归档共享资产ID空间，也不能跨批重叠。所有批次的`input_ledger_digest`和`source_digest`必须与当前冻结输入完全一致。
+同一次归并与来源冻结后，各批可从同一完整候选台账生成`review-template`。每批有自己的精确scope、原记录摘要和决定值；批次之间不得重复处理同一资产或候选，人物修改和归档也不得跨批处理同一资产ID。所有批次的`input_ledger_digest`和`source_digest`必须与当前冻结输入完全一致。
 
 ```text
 python scripts/asset_ledger.py review-check <standard.txt> <source.json> <frozen-ledger.json> <decisions-01.json> --batch <decisions-02.json>
@@ -79,7 +79,7 @@ python scripts/asset_ledger.py impact <before-ledger.json> <after-ledger.json> -
 - 原文`source_digest`、实际来源内容、全局风格/政策或未识别字段变化：按全局/未知扩大，不从经验推断其他资产一定不受影响。只提供一侧来源或设计文件同样报告输入不完整带来的未知影响。
 - 归档、待核和审阅历史等记录变化另列行政状态检查，不伪装成新的设计事实。
 
-报告固定`formal_ready: false`、`automatic_review_reuse: false`。影响范围是规划复核工作的依据，不是自动复用审阅的许可证；当前全剧来源摘要保护与design/render/bind门槛保持不变。报告称某项需要重新编译，并不表示已经重编译、已经审阅或已经恢复绑定。
+报告固定`formal_ready: false`、`automatic_review_reuse: false`。影响范围用于规划复核工作，不能据此自动复用审阅结论；当前全剧来源摘要保护与design/render/bind门槛保持不变。报告称某项需要重新编译，并不表示已经重编译、已经审阅或已经恢复绑定。
 
 ## 实际主顺序
 

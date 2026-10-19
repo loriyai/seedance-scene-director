@@ -10,7 +10,8 @@ import json
 import sys
 from pathlib import Path
 import director
-from authoring_gates import digest, staging_pending, staging_material
+from authoring_gates import (DRAFT_POLICY, digest, staging_pending, staging_material,
+                             stable_identifier, validate_draft_identity)
 
 COMPACT_POLICY = 'staging-compact-v1'
 SNAPSHOT_POLICY = 'staging-snapshot-v1'
@@ -18,6 +19,14 @@ SNAPSHOT_POLICY = 'staging-snapshot-v1'
 
 def prepare(state, request):
     """Use the original evidence producer without changing its hash/schema."""
+    identities = [unit.get('draft_unit_id') for unit in request['units']
+                  if stable_identifier(unit.get('draft_unit_id'))]
+    for unit in request['units']:
+        validate_draft_identity(unit)
+        if unit.get('draft_policy') == DRAFT_POLICY:
+            identifier = unit['draft_unit_id']
+            if identities.count(identifier) != 1:
+                raise ValueError('strict-draft-v1的draft_unit_id不可重复；不能猜测单元身份')
     return {'status': 'pending', 'units': [
         {'unit': u.get('id', i + 1), 'staging_review': staging_pending(state, u),
          'actual': staging_material(state, u)}
@@ -225,11 +234,19 @@ def _panel(entry, target):
 
 def _unit_key(entry):
     fields = entry['actual']['timing_and_state']
-    identifier = fields.get('id')
-    if not isinstance(identifier, str) or not identifier.strip():
-        return None
+    # Keep identity separate from source: duplicate identities with different
+    # spans are still ambiguous. Draft and committed IDs never cross-match.
+    for name in ('draft_unit_id', 'id'):
+        identifier = fields.get(name)
+        if stable_identifier(identifier):
+            return (name, identifier)
+    return None
+
+
+def _source_key(entry):
+    fields = entry['actual']['timing_and_state']
     targets = entry['actual']['targets']
-    return digest({'id': identifier, 'span': fields.get('span'), 'scene_ids': fields.get('scene_ids'),
+    return digest({'span': fields.get('span'), 'scene_ids': fields.get('scene_ids'),
                    'source': targets[0].get('source') if targets else []})
 
 
@@ -250,6 +267,83 @@ def _shot_key(target):
     return key if isinstance(key, str) and key.strip() else None
 
 
+def _context(entry):
+    fields = entry['actual']['timing_and_state']
+    return {k: copy.deepcopy(fields.get(k)) for k in (
+        'global', 'span', 'continuity', 'start_state', 'end_state',
+        'performance_brief', 'action_plan', 'audio_plan', 'duration')}
+
+
+def _related_checks(panel, previous=None, context_delta=None, alignment=None):
+    """Navigation from real fields only; never interpret prose as event facts.
+
+    The existing staging review consumes the full material and author basis.
+    These pending cues tell the same read which correlations need attention;
+    they neither add a review pass nor require unchanged prose to be rewritten.
+    """
+    groups = {}
+
+    def add(reason, paths, fields):
+        groups[reason] = {'reason': reason, 'changed_paths': paths,
+                          'fields_to_check': list(fields), 'status': 'pending'}
+
+    if previous is None:
+        add('first_read' if alignment is None else 'alignment_unavailable', [], (
+            'entering_state', 'action_windows', 'shot.continuity.changes',
+            'shot.camera', 'shot.composition', 'shot.depth_of_field',
+            'shot.lighting', 'shot.continuity.visibility', 'shot.text',
+            'unit.continuity.final', 'unit.end_state'))
+        return list(groups.values())
+    delta = _delta(previous, panel)
+    paths = [x['path'] for x in delta['set']] + delta['remove']
+    context_paths = ([x['path'] for x in context_delta['set']] + context_delta['remove']
+                     if context_delta else [])
+
+    def matching(prefixes):
+        return [p for p in paths if any(p[:len(prefix)] == prefix for prefix in prefixes)]
+
+    geometry = matching([['shot', name] for name in (
+        'camera', 'framing', 'angle', 'composition', 'depth_of_field', 'lighting',
+        'focus', 'subjects')])
+    if geometry:
+        add('photography_changed', geometry, (
+            'shot.camera', 'shot.composition', 'shot.focus', 'shot.depth_of_field',
+            'shot.lighting', 'shot.continuity.visibility', 'shot.text', 'entering_state'))
+    state_paths = matching([['entering_state'], ['shot', 'continuity', 'changes']])
+    state_paths += [['unit'] + p for p in context_paths if p[:1] in (
+        ['continuity'], ['start_state'], ['end_state'], ['global'])]
+    if state_paths:
+        add('state_or_spatial_context_changed', state_paths, (
+            'entering_state', 'shot.continuity.changes', 'shot.continuity.visibility',
+            'shot.text', 'shot.composition', 'unit.continuity.final', 'unit.end_state'))
+    action_paths = matching([['action_windows']])
+    action_paths += [['unit'] + p for p in context_paths if p[:1] in (
+        ['action_plan'], ['performance_brief'])]
+    if action_paths:
+        add('action_plan_changed', action_paths, (
+            'action_windows', 'entering_state', 'shot.continuity.changes',
+            'shot.text', 'shot.composition', 'shot.continuity.visibility',
+            'audio_windows', 'unit.continuity.final', 'unit.end_state'))
+    timing_paths = matching([['shot', 'start'], ['shot', 'end'], ['audio_windows'], ['audio_plan_parts']])
+    timing_paths += [['unit'] + p for p in context_paths if p[:1] in (['audio_plan'], ['duration'])]
+    if timing_paths:
+        add('timing_changed', timing_paths, (
+            'action_windows', 'audio_windows', 'audio_plan_parts', 'shot.text',
+            'shot.camera', 'shot.continuity.changes', 'shot.continuity.visibility'))
+    prose_paths = matching([['shot', 'text'], ['shot', 'continuity', 'visibility']])
+    if prose_paths:
+        add('performance_or_visibility_changed', prose_paths, (
+            'shot.text', 'shot.continuity.visibility', 'shot.camera',
+            'shot.composition', 'entering_state', 'action_windows',
+            'shot.continuity.changes', 'unit.continuity.final'))
+    # Unknown/new fields remain visible in the raw diff. No empty cue list may
+    # be read as semantic approval of an unclassified actual change.
+    if not groups and (paths or context_paths):
+        add('other_actual_field_changed', paths + [['unit'] + p for p in context_paths], (
+            'current', 'previous', 'unit_context'))
+    return list(groups.values())
+
+
 def related_view(view_path, selected=None, shot=None, previous=None):
     """Same-round display from verified snapshots; canonical evidence is intact.
 
@@ -268,28 +362,45 @@ def related_view(view_path, selected=None, shot=None, previous=None):
     old = expand(previous) if previous is not None else None
     old_units = _unique_index(old['units'], _unit_key) if old is not None else {}
     current_units = _unique_index(current['units'], _unit_key)
-    result = {'policy': 'staging-related-display-v1', 'status': 'pending',
+    result = {'policy': 'staging-related-display-v2', 'status': 'pending',
               'evidence_use': 'display_only_not_approval', 'dependency_scope': 'not_computed',
+              'review_use': '在同轮作者前检中实读关联提示，沿用当前staging_review的render_basis和timing_state_basis；'
+                            '未变且仍成立的字段可保留，提示本身不签发通过、不决定独立审阅闭包。',
               'current_view': {'path': str(view_path.resolve()), 'sha256': hashlib.sha256(view_path.read_bytes()).hexdigest()},
               'units': []}
     if previous is not None:
         result['previous_view'] = {'path': str(previous.resolve()), 'sha256': hashlib.sha256(previous.read_bytes()).hexdigest()}
         result['unmatched_previous_units'] = [e['unit'] for e in old['units']
-                                             if _unit_key(e) not in current_units or _unit_key(e) not in old_units]
+            if _unit_key(e) not in current_units or _unit_key(e) not in old_units or
+            _source_key(e) != _source_key(current_units[_unit_key(e)])]
     for i in indices:
         entry = current['units'][i - 1]
         key = _unit_key(entry)
         prior = old_units.get(key) if key in current_units else None
+        reason = None
+        if old is not None:
+            if key is None:
+                reason = 'missing_stable_unit_id'
+            elif key not in current_units or key not in old_units:
+                reason = 'missing_or_duplicate_unit_identity'
+            elif _source_key(entry) != _source_key(prior):
+                reason = 'source_changed'
+                prior = None
         targets = entry['actual']['targets']
         current_shots = _unique_index(targets, _shot_key)
         old_shots = _unique_index(prior['actual']['targets'], _shot_key) if prior else {}
         row = {'unit': entry['unit'], 'unit_index': i,
                'actual_sha256': digest(entry['actual']),
-               'unit_context': {k: copy.deepcopy(entry['actual']['timing_and_state'].get(k))
-                                for k in ('global', 'span', 'continuity', 'start_state', 'end_state')},
+               'identity': dict(field=key[0], value=key[1]) if key else None,
+               'unit_context': _context(entry),
                'shots': []}
         if old is not None:
             row['comparison'] = 'aligned' if prior else 'unmatched_or_ambiguous_unit'
+            if reason:
+                row['comparison_reason'] = reason
+            if prior:
+                row['previous_unit_context'] = _context(prior)
+                row['unit_context_difference'] = _delta(_context(prior), _context(entry))
             row['removed_or_ambiguous_previous_shots'] = [t['shot'].get('review_id')
                 for t in prior['actual']['targets'] if _shot_key(t) not in current_shots or _shot_key(t) not in old_shots] if prior else []
         for target in targets if shot is None else [targets[shot - 1]]:
@@ -297,6 +408,7 @@ def related_view(view_path, selected=None, shot=None, previous=None):
             panel = _panel(entry, target)
             item = {'shot_index': target['shot_index'], 'review_id': identity, 'status': 'pending',
                     'current': panel, 'request_pointer': f'/units/{i - 1}/shots/{target["shot_index"] - 1}'}
+            old_panel = None
             if old is not None:
                 prior_target = old_shots.get(identity) if identity in current_shots else None
                 if prior_target:
@@ -304,6 +416,9 @@ def related_view(view_path, selected=None, shot=None, previous=None):
                     item.update(comparison='aligned', previous=old_panel, difference=_delta(old_panel, panel))
                 else:
                     item['comparison'] = 'unmatched_or_ambiguous_shot'
+            item['related_checks'] = _related_checks(
+                panel, old_panel, row.get('unit_context_difference'),
+                item.get('comparison') if old is not None else None)
             row['shots'].append(item)
         result['units'].append(row)
     return result

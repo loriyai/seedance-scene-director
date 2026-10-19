@@ -51,6 +51,33 @@ class ShotReviewChecks(unittest.TestCase):
         self.assertEqual(result['status'], 'passed')
         self.assertEqual(self.request, before)
 
+    def test_all_v2_shot_lengths_review_choice_even_without_camera_keywords(self):
+        self.unit['workflow_policy'] = 'scene-review-b-v2'
+        for duration in (1, 2, 3, 4, 5, 6):
+            for camera in ('固定机位', '沿动作方向横移', '', '保持角色在画面中部'):
+                shot = self.unit['shots'][0]
+                shot.update(start=0, end=duration, camera=camera)
+                before = copy.deepcopy(self.request)
+                target = shot_review.targets(self.state, self.request)[0]
+                with self.subTest(duration=duration, camera=camera):
+                    self.assertTrue(any('1至6秒摄影选择' in cue for cue in target['review_cues']))
+                    self.assertFalse(any('整镜固定不合格' in cue for cue in target['review_cues']))
+                    self.assertEqual(target['status'], 'pending')
+                    self.assertEqual(target['basis'], '')
+                    self.assertEqual(target['shot']['camera'], camera)
+                    self.assertEqual(self.request, before)
+
+    def test_legacy_cue_policy_preserves_historical_fixed_shot_snapshot(self):
+        self.unit['workflow_policy'] = 'scene-review-b-v2'
+        self.unit['review_dependencies'] = {'policy': 'shot-dependencies-v2', 'links': []}
+        self.unit['shots'][0].update(start=0, end=6)
+        current = shot_review.targets(self.state, self.request)[0]['review_cues']
+        legacy = shot_review.targets(self.state, self.request,
+                                     cue_policy=shot_review.LEGACY_CUE_POLICY)[0]['review_cues']
+        self.assertTrue(any('1至6秒摄影选择' in cue for cue in current))
+        self.assertFalse(any('整镜固定不合格' in cue for cue in current))
+        self.assertEqual(legacy, ['4至6秒镜头含固定描述：核对是否仅为实际运镜后的短暂稳定落点；整镜固定不合格，须有服务观看重点的相机位移或转向，移焦与主体动作不算。'])
+
     def test_global_pass_cannot_replace_missing_or_pending_shot_review(self):
         for defect in ('missing', 'pending', 'generic'):
             report = self.approve()

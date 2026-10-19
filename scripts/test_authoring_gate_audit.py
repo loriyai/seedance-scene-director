@@ -87,7 +87,7 @@ class AuthoringGateAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '声音尚不具备'):
             pf.validate(state, {'units': [unit]})
 
-    def test_integer_cut_feasibility_includes_existing_shot_count_rule(self):
+    def test_integer_cut_feasibility_allows_six_shot_long_unit(self):
         state, unit = silent_fixture()
         unit['duration'] = 30
         parts = [{'text': '甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉。',
@@ -101,8 +101,7 @@ class AuthoringGateAuditTests(unittest.TestCase):
                     audio=[{'record': 'D1', 'text': text, 'units': 120, 'start': 0, 'end': 30,
                             'pause': 2.4, 'speed': '常速', 'voice': '说', 'character_id': 'CHAR1'}])
         result = assess(state, unit)
-        error = next(e for e in result['errors'] if e['code'] == 'AUDIO_CUT_COUNT')
-        self.assertEqual(error['feasible_counts'], [6])
+        self.assertNotIn('AUDIO_CUT_COUNT', {e['code'] for e in result['errors']})
         self.assertNotIn('AUDIO_CUT_PARTITION', {e['code'] for e in result['errors']})
 
     def test_silent_long_plan_has_enough_legal_cuts(self):

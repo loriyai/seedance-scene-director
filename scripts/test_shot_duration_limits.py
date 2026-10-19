@@ -58,13 +58,14 @@ class ShotDurationTests(unittest.TestCase):
                         review_id=f'S{number}')
             unit['shots'].append(shot)
             start += length
-        unit.update(duration=start, count_reason='虚构边界测试按既定动作窗口排列镜头。')
+        unit.update(duration=start)
+        unit.pop('count_reason', None)
         return unit
 
     def test_six_seconds_accepted_and_seven_rejected(self):
         unit = self.unit([6])
         warnings = d.validate_unit(self.fx.state, unit, [0, 9])
-        self.assertEqual(len([w for w in warnings if w['kind'] == MOTION_WARNING]), 1)
+        self.assertNotIn(MOTION_WARNING, {w['kind'] for w in warnings})
         with self.assertRaisesRegex(ValueError, '单镜不在1～6秒'):
             d.validate_unit(self.fx.state, self.unit([7]), [0, 9])
 
@@ -77,15 +78,14 @@ class ShotDurationTests(unittest.TestCase):
             with self.subTest(lengths=lengths), self.assertRaisesRegex(ValueError, '单元时长不合法'):
                 d.validate_unit(self.fx.state, self.unit(lengths), [0, 9])
 
-    def test_long_unit_still_requires_eight_to_thirteen_shots(self):
-        with self.assertRaisesRegex(ValueError, '8～13镜'):
-            d.validate_unit(self.fx.state, self.unit([6] * 5), [0, 9])
-        with self.assertRaisesRegex(ValueError, '8～13镜'):
-            d.validate_unit(self.fx.state, self.unit([2] * 14), [0, 9])
-        warnings = d.validate_unit(self.fx.state, self.unit([6, 4, 4, 4, 3, 3, 3, 3]), [0, 9])
-        motion = [w for w in warnings if w['kind'] == MOTION_WARNING]
-        self.assertEqual(len(motion), 1)
-        self.assertEqual([s['shot'] for s in motion[0]['shots']], [1, 2, 3, 4])
+    def test_long_unit_accepts_story_driven_counts_without_count_reason(self):
+        for lengths in ([6] * 5, [2] * 14, [1] * 30,
+                        [6, 4, 4, 4, 3, 3, 3, 3]):
+            with self.subTest(lengths=lengths):
+                unit = self.unit(lengths, '固定机位观察当前动作')
+                self.assertNotIn('count_reason', unit)
+                warnings = d.validate_unit(self.fx.state, unit, [0, 9])
+                self.assertNotIn(MOTION_WARNING, {w['kind'] for w in warnings})
 
     def test_short_fixed_shots_have_no_long_motion_diagnostic(self):
         for lengths in ([1, 3], [2, 2], [3, 3]):
@@ -93,17 +93,14 @@ class ShotDurationTests(unittest.TestCase):
                 warnings = d.validate_unit(self.fx.state, self.unit(lengths, '固定机位'), [0, 9])
                 self.assertNotIn(MOTION_WARNING, {w['kind'] for w in warnings})
 
-    def test_keyword_variants_never_automatically_approve_long_shots(self):
+    def test_fixed_or_moving_long_shots_have_no_mandatory_motion_gate(self):
         for camera in ('全程固定机位', '固定机位，仅移焦', '固定机位，人物走动',
                        '运镜丝滑', '先推近再固定于落点'):
             with self.subTest(camera=camera):
                 unit = self.unit([4, 5, 6], camera)
                 warnings = d.validate_unit(self.fx.state, unit, [0, 9])
-                motion = [w for w in warnings if w['kind'] == MOTION_WARNING]
-                self.assertEqual(len(motion), 1)
-                self.assertEqual([s['shot'] for s in motion[0]['shots']], [1, 2, 3])
-                report = gate.pending(self.fx.state, {'units': [unit]}, motion)
-                self.assertEqual(report['warning_decisions'][0]['decision'], 'pending')
+                self.assertNotIn(MOTION_WARNING, {w['kind'] for w in warnings})
+                report = gate.pending(self.fx.state, {'units': [unit]}, warnings)
                 self.assertTrue(all(r['status'] == 'pending' for r in report['shot_reviews']))
 
     def test_boundary_scan_does_not_add_motion_rules_to_historical_neighbor(self):
@@ -112,13 +109,16 @@ class ShotDurationTests(unittest.TestCase):
         warnings = d.photography_warnings(self.fx.state, entries, boundary_only=True)
         self.assertNotIn(MOTION_WARNING, {w['kind'] for w in warnings})
 
-    def test_v2_long_fixed_cue_and_legacy_cue_are_distinct(self):
+    def test_current_long_fixed_cue_and_legacy_snapshot_are_distinct(self):
         unit = self.unit([4], '先推近再固定于落点')
         unit['review_dependencies'] = {'policy': 'shot-dependencies-v2', 'complete': True,
                                        'basis': '虚构单镜无跨镜空间依赖。', 'links': []}
         cues = shot_review.targets(self.fx.state, {'units': [unit]})[0]['review_cues']
-        self.assertTrue(any('整镜固定不合格' in cue for cue in cues))
-        self.assertFalse(any('不要求补运镜' in cue for cue in cues))
+        self.assertFalse(any('整镜固定不合格' in cue for cue in cues))
+        self.assertTrue(any('不要求补运镜' in cue for cue in cues))
+        legacy = shot_review.targets(self.fx.state, {'units': [unit]},
+                                     cue_policy=shot_review.LEGACY_CUE_POLICY)[0]['review_cues']
+        self.assertTrue(any('整镜固定不合格' in cue for cue in legacy))
         unit['review_dependencies']['policy'] = 'shot-dependencies-v1'
         cues = shot_review.targets(self.fx.state, {'units': [unit]})[0]['review_cues']
         self.assertEqual(cues[0], '固定镜头：核对原有动作或保持的用途、信息读清所需时长和切点；不要求补运镜。')
@@ -143,10 +143,9 @@ class AudioCutLimitTests(unittest.TestCase):
         self.assertNotIn('AUDIO_CUT_WINDOW', {e['code'] for e in errors})
         self.assertIn('AUDIO_CUT_PARTITION', {e['code'] for e in errors})
 
-    def test_feasible_audio_partition_preserves_long_unit_shot_count(self):
+    def test_feasible_audio_partition_has_no_duration_based_shot_count(self):
         errors = cut_errors([(n, n + 6) for n in range(0, 30, 6)], 30)
-        self.assertEqual(errors[0]['code'], 'AUDIO_CUT_COUNT')
-        self.assertEqual(errors[0]['feasible_counts'], [5])
+        self.assertEqual(errors, [])
         lengths = [6, 4, 4, 4, 3, 3, 3, 3]
         windows, start = [], 0
         for length in lengths:

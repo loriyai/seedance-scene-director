@@ -71,6 +71,12 @@ def validate_unit(state, unit, required=False):
     Raises ValueError for declared contradictions. The return value is private
     validation data and must not be rendered into the user-facing prompt.
     """
+    # New action effects are authoritative only on explicit opt-in. Validate
+    # before legacy's optional early return, so removing continuity cannot
+    # bypass the compiled-plan guard in director.validate_unit either.
+    if "action_state_plan" in unit:
+        from state_effects import validate_compiled
+        validate_compiled(state, unit)
     contract = unit.get("continuity")
     if contract is None:
         require(not required, "新生成/指定替换单元须填写continuity状态记录")

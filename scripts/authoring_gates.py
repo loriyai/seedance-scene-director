@@ -11,9 +11,25 @@ import re
 from pathlib import Path
 
 POLICY = 'scene-review-b-v2'
+DRAFT_POLICY = 'strict-draft-v1'
+CORRELATION_POLICY = 'staging-correlation-v1'
 GENERIC = {'通过', '已检查', '符合剧情', '为了节奏', '符合要求', '无问题', '同前', '同上'}
 FIELDS = ('text', 'composition', 'depth_of_field', 'visibility', 'continuity.changes',
           'initial/final', 'start/end_state')
+STRICT_FIELDS = FIELDS + ('camera', 'lighting', 'entering_state', 'action_plan')
+
+
+def stable_identifier(value):
+    """An author-owned identity, not a display number or an inferred row."""
+    return (isinstance(value, str) and bool(value.strip()) and
+            not any(c in value for c in ('\r', '\n', '\v', '\f', '\x1c', '\x1d',
+                                         '\x1e', '\x85', '\u2028', '\u2029')))
+
+
+def validate_draft_identity(unit):
+    """Only explicitly opted-in new drafts require a persistent draft ID."""
+    if unit.get('draft_policy') == DRAFT_POLICY and not stable_identifier(unit.get('draft_unit_id')):
+        raise ValueError('strict-draft-v1须提供非空单行draft_unit_id；不得按单元顺序推定身份')
 
 
 def digest(value):
@@ -50,7 +66,7 @@ def audio_payload(state, unit):
                    and r['start'] < span[1] and r['end'] > span[0])
     rules = {name:hashlib.sha256((Path(__file__).parent/name).read_bytes()).hexdigest()
              for name in ('authoring_gates.py','storyboard_preflight.py','dialogue_layout.py','speech_timing_audit.py','audio_sources.py')}
-    return {'policy':POLICY, 'rules':rules, 'audio': unit.get('audio', []), 'parts': normalized,
+    payload = {'policy':POLICY, 'rules':rules, 'audio': unit.get('audio', []), 'parts': normalized,
             'duration': unit.get('duration'), 'span': unit.get('span'),
             'actions': unit.get('action_plan'),
             'source': [r for r in state.get('records', []) if r.get('id') in ids or
@@ -59,6 +75,22 @@ def audio_payload(state, unit):
                            {cid for e in unit.get('audio', []) for cid in
                             e.get('character_ids', [e.get('character_id')])}],
             'voice_direction': unit.get('voice_direction'), 'dialogue_layout': unit.get('dialogue_layout')}
+    # The optional brief informs the same speech/action decision, not a new
+    # approval. Preserve the historical payload shape when it was not supplied.
+    # Action-level performance is already bound within the complete actions.
+    if 'performance_brief' in unit:
+        payload['performance_brief'] = unit['performance_brief']
+    if 'action_state_plan' in unit:
+        payload['action_state_plan'] = unit['action_state_plan']
+        # Action readiness depends on its starting conditions and the entity
+        # definitions read by validate_plan, even before shots exist. Camera
+        # fields remain outside this sound/action binding.
+        contract = unit.get('continuity', {})
+        payload['action_state_entry'] = {
+            key: copy.deepcopy(contract.get(key)) for key in ('entities', 'initial')}
+        payload['action_state_rules'] = hashlib.sha256(
+            (Path(__file__).parent / 'state_effects.py').read_bytes()).hexdigest()
+    return payload
 
 
 def audio_ready(state, unit, checked):
@@ -70,6 +102,20 @@ def audio_ready(state, unit, checked):
     from storyboard_preflight import _number, _parts, _source_audio
     errors = []
     errors.extend(_source_audio(state, unit))
+    try:
+        validate_draft_identity(unit)
+    except ValueError as exc:
+        errors.append(error('DRAFT_IDENTITY_SCHEMA', str(exc), field='draft_unit_id'))
+    if 'action_state_plan' in unit:
+        from state_effects import validate_plan
+        try:
+            validate_plan(state, unit)
+        except ValueError as exc:
+            errors.append(error('ACTION_STATE_PLAN', str(exc), field='action_state_plan'))
+    if 'performance_brief' in unit and (not isinstance(unit['performance_brief'], str)
+                                       or not unit['performance_brief'].strip()):
+        errors.append(error('PERFORMANCE_BRIEF_SCHEMA', '表演主干如有提供须为非空字符串；语义由写者核对',
+                            field='performance_brief'))
     if not state.get('records'):
         errors.append(error('AUDIO_SOURCE_UNVERIFIED', '离线计划只证明内部结构；进入详细摄影须提供绑定来源'))
     span = unit.get('span')
@@ -89,13 +135,16 @@ def audio_ready(state, unit, checked):
         errors.append(error('AUDIO_CANONICAL_PLAN', '有声新单元须保留唯一audio_plan并从该计划同步dialogue_parts'))
     actions = unit.get('action_plan')
     if not isinstance(actions, list):
-        errors.append(error('AUDIO_ACTION_PLAN', '须登记action_plan；无必须先后动作时用空数组并在语义核对中说明'))
+        errors.append(error('AUDIO_ACTION_PLAN', '须登记action_plan；无必须先后或需跟踪过程/结束的关键动作时可用空数组并在语义核对中说明'))
         actions = []
     records = {r.get('id'): r for r in state.get('records', [])}
     events = {e.get('record'): e for e in unit.get('audio', [])}
-    for a in actions:
+    for index, a in enumerate(actions):
         if not isinstance(a, dict):
             errors.append(error('AUDIO_ACTION_WINDOW', '动作骨架须为对象')); continue
+        if 'performance' in a and (not isinstance(a['performance'], str) or not a['performance'].strip()):
+            errors.append(error('ACTION_PERFORMANCE_SCHEMA', '动作表演如有提供须为非空字符串；语义由写者核对',
+                                record=a.get('record'), field=f'action_plan[{index}].performance'))
         source = records.get(a.get('record'), {})
         from continuity import portion
         span = unit.get('span')
@@ -124,20 +173,14 @@ def audio_ready(state, unit, checked):
         windows = [p for ps in all_parts.values() for p in ps
                    if all(_number(p.get(k)) for k in ('start','end'))]
         allowed = {t for t in range(duration+1) if not any(p['start']+.001 < t < p['end']-.001 for p in windows)}
-        # Keep counts as well as reachability: legal shot durations alone
-        # do not establish a partition satisfying the existing 8-13 rule.
-        reachable = {0: {0}}
+        # Speech fragments must fit a continuous partition of 1-6 second shots.
+        # Shot count follows the story rather than a duration-based quota.
+        reachable = {0}
         for t in range(1,duration+1):
-            if t in allowed:
-                counts = {n + 1 for k in range(1, 7)
-                          for n in reachable.get(t - k, set())}
-                if counts:
-                    reachable[t] = counts
+            if t in allowed and any(t - k in reachable for k in range(1, 7)):
+                reachable.add(t)
         if duration not in reachable:
             errors.append(error('AUDIO_CUT_PARTITION', '所有语义片段无法共同构成1至6秒整数镜头分区；须在摄影前调整分句/切点'))
-        elif duration >= 26 and not reachable[duration].intersection(range(8, 14)):
-            errors.append(error('AUDIO_CUT_COUNT', '当前片段只允许与8至13镜规则冲突的整数切点组合；须在摄影前调整自然分句/切点',
-                                feasible_counts=sorted(reachable[duration])))
     payload = audio_payload(state, {**unit, 'action_plan': actions})
     binding = digest(payload)
     review = unit.get('audio_preflight', {})
@@ -177,6 +220,7 @@ def staging_material(state, unit):
     from director import render_unit, HEADER_POLICY
     from shot_review import targets
     from continuity import validate_unit
+    validate_draft_identity(unit)
     replay = validate_unit(state, unit, required=True)
     current = copy.deepcopy(unit)
     current.setdefault('id', '待编号')
@@ -192,9 +236,9 @@ def staging_material(state, unit):
     # A per-unit target projection cannot carry an edge whose destination is in
     # another unit. Bind the complete declaration once at its owning unit in v2;
     # historical v1 material and digests retain their original shape.
-    from shot_dependencies import POLICY_V2
+    from shot_dependencies import POLICY_V2, POLICY_V3
     declaration = unit.get('review_dependencies')
-    if isinstance(declaration, dict) and declaration.get('policy') == POLICY_V2:
+    if isinstance(declaration, dict) and declaration.get('policy') in (POLICY_V2, POLICY_V3):
         fields['review_dependencies'] = copy.deepcopy(declaration)
     return {'rendered': rendered, 'timing_and_state': fields, 'targets': shots,
             'replay': replay}
@@ -202,14 +246,22 @@ def staging_material(state, unit):
 
 def staging_pending(state, unit):
     material = staging_material(state, unit)
+    strict = unit.get('draft_policy') == DRAFT_POLICY
     checks = []
     for t in material['targets']:
         # Every actual state event prompts correlated field inspection. Even a
         # no-change shot can carry stale posture: it remains in actual render.
         if t['shot'].get('continuity', {}).get('changes'):
-            checks.append({'shot': t['shot_index'], 'fields': list(FIELDS), 'status': 'pending', 'basis': ''})
-    return {'input_sha256': digest(material), 'reviewer': '', 'status': 'pending',
-            'render_basis': '', 'timing_state_basis': '', 'change_checks': checks}
+            checks.append({'shot': t['shot_index'], 'fields': list(STRICT_FIELDS if strict else FIELDS),
+                           'status': 'pending', 'basis': ''})
+    result = {'input_sha256': digest(material), 'reviewer': '', 'status': 'pending',
+              'render_basis': '', 'timing_state_basis': '', 'change_checks': checks}
+    if strict:
+        # Version the extra fields without changing historical change_checks.
+        # Camera-only cues live in related_view, consumed in the same existing
+        # render_basis/timing_state_basis review, not another per-shot form.
+        result['correlation_policy'] = CORRELATION_POLICY
+    return result
 
 
 def validate_staging(state, unit):
@@ -217,6 +269,8 @@ def validate_staging(state, unit):
     actual = unit.get('staging_review', {})
     if not isinstance(actual, dict) or actual.get('input_sha256') != expected['input_sha256']:
         raise ValueError('冻结前实际渲染/后台时码状态检查缺失或过期；运行staging_preflight准备当前清单')
+    if expected.get('correlation_policy') and actual.get('correlation_policy') != expected['correlation_policy']:
+        raise ValueError('strict草稿须使用当前关联核对策略；相关提示由同轮render_basis/timing_state_basis消费')
     if not (actual.get('status') == 'reviewed' and actual.get('reviewer') and
             concrete(actual.get('render_basis')) and concrete(actual.get('timing_state_basis'))):
         raise ValueError('冻结前须实读同版本渲染和时码状态，填写具体依据')

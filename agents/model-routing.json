@@ -54,31 +54,17 @@
     "storyboard": {
       "profile": "creative",
       "references": [
-        "references/runtime.md",
-        "references/cinematic-rules.md",
-        "references/continuity-state.md",
-        "references/performance-direction.md",
-        "references/shot-options.md",
-        "references/output-format.md",
-        "references/scene-review-workflow.md",
         "references/storyboard-workflow.md",
-        "references/storyboard-authoring.md",
-        "references/binding-changes.md"
+        "references/storyboard-rules.md",
+        "references/storyboard-text-format.md"
       ]
     },
     "revise": {
       "profile": "creative",
       "references": [
-        "references/runtime.md",
-        "references/cinematic-rules.md",
-        "references/continuity-state.md",
-        "references/performance-direction.md",
-        "references/shot-options.md",
-        "references/output-format.md",
-        "references/scene-review-workflow.md",
         "references/storyboard-workflow.md",
-        "references/storyboard-authoring.md",
-        "references/binding-changes.md"
+        "references/storyboard-rules.md",
+        "references/storyboard-text-format.md"
       ]
     },
     "review": {
@@ -125,5 +111,7 @@
     "changed_input": "reject_draft_and_prepare_new_handoff",
     "uncertain_canvas_write": "existing_readback_and_resume_rules"
   },
-  "handoff_policy": "stage-handoff-v2"
+  "handoff_policy": "stage-handoff-v2",
+  "storyboard_handoff_policy": "direct-scene-v1",
+  "storyboard_protocol": "scene-text-v1"
 }

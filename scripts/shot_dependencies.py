@@ -7,6 +7,7 @@ import copy
 
 POLICY = 'shot-dependencies-v1'
 POLICY_V2 = 'shot-dependencies-v2'
+POLICY_V3 = 'shot-dependencies-v3'
 WARNING_SCOPE_POLICY = 'warning-scope-v1'
 KINDS = {'axis', 'eyeline', 'occlusion', 'action_match', 'composition', 'state', 'other'}
 
@@ -33,8 +34,8 @@ def diagnostics(unit, path='unit'):
     if set(g) != {'policy', 'complete', 'basis', 'links'}:
         add(root, 'declaration_fields', '字段须为policy、complete、basis、links')
     policy = g.get('policy')
-    if policy not in (POLICY, POLICY_V2):
-        add(root + '.policy', 'unsupported_policy', '须使用shot-dependencies-v1或shot-dependencies-v2')
+    if policy not in (POLICY, POLICY_V2, POLICY_V3):
+        add(root + '.policy', 'unsupported_policy', '须使用shot-dependencies-v1、v2或v3')
     if g.get('complete') is not True:
         add(root + '.complete', 'complete_required', '完整声明须为true；不能据结构检查推断语义完整')
 
@@ -75,7 +76,8 @@ def diagnostics(unit, path='unit'):
                 add(field + '.' + endpoint, 'endpoint_required', '须为非空镜头ID')
         if isinstance(link.get('from'), str) and link.get('from') == link.get('to'):
             add(field + '.to', 'self_dependency', '来源和目标不能为同一镜头')
-        if not isinstance(link.get('kind'), str) or link['kind'] not in KINDS:
+        if (not isinstance(link.get('kind'), str) or not link['kind'].strip()
+                or policy != POLICY_V3 and link['kind'] not in KINDS):
             add(field + '.kind', 'unsupported_kind', '关系类型不受支持')
         basis(link.get('basis'), field + '.basis')
     return errors
@@ -135,7 +137,7 @@ def target_declaration(unit, sid, units):
     and edge evidence binds its actual target and all downstream dependents.
     """
     g = graph(unit)
-    if g is None or g['policy'] != POLICY_V2:
+    if g is None or g['policy'] not in (POLICY_V2, POLICY_V3):
         return copy.deepcopy(unit.get('review_dependencies'))
     declaration = {k: copy.deepcopy(g[k]) for k in ('policy', 'complete', 'basis')}
     declaration['links'] = [copy.deepcopy(link) for owner in units
@@ -199,7 +201,7 @@ def scope_warning(warning, units, local_index=None):
         numbers[i] = {warning['shot']}
     if not indexes and local_index is not None:
         indexes.add(local_index)
-    if not indexes or not any(graph(units[i]) and graph(units[i])['policy'] == POLICY_V2 for i in indexes):
+    if not indexes or not any(graph(units[i]) and graph(units[i])['policy'] in (POLICY_V2, POLICY_V3) for i in indexes):
         return warning
     entries = []
     for i in sorted(indexes):
@@ -232,8 +234,13 @@ def common(unit):
                             if k not in ('initial', 'final')}
     result['all_dialogue_parts'] = [copy.deepcopy(s.get('dialogue_parts', [])) for s in unit.get('shots', [])]
     g = graph(unit)
-    if g is not None and g['policy'] == POLICY_V2:
+    if g is not None and g['policy'] in (POLICY_V2, POLICY_V3):
         result['review_dependencies'] = {k: copy.deepcopy(g[k]) for k in ('policy', 'complete', 'basis')}
+    if g is not None and g['policy'] == POLICY_V3:
+        # These summaries describe entry/exit, not every interior moment.
+        # Their precise owner is represented in v3 shot review targets.
+        result.pop('start_state', None)
+        result.pop('end_state', None)
     return result
 
 
@@ -330,6 +337,152 @@ def dependencies(snapshot, resets):
                 for j, g in graphs.items() if g and
                 (j in {by_id[k][0] for k in needed if k in by_id} or
                  any(link['to'] in needed for link in g['links']))}
+    # Keep the historical v1/v2 payload algorithm byte-equivalent. V3 is an
+    # explicit new projection, never a reinterpretation of old evidence.
+    output.update(_dependencies_v3(snapshot, resets, by_id, graphs, invalid, links,
+                                   connections, payloads))
+    return output
+
+
+# Fields deliberately understood by v3. Unknown fields are NOT ignored: they
+# make a reached source use its full payload, including future extensions.
+_SHOT_FIELDS = {'review_id', 'scene_id', 'start', 'end', 'framing', 'angle', 'label',
+                'purpose', 'camera', 'composition', 'depth_of_field', 'lighting',
+                'subjects', 'focus', 'text', 'transition', 'connector',
+                'sound_foreground', 'sound_environment', 'dialogue_parts',
+                'dialogue_continuations', 'closeup_reason', 'face_closeup',
+                'environment_evidence', 'continuity'}
+_VISUAL = {'camera', 'angle', 'framing', 'composition', 'subjects', 'focus',
+           'depth_of_field', 'lighting', 'environment_evidence'}
+_KIND_FIELDS = {
+    'state': {'scene_id', 'start', 'end'},
+    'axis': _VISUAL | {'scene_id', 'start', 'end', 'text'},
+    'eyeline': _VISUAL | {'scene_id', 'start', 'end', 'text'},
+    'occlusion': _VISUAL | {'scene_id', 'start', 'end', 'text'},
+    'composition': _VISUAL | {'scene_id', 'start', 'end', 'text', 'transition', 'connector'},
+    'action_match': _VISUAL | {'scene_id', 'start', 'end', 'text', 'transition', 'connector'},
+}
+
+
+def unclassified_shot_fields(unit):
+    """Preserve unknown shot contracts when certifying a local reset boundary."""
+    result = []
+    for shot in unit.get('shots', []):
+        unknown = {key: copy.deepcopy(value) for key, value in shot.items() if key not in _SHOT_FIELDS}
+        block = shot.get('continuity', {})
+        extra = {key: copy.deepcopy(value) for key, value in block.items() if key not in ('changes', 'visibility')}
+        if extra:
+            unknown['continuity'] = extra
+        if unknown:
+            result.append({'review_id': shot.get('review_id'), 'fields': unknown})
+    return result
+
+
+def _v3_slice_known(payload, kind):
+    target, shot = payload['target'], payload['target']['shot']
+    block = shot.get('continuity', {})
+    return (kind in _KIND_FIELDS and not set(shot) - _SHOT_FIELDS
+            and not set(block) - {'changes', 'visibility'}
+            and not set(target) - {'key', 'unit_index', 'shot_index', 'source', 'unit_position',
+                                   'entering_state', 'exiting_state', 'shot', 'review_cues',
+                                   'dependency_declaration', 'entry_summary', 'exit_summary'}
+            and all(isinstance(v, dict) and not set(v) - {'mode', 'basis'}
+                    for v in block.get('visibility', {}).values()))
+
+
+def _project_v3(payload, kind):
+    """A fixed reviewed relationship determines which source facts it reads.
+
+    Full source/asset/sound/common/rule bindings are retained for every kind.
+    Only understood shot presentation fields may be excluded. A state edge
+    reads actual replayed state and event evidence, not camera wording.
+    """
+    target = payload['target']
+    shot = target['shot']
+    block = shot.get('continuity', {})
+    if not _v3_slice_known(payload, kind):
+        return copy.deepcopy(payload)
+    result = {key: copy.deepcopy(value) for key, value in payload.items() if key != 'target'}
+    selected = {key: copy.deepcopy(shot[key]) for key in _KIND_FIELDS[kind] if key in shot}
+    selected['continuity'] = {'changes': copy.deepcopy(block.get('changes', []))}
+    if kind != 'state':
+        selected['continuity']['visibility'] = copy.deepcopy(block.get('visibility', {}))
+    result['target'] = {key: copy.deepcopy(target[key]) for key in
+                        ('key', 'unit_index', 'shot_index', 'source', 'unit_position',
+                         'entering_state', 'exiting_state') if key in target}
+    result['target']['shot'] = selected
+    # Exit prose belongs to the exit review; state consumers use exact facts.
+    if kind != 'state':
+        for key in ('entry_summary', 'exit_summary'):
+            if key in target:
+                result['target'][key] = copy.deepcopy(target[key])
+    return result
+
+
+def _dependencies_v3(snapshot, resets, by_id, graphs, invalid, links, connections, payloads):
+    import scene_review as sr
+    units = snapshot['request']['units']
+    output = {}
+
+    def neighbours(sid):
+        i, n, _ = by_id[sid]
+        result = set()
+        if n == 0 and i not in resets:
+            result.update(units[j]['shots'][-1].get('review_id')
+                          for j in connections[i]['previous_selected'])
+        if n == len(units[i]['shots']) - 1:
+            result.update(units[j]['shots'][0].get('review_id')
+                          for j in connections[i]['next_selected'] if j not in resets)
+        return result
+
+    for sid, (i, n, target) in by_id.items():
+        if graphs[i] is None or graphs[i]['policy'] != POLICY_V3:
+            continue
+        # Pairs retain the type of each read. A node may be read through more
+        # than one kind; do not collapse the union to the first encountered.
+        required, queue, edges = {(sid, 'all')}, [(sid, 'all')], []
+        while queue:
+            reached, kind = queue.pop()
+            if reached not in by_id:
+                continue
+            incoming = [link for link in links if link['to'] == reached]
+            # A camera/axis relationship into a source cannot change that
+            # source's replayed state. Unknown relations still propagate whole.
+            owner = by_id[reached][0]
+            state_only = (kind == 'state' and graphs[owner] is not None
+                          and graphs[owner]['policy'] == POLICY_V3
+                          and _v3_slice_known(payloads[reached], kind))
+            if state_only:
+                incoming = [link for link in incoming if link['kind'] == 'state'
+                            or link['kind'] not in _KIND_FIELDS]
+            more = {(link['from'], link['kind']) for link in incoming}
+            edges.extend(link for link in incoming if link not in edges)
+            if not state_only:
+                more.update((other, 'action_match') for other in neighbours(reached))
+            for pair in more - required:
+                required.add(pair)
+                queue.append(pair)
+        reached_ids = {key for key, _ in required}
+        unknown = (i in invalid or any(key not in by_id or by_id[key][0] in invalid
+                   or connections[by_id[key][0]]['ambiguous'] for key in reached_ids))
+        dependencies = {}
+        for key in sorted(reached_ids & set(payloads)):
+            kinds = {kind for item, kind in required if item == key}
+            payload = copy.deepcopy(payloads[key])
+            owner, _, _ = by_id[key]
+            # Edges live in graph_scope, not as the source node's unrelated
+            # incoming declarations. Own target still binds its full judgment.
+            if key != sid:
+                payload['target'].pop('dependency_declaration', None)
+            if graphs[owner] is None or graphs[owner]['policy'] != POLICY_V3:
+                kinds = {'all'}  # Crossing into a legacy source stays broad.
+            dependencies[key] = {'reads': {kind: _project_v3(payload, kind) for kind in sorted(kinds)}}
+        own = units[i]['shots']
+        output[target['key']] = {
+            'unknown': unknown, 'dependencies': dependencies, 'review_id': sid,
+            'adjacency': [(s.get('review_id'), s.get('start'), s.get('end'))
+                          for s in own[max(0, n-1):n+2]],
+            'graph_scope': {'policy': POLICY_V3, 'links': copy.deepcopy(edges)}}
     return output
 
 
@@ -359,11 +512,14 @@ def reasons(old, new, old_report, old_digest, resets):
         # boundary-neighbour and declared dependency comparisons below still
         # invalidate every actually connected shot. Inserted/reordered units
         # also fail their own positional sequence/target comparison.
-        if i >= len(old_ids) or old_ids[i] != new_ids[i]:
+        is_new_unit = i >= len(old_ids)
+        if is_new_unit:
+            why.add('new_target_without_prior_review')
+        elif old_ids[i] != new_ids[i]:
             why.add('shot_identity_order_changed_conservative')
-        if a is None or b is None or a['unknown'] or b['unknown']:
+        if b is None or b['unknown'] or (not is_new_unit and (a is None or a['unknown'])):
             why.add('shot_dependency_declaration_missing')
-        elif a != b:
+        elif not is_new_unit and a != b:
             why.add('shot_dependency_changed')
             for dep_id in set(a['dependencies']) | set(b['dependencies']):
                 av,bv=a['dependencies'].get(dep_id),b['dependencies'].get(dep_id)

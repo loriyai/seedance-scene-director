@@ -237,23 +237,34 @@ class RuleDomainAuditTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        for name in sr.RULE_FILES:
+        import creative_rules
+        package = Path(sr.__file__).resolve().parent.parent
+        for name in creative_rules.REQUIRED_FILES:
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text('fictional rule: ' + name, encoding='utf-8')
+            target.write_bytes((package / name).read_bytes())
         self.location = patch.object(sr, '__file__', str(self.root / 'scripts' / 'scene_review.py'))
         self.location.start()
         self.addCleanup(self.location.stop)
 
-    def test_canvas_queue_recovery_and_agent_changes_do_not_invalidate_storyboard_rules(self):
+    def test_audited_runtime_function_changes_do_not_invalidate_storyboard_rules(self):
+        # Current domains ignore audited operation bodies, never unknown code
+        # or arbitrary new files merely placed beside queue/recovery scripts.
+        for name, function in (('scripts/canvas.py', 'sync'), ('scripts/canvas_jobs.py', 'status'),
+                               ('scripts/recovery_status.py', 'summarize')):
+            (self.root / name).write_text(f'def {function}():\n    return 1\n', encoding='utf-8')
         before = sr.rules_digest()
-        for name in ('scripts/canvas.py', 'scripts/canvas_jobs.py', 'scripts/recovery_status.py',
-                     'scripts/agent_handoff.py', 'references/canvas.md', 'references/canvas-jobs.md',
-                     'references/model-routing.md'):
-            target = self.root / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text('unrelated runtime maintenance', encoding='utf-8')
+        for name in ('scripts/canvas.py', 'scripts/canvas_jobs.py', 'scripts/recovery_status.py'):
+            path = self.root / name
+            path.write_text(path.read_text(encoding='utf-8').replace('return 1', 'return 2'), encoding='utf-8')
         self.assertEqual(sr.rules_digest(), before)
+
+    def test_unknown_runtime_code_or_reference_is_conservatively_bound(self):
+        for name in ('scripts/agent_handoff.py', 'references/future-runtime.md'):
+            before = sr.rules_digest()
+            path = self.root / name
+            path.write_text('UNKNOWN_RULE = 1\n', encoding='utf-8')
+            self.assertNotEqual(sr.rules_digest(), before)
 
     def test_photography_sound_render_and_character_rules_are_bound(self):
         for name in ('references/cinematic-rules.md', 'references/storyboard-authoring.md',

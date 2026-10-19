@@ -10,7 +10,8 @@ import sys
 import director as d
 
 CHECKS = ('source_coverage', 'fragment_timing', 'continuity', 'staging_performance')
-POLICY = 'final-request-review-v2'
+LEGACY_POLICY = 'final-request-review-v2'
+POLICY = 'final-request-review-v3'
 
 
 def digest(value):
@@ -53,17 +54,30 @@ def accepted_authoring_warnings(state, request):
 
 def pending(state, request, warnings):
     from shot_review import targets
+    from scene_review import rules_digest, boundary_targets
     accepted = accepted_authoring_warnings(state, request)
-    return {'policy': POLICY, 'request_sha256': digest(request), 'context_sha256': context_digest(state),
+    report = {'policy': POLICY, 'request_sha256': digest(request), 'context_sha256': context_digest(state),
+            'rules_sha256': rules_digest(),
             'status': 'pending', 'reviewer': '',
             'checks': {key: {'status': 'pending', 'basis': ''} for key in CHECKS},
             'shot_reviews': targets(state, request),
             'warning_decisions': [accepted.get(key, {'warning_sha256': key, 'warning': value, 'decision': 'pending', 'basis': ''})
                                   for key, value in warning_records(warnings).items()]}
+    boundaries = boundary_targets(state, request)
+    if boundaries:
+        report['boundary_reviews'] = boundaries
+    return report
 
 
 def verify(state, request, report, warnings):
+    # This gate approves a NEW submission. Historical delivered receipts are
+    # rendered by director's idempotent receipt path without re-approval.
+    d.require(not isinstance(report, dict) or report.get('policy') != LEGACY_POLICY,
+              '旧版最终稿复核未绑定创作规则，须重新准备并审阅后再提交；已交付回执仍可重渲染')
     d.require(isinstance(report, dict) and report.get('policy') == POLICY, '缺少最终稿语义复核记录')
+    from scene_review import rules_digest
+    d.require(report.get('rules_sha256') == rules_digest(),
+              '创作规则已变化或缺少规则绑定，须重新准备并复核当前版本')
     d.require(report.get('request_sha256') == digest(request), '复核后的草稿已改变，须复核最终版本')
     d.require(report.get('context_sha256') == context_digest(state), '复核上下文已变化，须重新核对来源与相邻单元')
     d.require(report.get('status') == 'passed' and isinstance(report.get('reviewer'), str)
@@ -84,14 +98,19 @@ def verify(state, request, report, warnings):
                   '警告原对象与当前检查不一致；不能仅保留旧摘要')
         d.require(item.get('decision') in ('resolved', 'accepted') and isinstance(item.get('basis'), str)
                   and item['basis'].strip(), '检查警告须逐项说明修正结果或保留依据')
-    from scene_review import verify_reuse_evidence
+    from scene_review import verify_reuse_evidence, verify_boundary_reviews
+    verify_boundary_reviews(state, request, report.get('boundary_reviews'))
     verify_reuse_evidence(state, request, report, warnings)
     from shot_review import verify_targets
     verify_targets(state, request, report.get('shot_reviews'), d.require)
-    return {'policy': POLICY, 'status': 'passed', 'request_sha256': digest(request),
-            'context_sha256': context_digest(state), 'report_sha256': digest(report),
+    result = {'policy': POLICY, 'status': 'passed', 'request_sha256': digest(request),
+            'context_sha256': context_digest(state), 'rules_sha256': report['rules_sha256'],
+            'report_sha256': digest(report),
             'reviewer': report['reviewer'], 'checks': checks, 'warning_decisions': decisions,
             'shot_reviews': report['shot_reviews']}
+    if 'boundary_reviews' in report:
+        result['boundary_reviews'] = report['boundary_reviews']
+    return result
 
 
 def main():

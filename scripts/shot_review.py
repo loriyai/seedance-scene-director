@@ -6,6 +6,10 @@ import copy
 import re
 
 
+CUE_POLICY = 'shot-review-cues-v2'
+LEGACY_CUE_POLICY = 'shot-review-cues-v1'
+
+
 def diagnostics(unit):
     issues = []
     key = unit.get('id', '当前单元')
@@ -80,11 +84,15 @@ def appearance_reference_warnings(state, unit):
     return warnings
 
 
-def targets(state, request):
+def targets(state, request, *, cue_policy=CUE_POLICY):
     """Snapshot requested shots and their source/state, without issuing verdicts."""
     from continuity import portion
+    if cue_policy not in (LEGACY_CUE_POLICY, CUE_POLICY):
+        raise ValueError('未知逐镜审阅提示策略')
     result = []
     for unit_index, unit in enumerate(request.get('units', []), 1):
+        current_cues = (cue_policy == CUE_POLICY
+                        and unit.get('workflow_policy') == 'scene-review-b-v2')
         a, b = unit['span']
         source = [{'record': r['id'], 'scene': r['scene'], 'kind': r['kind'],
                    'text': portion(r, [a, b])}
@@ -93,15 +101,31 @@ def targets(state, request):
         for shot_index, shot in enumerate(unit.get('shots', []), 1):
             cues = []
             camera = shot.get('camera', '')
+            legal_shot = (current_cues
+                          and type(shot.get('start')) is int
+                          and type(shot.get('end')) is int
+                          and 1 <= shot['end'] - shot['start'] <= 6)
+            if legal_shot:
+                cues.append('1至6秒摄影选择：按观看重点、动作路径、信息揭示及剪辑承接比较固定与运动；'
+                            '不因短默认固定、不因长强制运动；缺少选择须待补，不得由程序回填。'
+                            '结合相邻镜头复核摄影是否服务当前观看任务，动静分布仅用于定位复核，不设比例。')
             if '固定' in camera:
-                if (unit.get('review_dependencies', {}).get('policy') == 'shot-dependencies-v2'
+                if (cue_policy == LEGACY_CUE_POLICY
+                        and unit.get('review_dependencies', {}).get('policy') in ('shot-dependencies-v2', 'shot-dependencies-v3')
                         and type(shot.get('start')) is int and type(shot.get('end')) is int
                         and 4 <= shot['end'] - shot['start'] <= 6):
                     cues.append('4至6秒镜头含固定描述：核对是否仅为实际运镜后的短暂稳定落点；整镜固定不合格，须有服务观看重点的相机位移或转向，移焦与主体动作不算。')
+                elif current_cues:
+                    cues.append('固定镜头：核对稳定观察的具体作用、信息读清所需时长和切点；'
+                                '有依据时保留，不因时长自动接受或否决，也不为增加运动数量而修改。')
                 else:
                     cues.append('固定镜头：核对原有动作或保持的用途、信息读清所需时长和切点；不要求补运镜。')
             if any(text in camera for text in ('移', '推', '拉', '跟', '升', '降', '摇', '环绕')):
-                cues.append('运动镜头：核对起止取景、途中可见性、遮挡和落点；不只检查起始构图。')
+                if current_cues:
+                    cues.append('运动镜头：核对方向、起止取景、途中可见性、遮挡和落点，以及当前时长内的可读性；'
+                                '同步核对构图、景深、光照和切点。词语命中仅提示复核，不证明实际相机运动。')
+                else:
+                    cues.append('运动镜头：核对起止取景、途中可见性、遮挡和落点；不只检查起始构图。')
             views = shot.get('continuity', {}).get('visibility', {})
             if any(v.get('mode') in ('offscreen', 'occluded') for v in views.values()):
                 cues.append('画外/遮挡：用实际位置和取景边界核对；换焦点不构成离场。')
@@ -129,6 +153,16 @@ def targets(state, request):
                                 item['facts'][name] = fact
                     else:
                         item[field] = copy.deepcopy(value)
+            if unit.get('review_dependencies', {}).get('policy') == 'shot-dependencies-v3':
+                # New v3 targets own their actual exit and only the summary
+                # belonging to this endpoint. Old targets remain unchanged.
+                result[-1]['exiting_state'] = copy.deepcopy(current)
+                if shot_index == 1:
+                    result[-1]['entry_summary'] = copy.deepcopy(unit.get('start_state'))
+                if shot_index == len(unit.get('shots', [])):
+                    result[-1]['exit_summary'] = {
+                        'text': copy.deepcopy(unit.get('end_state')),
+                        'final': copy.deepcopy(unit.get('continuity', {}).get('final'))}
     return result
 
 

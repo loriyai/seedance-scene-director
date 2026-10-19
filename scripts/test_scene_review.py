@@ -386,5 +386,88 @@ class SceneReviewTests(unittest.TestCase):
                     self.assertTrue(evidence['final_full_validation_required'])
 
 
+class ReviewCueCompatibilityTests(unittest.TestCase):
+    """Historical cue payloads remain verifiable, never upgraded approvals."""
+
+    LEGACY_FIXED = '固定镜头：核对原有动作或保持的用途、信息读清所需时长和切点；不要求补运镜。'
+    LEGACY_MOVING = '运动镜头：核对起止取景、途中可见性、遮挡和落点；不只检查起始构图。'
+
+    def historical(self, workflow=None):
+        state, request = fixture()
+        for unit in request['units']:
+            if workflow:
+                unit['workflow_policy'] = workflow
+            unit['shots'][0].update(start=0, end=2)
+            unit['shots'][1].update(start=2, end=4, camera='从车头横移至停止线')
+        snapshot = sr.freeze(state, request)
+        # These exact strings were emitted by local.1. Do not use the current
+        # cue producer to manufacture the historical expected payload.
+        snapshot.pop('cue_policy')
+        snapshot['rules_sha256'] = 'historical-local.1-rules'
+        for target in snapshot['targets']:
+            target['review_cues'] = [self.LEGACY_FIXED if target['shot_index'] == 1
+                                     else self.LEGACY_MOVING]
+        snapshot['snapshot_sha256'] = sr.digest(sr._snapshot_payload(snapshot))
+        report = reviewed(state, request)
+        report['policy'] = review_gate.LEGACY_POLICY
+        report.pop('rules_sha256')
+        report['shot_reviews'] = copy.deepcopy(snapshot['targets'])
+        for target in report['shot_reviews']:
+            target.update(status='passed', basis='车头与停止线的实际位置支持固定观察和随后横移。')
+        return state, request, snapshot, report
+
+    def test_unmarked_legacy_fixed_and_moving_snapshots_are_readable(self):
+        for workflow in (None, 'scene-review-b-v2'):
+            state, request, snapshot, _ = self.historical(workflow)
+            before = copy.deepcopy(snapshot)
+            with self.subTest(workflow=workflow):
+                self.assertEqual(sr.verify_snapshot(snapshot), before)
+                self.assertEqual(snapshot, before)
+                current = sr.freeze(state, request)
+                self.assertEqual(current['cue_policy'], sr.shot_review.CUE_POLICY)
+                if workflow:
+                    self.assertNotEqual(current['targets'][0]['review_cues'],
+                                        snapshot['targets'][0]['review_cues'])
+                else:
+                    self.assertEqual(current['targets'], snapshot['targets'])
+
+    def test_legacy_cue_or_shot_tampering_still_fails(self):
+        for field in ('review_cues', 'shot'):
+            _, _, snapshot, _ = self.historical('scene-review-b-v2')
+            if field == 'review_cues':
+                snapshot['targets'][0]['review_cues'] = []
+            else:
+                snapshot['targets'][0]['shot']['camera'] = '自动补入推进'
+            # Even recomputing the outer checksum cannot hide a target that
+            # disagrees with the exact historical producer and bound request.
+            snapshot['snapshot_sha256'] = sr.digest(sr._snapshot_payload(snapshot))
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, '快照镜头不一致'):
+                sr.verify_snapshot(snapshot)
+
+    def test_unknown_cue_policy_is_rejected(self):
+        _, _, snapshot, _ = self.historical()
+        snapshot['cue_policy'] = 'unknown-cues'
+        snapshot['snapshot_sha256'] = sr.digest(sr._snapshot_payload(snapshot))
+        with self.assertRaisesRegex(ValueError, '提示策略不兼容'):
+            sr.verify_snapshot(snapshot)
+
+    def test_changed_rules_leave_all_legacy_judgments_pending(self):
+        for workflow in (None, 'scene-review-b-v2'):
+            state, request, snapshot, previous = self.historical(workflow)
+            before = copy.deepcopy((snapshot, previous))
+            report, provenance = sr.prepare_incremental(snapshot, previous, state, request)
+            with self.subTest(workflow=workflow):
+                self.assertEqual(provenance['stats']['reused_shots'], 0)
+                self.assertTrue(all(row['status'] == 'pending' for row in report['shot_reviews']))
+                self.assertEqual(report['status'], 'pending')
+                self.assertTrue(all(row['status'] == 'pending' for row in report['checks'].values()))
+                self.assertEqual((snapshot, previous), before)
+                with self.assertRaises(ValueError):
+                    review_gate.verify(state, request, report, [])
+                if workflow:
+                    with self.assertRaisesRegex(ValueError, '旧版.*重新准备'):
+                        review_gate.verify(state, request, previous, [])
+
+
 if __name__ == '__main__':
     unittest.main()

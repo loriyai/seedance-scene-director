@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import batch_naming as bn
+import canvas as c
 import director as d
 import test_audit_director as fixture
 
@@ -40,14 +41,15 @@ class BatchNamingChecks(unittest.TestCase):
         d.write_json(path / 'session.json', state)
         return state
 
-    def test_next_range_gets_next_letter_and_keeps_scene_counter(self):
+    def test_next_range_resets_visible_scene_counter_and_keeps_stable_ids(self):
         first = self.submit(self.request())
         self.assertEqual(first['names'], ['A01-场景1-分镜1', 'A02-场景1-分镜2'])
         second = self.submit(self.repeated('again'))
-        self.assertEqual(second['names'], ['B01-场景1-分镜3', 'B02-场景1-分镜4'])
+        self.assertEqual(second['names'], ['B01-场景1-分镜1', 'B02-场景1-分镜2'])
+        self.assertEqual(second['ids'], ['场景1-分镜3', '场景1-分镜4'])
         self.assertEqual(self.state['next_numbers'], {'SC0001': 5})
         text = Path(second['output']).read_text(encoding='utf-8')
-        self.assertTrue(text.startswith('B01-场景1-分镜3（时长：4秒）\n'))
+        self.assertTrue(text.startswith('B01-场景1-分镜1（时长：4秒）\n'))
         self.assertNotIn('01 - ', text)
         self.assertNotIn('@黑幕', text)
         self.assertEqual(len(d.read_json(self.project / bn.REGISTRY)['entries']), 2)
@@ -62,6 +64,80 @@ class BatchNamingChecks(unittest.TestCase):
         self.assertEqual(state2['batch_scope'], str(scope.resolve()))
         self.assertFalse((self.project.parent / bn.REGISTRY).exists())
 
+    def test_regenerated_scene_counts_and_canvas_keys_are_independent(self):
+        self.state['records'] = [dict(self.state['records'][0], id=f'L{i + 1:06d}',
+                                     start=i * 9, end=(i + 1) * 9,
+                                     scene='SC0001' if i == 0 else 'SC0002') for i in range(10)]
+        self.state['length'] = 90
+        request = {'mode': 'append', 'request_id': 'first', 'span': [0, 90],
+                   'units': [self.unit([i * 9, (i + 1) * 9], 'SC0001' if i == 0 else 'SC0002')
+                             for i in range(10)]}
+        self.submit(request)
+        old_receipt = copy.deepcopy(self.state['receipts'][0])
+        request = dict(request, request_id='regenerated',
+                       range_confirmation=d.range_review(self.state, [0, 90])['confirmation_token'])
+        result = self.submit(request)
+        self.assertEqual(result['names'][:2], ['B01-场景1-分镜1', 'B02-场景2-分镜1'])
+        self.assertEqual(result['names'][-1], 'B10-场景2-分镜9')
+        self.assertEqual(result['ids'][:2], ['场景1-分镜2', '场景2-分镜10'])
+        units = self.state['receipts'][-1]['units']
+        self.assertEqual([u['batch_index'] for u in units], list(range(1, 11)))
+        self.assertEqual(units[1]['predecessor'], units[0]['id'])
+        self.assertEqual(self.state['receipts'][0], old_receipt)
+        before = copy.deepcopy(self.state)
+        retry = self.submit(request)
+        self.assertEqual(retry['status'], 'already_committed')
+        self.assertEqual((retry['names'], retry['ids']), (result['names'], result['ids']))
+        self.assertEqual(self.state, before)
+        for unit in units:
+            for selector in (unit['id'], unit['display_name'], unit['display_name'].split('-', 1)[0]):
+                self.assertEqual(d.resolve_unit_id(self.state, selector), unit['id'])
+                self.assertEqual(c.selected_units(self.state, ids=[selector])[0]['id'], unit['id'])
+        # The offline Canvas plan keeps mappings keyed by historical stable IDs.
+        canvas_state = {'mappings': {u['id']: {'node_id': f'existing-{i}'} for i, u in enumerate(units)}}
+        mappings = copy.deepcopy(canvas_state)
+        planned, pending = c.desired_videos(self.state, canvas_state, {}, units)
+        self.assertEqual(pending, [])
+        self.assertEqual([u['key'] for u in planned], result['ids'])
+        self.assertEqual([u['name'] for u in planned], result['names'])
+        self.assertEqual(canvas_state, mappings)
+        for item, unit in zip(planned, units):
+            self.assertEqual(item['reference_keys'], sorted(c.unit_asset_ids(self.state, unit)))
+
+    def test_replace_new_batch_keeps_display_name_stable_id_and_original_receipt(self):
+        self.submit(self.request())
+        self.submit(self.repeated('again'))
+        old_receipt = copy.deepcopy(self.state['receipts'][-1])
+        old = copy.deepcopy(self.state['units'][-1])
+        replacement = dict(old, id='B02-场景1-分镜2', display_name='FORGED', batch_index=999)
+        result = self.submit({'mode': 'replace', 'request_id': 'edit-b', 'units': [replacement]})
+        self.assertEqual(result['ids'], ['场景1-分镜4'])
+        self.assertEqual(result['names'], ['B02-场景1-分镜2'])
+        current = self.state['units'][-1]
+        self.assertEqual((current['batch_label'], current['batch_index'], current['predecessor']),
+                         ('B', 2, old['predecessor']))
+        self.assertEqual(current['previous_versions'][-1]['display_name'], old['display_name'])
+        self.assertEqual(self.state['receipts'][1], old_receipt)
+        self.assertEqual(self.state['next_numbers'], {'SC0001': 5})
+
+    def test_old_named_receipt_replays_and_new_batch_uses_scene_local_names(self):
+        self.state['next_numbers'] = {'SC0001': 7}
+        request = self.request()
+        self.submit(request)
+        # Emulate a pre-fix receipt whose display suffix copied historical IDs.
+        for unit in self.state['units'] + self.state['receipts'][0]['units']:
+            unit['display_name'] = f"{unit['batch_label']}{unit['batch_index']:02d}-{unit['id']}"
+        d.save(self.project, self.state)
+        old = copy.deepcopy(self.state['receipts'][0])
+        old_text = '\n\n'.join(d.render_unit(self.state, u) for u in old['units']) + '\n'
+        result = self.submit(request)
+        self.assertEqual(result['names'], ['A01-场景1-分镜7', 'A02-场景1-分镜8'])
+        self.assertEqual(Path(result['output']).read_text(encoding='utf-8'), old_text)
+        self.assertEqual(self.state['receipts'][0], old)
+        next_result = self.submit(self.repeated('new-version'))
+        self.assertEqual(next_result['names'], ['B01-场景1-分镜1', 'B02-场景1-分镜2'])
+        self.assertEqual(next_result['ids'], ['场景1-分镜9', '场景1-分镜10'])
+
     def test_custom_projects_share_only_an_explicit_scope(self):
         one, two = self.project / 'custom-one', self.project / 'custom-two'
         state1, state2 = self.project_at(one), self.project_at(two)
@@ -75,7 +151,8 @@ class BatchNamingChecks(unittest.TestCase):
     def test_z_rolls_over_to_aa_and_new_chats_restart_a(self):
         for number in range(1, 28):
             result = self.submit(self.repeated('batch-' + str(number)))
-        self.assertEqual(result['names'][0], 'AA01-场景1-分镜53')
+        self.assertEqual(result['names'][0], 'AA01-场景1-分镜1')
+        self.assertEqual(result['ids'][0], '场景1-分镜53')
         self.assertEqual([bn.letter(n) for n in (1, 26, 27, 52, 53, 702, 703)],
                          ['A', 'Z', 'AA', 'AZ', 'BA', 'ZZ', 'AAA'])
         other = self.project / 'new-chat' / 'work' / 'seedance-scene-director' / 'project'
@@ -84,16 +161,23 @@ class BatchNamingChecks(unittest.TestCase):
 
     def test_numbers_cross_scenes_and_do_not_truncate_above_99(self):
         records = []
-        for index in range(101):
+        for index in range(102):
             records.append(dict(self.state['records'][0], id=f'L{index + 1:06d}',
                                 start=index * 9, end=(index + 1) * 9,
-                                scene='SC0001' if index < 99 else 'SC0002'))
-        self.state.update(records=records, length=909)
-        request = {'mode': 'append', 'request_id': 'large', 'span': [0, 909],
-                   'units': [self.unit([i * 9, (i + 1) * 9], 'SC0001' if i < 99 else 'SC0002') for i in range(101)]}
+                                scene='SC0001' if index < 100 else 'SC0002'))
+        self.state.update(records=records, length=918)
+        request = {'mode': 'append', 'request_id': 'large', 'span': [0, 918],
+                   'units': [self.unit([i * 9, (i + 1) * 9], 'SC0001' if i < 100 else 'SC0002') for i in range(102)]}
         result = self.submit(request)
-        self.assertEqual(result['names'][98:], ['A99-场景1-分镜99', 'A100-场景2-分镜1', 'A101-场景2-分镜2'])
-        self.assertIn('A100-场景2-分镜1（时长：4秒）', Path(result['output']).read_text(encoding='utf-8'))
+        self.assertEqual(result['names'][98:], ['A99-场景1-分镜99', 'A100-场景1-分镜100',
+                                               'A101-场景2-分镜1', 'A102-场景2-分镜2'])
+        self.assertIn('A100-场景1-分镜100（时长：4秒）', Path(result['output']).read_text(encoding='utf-8'))
+        request = dict(request, request_id='large-again',
+                       range_confirmation=d.range_review(self.state, request['span'])['confirmation_token'])
+        second = self.submit(request)
+        self.assertEqual(second['names'][99:], ['B100-场景1-分镜100', 'B101-场景2-分镜1', 'B102-场景2-分镜2'])
+        self.assertEqual(second['ids'][99:], ['场景1-分镜200', '场景2-分镜3', '场景2-分镜4'])
+        self.assertEqual(d.resolve_unit_id(self.state, 'B100'), '场景1-分镜200')
 
     def test_replace_alias_keeps_original_name_and_does_not_consume_a_letter(self):
         first = self.submit(self.request())
@@ -113,7 +197,7 @@ class BatchNamingChecks(unittest.TestCase):
         for invalid in ('A2', 'A99', 'A02-场景1-分镜999'):
             with self.assertRaises(ValueError):
                 d.resolve_unit_id(self.state, invalid)
-        self.assertEqual(self.submit(self.repeated('next'))['names'][0], 'B01-场景1-分镜3')
+        self.assertEqual(self.submit(self.repeated('next'))['names'][0], 'B01-场景1-分镜1')
         self.assertTrue(Path(first['output']).read_text(encoding='utf-8').startswith('A01-'))
 
     def test_failed_check_and_failed_atomic_save_do_not_consume_a_letter(self):

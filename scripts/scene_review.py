@@ -53,6 +53,12 @@ def require(condition, message):
 
 
 def rules_digest():
+    """Current semantic/validation contract; historical snapshots keep theirs."""
+    import creative_rules
+    return creative_rules.rules_digest(Path(__file__).resolve().parent.parent)
+
+
+def legacy_rules_digest():
     """Bind reuse to actual installed validation and authoring rules."""
     root = Path(__file__).resolve().parent.parent
     missing = [name for name in RULE_FILES if not (root / name).is_file()]
@@ -104,7 +110,7 @@ def freeze(state, request, warnings=None, *, partial=False, require_workflow=Fal
            for unit in request.get('units', [])):
         validate_dependencies(request)
     warnings = [] if warnings is None else warnings
-    snapshot = {'policy': POLICY, 'version': VERSION,
+    snapshot = {'policy': POLICY, 'version': VERSION, 'cue_policy': shot_review.CUE_POLICY,
                 'scope_scene_ids': sorted({sid for u in request.get('units', [])
                                            for sid in u.get('scene_ids', [])}),
                 'source_sha256': digest(source_binding(state)),
@@ -127,7 +133,11 @@ def verify_snapshot(snapshot):
     require(snapshot.get('request_sha256') == digest(request)
             and snapshot.get('context_sha256') == gate.context_digest(state)
             and snapshot.get('source_sha256') == digest(source_binding(state)), '快照绑定不一致')
-    require(snapshot.get('targets') == shot_review.targets(state, request), '快照镜头不一致')
+    cue_policy = snapshot.get('cue_policy', shot_review.LEGACY_CUE_POLICY)
+    require(cue_policy in (shot_review.LEGACY_CUE_POLICY, shot_review.CUE_POLICY),
+            '快照审阅提示策略不兼容')
+    require(snapshot.get('targets') == shot_review.targets(state, request, cue_policy=cue_policy),
+            '快照镜头不一致')
     validation = snapshot.get('validation')
     if validation is not None:
         require(isinstance(validation, dict), '快照验证范围格式错误')
@@ -150,9 +160,16 @@ def _passed(item):
 
 
 def _bind_old_report(snapshot, report):
-    require(isinstance(report, dict) and report.get('policy') == gate.POLICY
+    # Historical v2 reports remain readable evidence, but their absent rule
+    # binding cannot authorize reuse under current rules. Never rewrite their
+    # snapshots or pretend that a current digest existed in the old report.
+    require(isinstance(report, dict) and report.get('policy') in (gate.LEGACY_POLICY, gate.POLICY)
             and report.get('request_sha256') == snapshot['request_sha256']
             and report.get('context_sha256') == snapshot['context_sha256'], '旧审阅与冻结版本不匹配')
+    if report['policy'] == gate.POLICY:
+        require(isinstance(report.get('rules_sha256'), str) and bool(report['rules_sha256'])
+                and report['rules_sha256'] == snapshot.get('rules_sha256'),
+                '旧审阅规则绑定与冻结快照不匹配')
     actual, expected = report.get('shot_reviews'), snapshot['targets']
     require(isinstance(actual, list) and len(actual) == len(expected), '旧审阅缺少镜头或重复镜头')
     for item, target in zip(actual, expected):
@@ -166,6 +183,17 @@ def _bind_old_report(snapshot, report):
     for item in decisions:
         require(item.get('warning') == expected_warnings[item['warning_sha256']]
                 and digest(item.get('warning')) == item['warning_sha256'], '旧警告对象与哈希不一致')
+    if 'boundary_reviews' in report:
+        boundaries = report['boundary_reviews']
+        expected_boundaries = boundary_targets(snapshot['state'], snapshot['request'])
+        require(isinstance(boundaries, list) and len(boundaries) == len(expected_boundaries),
+                '旧局部边界记录缺项或重复')
+        for boundary_row, expected_boundary in zip(boundaries, expected_boundaries):
+            require(isinstance(boundary_row, dict) and set(boundary_row) == set(expected_boundary)
+                    and _boundary_actual(boundary_row) == _boundary_actual(expected_boundary),
+                    '旧局部边界绑定与冻结版本不匹配')
+            if boundary_row.get('status') == 'passed':
+                _boundary_partition(boundary_row)
     return {item['key']: item for item in actual}
 
 
@@ -321,14 +349,189 @@ def _valid_reset(state, unit):
     return True
 
 
-def _trusted_resets(old, new, report, old_targets):
+BOUNDARY_POLICY = 'local-boundary-review-v1'
+
+
+def _fact_paths(states):
     result = set()
+    for entity, item in states.items():
+        result.update((entity, (field,)) for field in ('present', 'asset_id'))
+        result.update((entity, ('facts', fact)) for fact in item.get('facts', {}))
+    return result
+
+
+def _fact_value(states, entity, path):
+    value = states.get(entity)
+    for field in path:
+        if not isinstance(value, dict) or field not in value:
+            return {'exists': False}
+        value = value[field]
+    return {'exists': True, 'value': copy.deepcopy(value)}
+
+
+def boundary_targets(state, request):
+    """Pending local judgments in the existing report; no automatic verdict.
+
+    Only opted-in v3 reset boundaries use this contract. The reviewer classifies
+    the generated field union as reset or carried during the ordinary review.
+    """
+    from shot_dependencies import POLICY_V3, common, unclassified_shot_fields
+    connections = _connections(state, request)
+    targets = {target['key']: target for target in shot_review.targets(state, request)}
+    rows = []
+    for index, unit in enumerate(request.get('units', [])):
+        contract = unit.get('continuity', {})
+        if (unit.get('review_dependencies', {}).get('policy') != POLICY_V3
+                or contract.get('boundary', {}).get('kind') != 'reset'):
+            continue
+        connection = connections[index]
+        previous = [request['units'][i] for i in connection['previous_selected']]
+        previous += connection['previous_external']
+        initial = contract.get('initial', {})
+        paths = _fact_paths(initial)
+        predecessors = []
+        for prior in previous:
+            prior_contract = prior.get('continuity', {})
+            final = prior_contract.get('final', {})
+            paths.update(_fact_paths(final))
+            predecessors.append({'identity': _identity(prior),
+                                 'entities': copy.deepcopy(prior_contract.get('entities')),
+                                 'common': common(prior),
+                                 'unclassified_shots': unclassified_shot_fields(prior),
+                                 'final': copy.deepcopy(final)})
+        rows.append({'policy': BOUNDARY_POLICY, 'key': f'boundary:{index + 1}',
+                     'unit_index': index + 1,
+                     'binding': {'identity': _identity(unit),
+                                 'sources': _unit_sources(state, unit),
+                                 'boundary': copy.deepcopy(contract.get('boundary')),
+                                 'common': common(unit),
+                                 'unclassified_shots': unclassified_shot_fields(unit),
+                                 'entities': copy.deepcopy(contract.get('entities')),
+                                 'initial': copy.deepcopy(initial),
+                                 'first': _actual(targets[f'{index + 1}:1']),
+                                 'predecessors': predecessors, 'ambiguous': connection['ambiguous']},
+                     'fields': [{'entity': entity, 'path': list(path)} for entity, path in sorted(paths)],
+                     'reset_fields': [], 'carried_fields': [], 'status': 'pending', 'basis': ''})
+    return rows
+
+
+def _boundary_actual(row):
+    return {key: value for key, value in row.items()
+            if key not in ('reset_fields', 'carried_fields', 'status', 'basis')}
+
+
+def _boundary_partition(row):
+    """Validate explicit classification; equality alone never implies reset."""
+    classified = []
+    for name in ('reset_fields', 'carried_fields'):
+        values = row.get(name)
+        require(isinstance(values, list), '局部边界缺少' + name)
+        for value in values:
+            require(isinstance(value, dict) and set(value) == {'entity', 'path'}
+                    and isinstance(value['entity'], str) and isinstance(value['path'], list)
+                    and value in row['fields'], '局部边界包含未知事实字段')
+        classified.extend(digest(value) for value in values)
+    require(len(classified) == len(set(classified))
+            and set(classified) == {digest(value) for value in row['fields']},
+            '局部边界须完整划分重置与持续事实，不能漏项或重复')
+    binding = row['binding']
+    if row['carried_fields']:
+        require(len(binding['predecessors']) == 1 and not binding['ambiguous'],
+                '局部边界持续事实须有唯一可核对前序')
+    for field in row['carried_fields']:
+        before = _fact_value(binding['predecessors'][0]['final'], field['entity'], field['path'])
+        after = _fact_value(binding['initial'], field['entity'], field['path'])
+        require(before.get('exists') and before == after, '局部边界持续事实与前序不一致')
+
+
+def verify_boundary_reviews(state, request, submitted):
+    expected = boundary_targets(state, request)
+    if not expected and submitted is None:
+        return
+    require(isinstance(submitted, list) and len(submitted) == len(expected),
+            '局部边界复核须覆盖当前v3重置边界')
+    for actual, target in zip(submitted, expected):
+        require(isinstance(actual, dict) and set(actual) == set(target)
+                and _boundary_actual(actual) == _boundary_actual(target),
+                '局部边界绑定与当前来源、状态或首镜不一致')
+        require(_passed(actual), '局部边界尚未实际复核或缺少具体依据')
+        require(_valid_reset(state, request['units'][target['unit_index'] - 1]),
+                '局部边界重置缺少有效原文依据')
+        _boundary_partition(actual)
+
+
+def _boundary_reusable(old, new, report, row, target):
+    if not _passed(row) or not _basis(report.get('reviewer')):
+        return False
+    if (old['source_sha256'] != new['source_sha256']
+            or old['rules_sha256'] != new['rules_sha256']):
+        return False
+    old_targets = {item['key']: item for item in boundary_targets(old['state'], old['request'])}
+    original = old_targets.get(row.get('key'))
+    if original is None or _boundary_actual(row) != _boundary_actual(original):
+        return False
+    try:
+        _boundary_partition(row)
+    except (ValueError, KeyError, TypeError):
+        return False
+    if row['fields'] != target['fields']:
+        return False
+    # Remove only the values explicitly reviewed as reset. Persistent fields,
+    # endpoint identities, source, initial state and first shot remain bound.
+    before, after = copy.deepcopy(row['binding']), copy.deepcopy(target['binding'])
+    if len(before['predecessors']) != len(after['predecessors']):
+        return False
+    for bound in (before, after):
+        for prior in bound['predecessors']:
+            if any(not isinstance(item, dict) or set(item) != {'present', 'asset_id', 'facts'}
+                   or not isinstance(item['facts'], dict) for item in prior['final'].values()):
+                return False  # A future/unclassified state must not be discarded.
+            prior['final'] = [{**field, 'value': _fact_value(prior['final'], field['entity'], field['path'])}
+                              for field in row['carried_fields']]
+    if before != after or after['ambiguous']:
+        return False
+    candidate = dict(target, reset_fields=row['reset_fields'], carried_fields=row['carried_fields'])
+    try:
+        _boundary_partition(candidate)
+    except (ValueError, KeyError, TypeError):
+        return False
+    index = target['unit_index'] - 1
+    return _valid_reset(old['state'], old['request']['units'][index]) and _valid_reset(new['state'], new['request']['units'][index])
+
+
+def _prepare_boundary_reuse(old, new, old_report, report, allow_reuse):
+    old_rows = {item.get('key'): item for item in old_report.get('boundary_reviews', [])
+                if isinstance(item, dict)}
+    proof = []
+    for target in report.get('boundary_reviews', []):
+        previous = old_rows.get(target['key'])
+        reused = (allow_reuse and old_report.get('policy') == gate.POLICY and previous is not None
+                  and _boundary_reusable(old, new, old_report, previous, target))
+        if reused:
+            for field in ('reset_fields', 'carried_fields', 'status', 'basis'):
+                target[field] = copy.deepcopy(previous[field])
+        proof.append({'key': target['key'], 'status': 'reused' if reused else 'pending',
+                      'old_boundary_sha256': digest(previous) if previous else None,
+                      'current_boundary_sha256': digest(target),
+                      'old_report_sha256': digest(old_report)})
+    return proof
+
+
+def _trusted_resets(old, new, report, old_targets, *, allow_local=True):
+    result = set()
+    local_targets = {item['key']: item for item in boundary_targets(new['state'], new['request'])}
+    for row in report.get('boundary_reviews', []):
+        target = local_targets.get(row.get('key')) if isinstance(row, dict) else None
+        if allow_local and target is not None and report.get('policy') == gate.POLICY and _boundary_reusable(old, new, report, row, target):
+            result.add(target['unit_index'] - 1)
     check = report.get('checks', {}).get('continuity', {})
     if not _passed(check) or not _basis(report.get('reviewer')):
         return result
     if old['source_sha256'] != new['source_sha256'] or old['rules_sha256'] != new['rules_sha256']:
         return result
     for index, (a, b) in enumerate(zip(old['request'].get('units', []), new['request'].get('units', []))):
+        if b.get('review_dependencies', {}).get('policy') == 'shot-dependencies-v3':
+            continue  # v3 requires its actual local boundary judgment.
         reviews = [target for target in old_targets.values() if target['unit_index'] == index + 1]
         unresolved_warning = any(index in _warning_units(item['warning'], old['request']['units'])
                                  and (item.get('decision') not in ('accepted', 'resolved')
@@ -598,10 +801,17 @@ def prepare_incremental(old_snapshot, old_report, state, request, warnings=None,
     if expected_report_sha256 is not None:
         require(expected_report_sha256 == digest(old_report), '旧审阅报告摘要不匹配，拒绝复用')
     old_targets = _bind_old_report(old_snapshot, old_report)
+    legacy_rules_unbound = old_report['policy'] == gate.LEGACY_POLICY
     current = freeze(state, request, warnings, partial=partial, require_workflow=require_workflow,
                      validation_passed=validation_passed)
     report = gate.pending(state, request, current['warnings'])
-    resets = _trusted_resets(old_snapshot, current, old_report, old_targets)
+    require(report['rules_sha256'] == current['rules_sha256'],
+            '准备期间创作规则发生变化，须重新冻结并准备审阅')
+    local_ready = (expected_report_sha256 is not None
+                   and old_snapshot.get('validation', {}).get('status') == 'passed'
+                   and current.get('validation', {}).get('status') == 'passed')
+    boundary_provenance = _prepare_boundary_reuse(old_snapshot, current, old_report, report, local_ready)
+    resets = _trusted_resets(old_snapshot, current, old_report, old_targets, allow_local=local_ready)
     before, after = old_snapshot['request']['units'], request['units']
     old_connections = _connections(old_snapshot['state'], old_snapshot['request'])
     new_connections = _connections(state, request)
@@ -624,6 +834,8 @@ def prepare_incremental(old_snapshot, old_report, state, request, warnings=None,
         key, index = target['key'], target['unit_index'] - 1
         previous = old_targets.get(key)
         why = set(granular[key][0]) if key in granular else set(reasons[index])
+        if legacy_rules_unbound:
+            why.add('old_review_rules_unbound')
         if granular and expected_report_sha256 is None:
             why.add('old_review_digest_required')
         if previous is None or _actual(previous) != _actual(target):
@@ -660,6 +872,8 @@ def prepare_incremental(old_snapshot, old_report, state, request, warnings=None,
         scope = _warning_units(item['warning'], after)
         warning_dependency = [new_deps[i] for i in scope]
         why = []
+        if legacy_rules_unbound:
+            why.append('old_review_rules_unbound')
         if granular and expected_report_sha256 is None:
             why.append('old_review_digest_required')
         if 'review_scope' in item['warning']:
@@ -696,18 +910,22 @@ def prepare_incremental(old_snapshot, old_report, state, request, warnings=None,
                'validation': current['validation'],
                'prepared_report_sha256': digest(report), 'shot_provenance': provenance,
                'warning_provenance': warning_provenance,
+               'boundary_provenance': boundary_provenance,
                'dependency_diagnostics': dependency_diagnostics,
                'stats': {'total_shots': len(provenance), 'reused_shots': reused,
                          'pending_shots': len(provenance) - reused, 'reasons': counts,
                          'reused_warnings': sum(w['status'] == 'reused' for w in warning_provenance),
                          'authoring_reused_warnings': sum(w['status'] == 'authoring_reused' for w in warning_provenance),
                          'pending_warnings': sum(w['status'] == 'pending' for w in warning_provenance)}}
-    if granular and attach_evidence and (reused or any(p['status'] == 'reused' for p in warning_provenance)):
+    reused_boundaries = [p['key'] for p in boundary_provenance if p['status'] == 'reused']
+    if attach_evidence and (granular and (reused or any(p['status'] == 'reused' for p in warning_provenance))
+                            or reused_boundaries):
         report['reuse_evidence'] = {
             'old_snapshot': copy.deepcopy(old_snapshot), 'old_report': copy.deepcopy(old_report),
             'expected_report_sha256': expected_report_sha256,
             'reused_keys': [p['key'] for p in provenance if p['status'] == 'reused'],
             'reused_warning_keys': [p['warning_sha256'] for p in warning_provenance if p['status'] == 'reused'],
+            'reused_boundary_keys': reused_boundaries,
             'validation': current['validation']}
         sidecar['prepared_report_sha256'] = digest(report)
     return report, sidecar
@@ -737,6 +955,12 @@ def verify_reuse_evidence(state, request, report, warnings):
     require(keys == evidence.get('reused_keys'), '复用镜头及依赖已变化')
     warning_keys = [p['warning_sha256'] for p in proof['warning_provenance'] if p['status'] == 'reused']
     require(warning_keys == evidence.get('reused_warning_keys', []), '复用警告及依赖已变化')
+    boundary_keys = [p['key'] for p in proof['boundary_provenance'] if p['status'] == 'reused']
+    require(boundary_keys == evidence.get('reused_boundary_keys', []), '复用局部边界及持续事实已变化')
+    actual_boundaries = {item['key']: item for item in report.get('boundary_reviews', [])}
+    expected_boundaries = {item['key']: item for item in regenerated.get('boundary_reviews', [])}
+    for key in boundary_keys:
+        require(actual_boundaries.get(key) == expected_boundaries[key], '复用局部边界与原实际判断不一致：' + key)
     actual_warnings = {w['warning_sha256']: w for w in report['warning_decisions']}
     expected_warnings = {w['warning_sha256']: w for w in regenerated['warning_decisions']}
     for key in warning_keys:

@@ -13,7 +13,9 @@ description: 内置剧本标准化、可复用资产筛选与美术设计，输�
 
 先识别当前任务：新完整剧本走风格确认和资产主流程；已绑定项目续写或指定修改走[分镜工作流](references/storyboard-workflow.md)；直接画布请求只走已授权画布接口。审计或维护Skill本身不触发制作菜单、生产调度或云端操作。不套用其他Skill的固定15秒、固定镜数或输出模式。
 
-流程与责任以本入口、[资产主流程](references/asset-workflow.md)及[场次审阅流程](references/scene-review-workflow.md)为准，命令与字段以[后台接口](references/runtime.md)为准。摄影、表演、资产与输出格式各从专项参考读取。同一要求在负责阶段完成真实语义判断；冻结和提交可以重新核验结构与摘要，不因此重复通读未变全文。已读未变规则可复用，实际变化补读相关部分。
+流程与责任以本入口、[资产主流程](references/asset-workflow.md)和[分镜工作流](references/storyboard-workflow.md)为准。新分镜默认scene-text-v1，只按需读取工作流、[创作规则总集](references/storyboard-rules.md)和[文本母稿格式](references/storyboard-text-format.md)三份资料；摄影、表演、声音、连续性和版式已按职责合并在规则总集，不再逐份加载旧专项页。新文字命令也见文本母稿格式；其他阶段命令见[后台接口](references/runtime.md)。旧JSON字段契约只在明确继续旧格式时读取。分镜表演须落实到实际渲染正文：保留焦点主体的必要动作与可见情绪，按情境呈现相关参与者的反应、持续活动或有意义保持；空间及后台状态记录不能代替可见表现。同一要求在负责阶段完成真实语义判断；新稿由写者同次书写检查及一次独立整场阅读负责，提交核验最终文件与上下文，不增加第三轮逐镜阅读。已读未变规则可复用，实际变化补读相关部分。
+
+各项规则按其适用条件执行：明确的必需条件、禁止项和接口约束必须遵守；建议值与可选方法须根据原文、当前观看任务及技术条件选择，不得作为自动填充的默认内容。示例用于说明判断方法，不预设其他作品的题材、时代、物种、身体结构、人物关系或物理机制。选用示例前须核对适用条件；条件不成立时采用符合来源与既有协议的表达，不新增剧情事实。固定抬头、版式及机器字段仍以对应协议为准；通用叙事规范不表示程序已支持任意资产结构或输出格式。
 
 ## 完整剧本入口：先确认风格
 
@@ -32,13 +34,13 @@ description: 内置剧本标准化、可复用资产筛选与美术设计，输�
 
 ## 执行准备与项目恢复
 
-剧本转换、资产提取或剧本改稿时读取[内置剧本标准化规则](modules/screenplay-standardizer/INSTRUCTIONS.md)及其按需引用，不同时加载不相关的分镜细则。候选资产核实后、图片描述交付前读取[资产美术设计](references/asset-image-design.md)，执行事实与制作设计分层、统一风格和身份/空间锚点规则。进入分镜起草时再读取摄影规则、[连续性状态检查](references/continuity-state.md)、[表演与台词导演](references/performance-direction.md)、[镜头方案与词库](references/shot-options.md)和输出规范；项目已绑定且仅续接/局部改分镜时，不重读全部标准化资料。内置模块的相对路径从本Skill根目录解析，模块规则内的链接和`scripts/...`命令相对`modules/screenplay-standardizer/`解析，实际执行用脚本绝对路径；不要因切换工作目录把项目文件写入安装目录。
+剧本转换、资产提取或剧本改稿时读取[内置剧本标准化规则](modules/screenplay-standardizer/INSTRUCTIONS.md)及其按需引用，不同时加载不相关的分镜细则。候选资产核实后、图片描述交付前读取[资产美术设计](references/asset-image-design.md)，执行事实与制作设计分层、统一风格和身份/空间锚点规则。进入分镜起草时只读[分镜工作流](references/storyboard-workflow.md)、[创作规则总集](references/storyboard-rules.md)及[文本语法](references/storyboard-text-format.md)；已绑定且仅续接/局部改分镜时，不重读全部标准化资料。内置模块的相对路径从本Skill根目录解析，模块规则内的链接和`scripts/...`命令相对`modules/screenplay-standardizer/`解析，实际执行用脚本绝对路径；不要因切换工作目录把项目文件写入安装目录。
 
-辅助程序[scripts/director.py](scripts/director.py)默认仅调用包内模块，不搜索本机同名Skill、不自动回退到外部版本；模块缺失或校验摘要不一致时提示重新解压完整包，不拿原剧本直接分镜。`component.json`记录内置文件摘要，更新模块时完整同步规则、参考文件与脚本并重新生成摘要，不能混用不同版本。模块以`INSTRUCTIONS.md`命名，避免形成第二个Skill入口。核心剧本/分镜脚本只依赖标准库；PyYAML按下述准备步骤检查安装，小云雀画布操作另需Node.js与官方CLI，按需配置。本机独立的`screenplay-standardizer`不受本Skill更新影响。
+辅助程序[scripts/director.py](scripts/director.py)默认仅调用包内模块，不搜索本机同名Skill、不自动回退到外部版本；模块缺失或校验摘要不一致时提示重新解压完整包，不得绕过标准化与复核而直接从原剧本生成分镜。`component.json`记录内置文件摘要，更新模块时完整同步规则、参考文件与脚本并重新生成摘要，不能混用不同版本。模块以`INSTRUCTIONS.md`命名，避免形成第二个Skill入口。核心剧本/分镜脚本只依赖标准库；PyYAML按下述准备步骤检查安装，小云雀画布操作另需Node.js与官方CLI，按需配置。本机独立的`screenplay-standardizer`不受本Skill更新影响。
 
 按 [后台接口](references/runtime.md) 执行命令。使用环境提供的Python；Codex桌面通过workspace dependency loader获取路径。完整剧本可访问且入口风格已确认并保存后，在准备阶段后台运行`scripts/ensure_dependencies.py`，检查实际运行本Skill的Python能否导入PyYAML（导入名yaml）；缺失时直接用同一Python安装，无须再次询问，安装后重新导入验证。已安装则跳过，不重复安装或升级，不修改其他Python或系统全局环境。仅缺PyYAML才自动安装；导入损坏、网络/权限错误或安装失败时简短报告，不循环重试、不擅自提权。
 
-每个剧本项目独立保存在当前任务 `work/seedance-scene-director/<项目标识>/`；交付放任务 `outputs/` 或用户指定位置。`video-style.txt` 独立保存风格，`session.json` 保存来源摘要、历史范围、编号和版本。同一聊天的各剧本项目共享 `work/seedance-scene-director/` 下的批次登记，成功提交的新范围依次使用A、B…Z、AA；项目恢复读取已保存批次，不依赖对话记忆。不把运行状态写入Skill安装目录，不跨对话默认沿用其他项目。恢复项目读取文件，不靠对话记忆推测。多个项目无法唯一判断时才问目标。
+每个剧本项目独立保存在当前任务 `work/seedance-scene-director/<项目标识>/`；交付放任务 `outputs/` 或用户指定位置。`video-style.txt` 独立保存风格，`session.json` 保存来源摘要、历史范围、编号和版本。同一聊天的各剧本项目共享 `work/seedance-scene-director/` 下的批次登记，成功提交的新范围依次使用A、B…Z、AA；新批次的展示分镜序号在每个场景内从1计数，批内单元序号跨场连续；内部稳定ID保持项目累计，重试和局部修改继承原名。项目恢复读取已保存批次，不依赖对话记忆。不把运行状态写入Skill安装目录，不跨对话默认沿用其他项目。恢复项目读取文件，不靠对话记忆推测。多个项目无法唯一判断时才问目标。
 
 绑定文件变化时停止使用旧绑定，按[绑定变更边界](references/binding-changes.md)复核受影响来源、资产及引用。当前bind只支持新项目，不存在同目录原位rebind命令；不手改session摘要、不把“重新绑定”当作已实现的覆盖接口。纯制作名调整不反写正文，不重做无关剧情审阅；旧版与新稿不得静默混用。
 
@@ -46,7 +48,7 @@ description: 内置剧本标准化、可复用资产筛选与美术设计，输�
 
 ## 本次范围与统一主流程
 
-风格确认后根据用户请求直接执行 `director.py project-init --project <project> --scope assets|workflow|screenplay`，范围明确时不增加确认。assets只交付资产三件套，screenplay只交付标准稿，workflow才继续用户请求的后续分镜流程。保存project-contract.json后，资产init使用--project，完整资产交付自动要求设计完成；旧项目无契约保持兼容，不因安装自动升级。
+风格确认后根据用户请求直接执行 `director.py project-init --project <project> --scope assets|workflow|screenplay`。用户提交完整剧本并确认风格、未限定只做某一阶段时，选择workflow；明确仅需资产或图片提示词时选择assets，明确仅需标准化剧本时选择screenplay。任务范围与当前执行阶段分别判断，不能因为先做资产就把完整流程设为assets，也不能把“完整剧本”当作已经选择了全部分镜范围。范围明确时不增加确认；workflow在资产完成后按既有流程取得分镜范围，画布操作仍须明确授权。保存project-contract.json后，资产init使用--project，完整资产交付自动要求设计完成；旧项目无契约保持兼容，不因安装自动升级。
 
 主顺序唯一来源是[资产主流程](references/asset-workflow.md)：prepare→代表样本→逐场标准化同时保存观察→处理影响标准稿的跨场矛盾→full review/assemble→导入观察建立候选→身份/LOC/时间层归并及SET→基础分类审阅→按需登记佩戴形象→最终资产范围→共享制作基线→代表组预览→其余设计组→统一合并、完整设计、导出与绑定。
 
@@ -59,24 +61,20 @@ description: 内置剧本标准化、可复用资产筛选与美术设计，输�
 - 标准化：读取[内置规则](modules/screenplay-standardizer/INSTRUCTIONS.md)、[复核](modules/screenplay-standardizer/references/review.md)、[逐场观察](modules/screenplay-standardizer/references/observations.md)。保留source、原句及成稿去向；sample/partial不用于正式合并或绑定。
 - 资产统筹：读取[资产主流程](references/asset-workflow.md)、[台账规则](modules/screenplay-standardizer/references/asset-ledger.md)、[审阅草稿与影响分析](modules/screenplay-standardizer/references/asset-decisions.md)。全剧身份、服装、地点与候选裁决统一负责。背景群像和共同发声集合不同，原集合称谓与完整台词保留；非人物播报须有绑定原文的分类决定。
 - 美术设计：读取[图片设计](references/asset-image-design.md)和[共享基线及设计组](references/design-workspace.md)。先确定身份、服装、公共空间和关联道具，再做代表组design-check并实读。结构检查不签发语义通过；完整提示词只由最终JSON编译，TXT不另维护一份设计。
-- 分镜及指定修改：仅进入该阶段才读[分镜工作流](references/storyboard-workflow.md)、[分镜创作规则](references/storyboard-authoring.md)及其专项引用。先使动作/声音计划readiness=ready，再展开有观看重点的摄影；作者同版渲染/状态前检、首次独立逐镜实读和最终提交门槛保留。连续单元顺序承接，不扩展用户范围。
+- 分镜及指定修改：读取上述三份分镜资料。范围简报一次，当前场短节拍，直接写提示词；作者边写边核对，独立主审一次连读整场，集中修订后只复看改动和受影响连接。场末只保存后续必要事实，范围末只核覆盖与场次连接。不会为新稿建立purpose、动作/声音计划、逐实体visibility、逐镜passed或哈希依赖图。
 - 画布：仅在明确请求或菜单选择后读[画布工作流](references/canvas-workflow.md)、[接口](references/canvas.md)和[队列](references/canvas-jobs.md)。同画布一个writer；未知写入先回读，保留原ID续接，不触发生成。
 
-阶段委派按[模型调度](references/model-routing.md)及agents/model-routing.json执行，主聊天模型不自动切换。创作默认creative，已授权同步准备用operations，具体疑难按原规则升级。标准化、全剧统筹和连续分镜保留单写者；只有冻结基线、无跨组可变依赖、责任ID互斥的design组允许受控并行。所有正式文件与提交由主代理单写。
+阶段委派按[模型调度](references/model-routing.md)及agents/model-routing.json执行，主聊天模型不自动切换。新文字分镜直接交接必要路径、版本和范围，不使用stage-handoff-v2；标准化、资产、设计及明确旧格式仍保留原交接生命周期。创作默认creative，已授权同步准备用operations，具体疑难按原规则升级。标准化、全剧统筹和连续分镜保留单写者；只有冻结基线、无跨组可变依赖、责任ID互斥的design组允许受控并行。所有正式文件与提交由主代理单写。
 
 ## 分镜制作与修订边界
 
-原文的叙事作用、情绪与反差须落实到可见动作过程、空间关系、信息揭示和切点；事件覆盖不能代替表达成立。摄影、表演、状态更新和事件时序的通用判定见分镜专项规则，不新增表单或审查轮次。
+新稿以scene-text-v1文本为唯一作者源，脚本负责来源/台词、时码、资产引用、编号和导出。`storyboard_text_delivery.py preview`已包含机械检查；独立审阅的场级结论只绑定最终文件和当前上下文，commit直接保存文本回执，不转回旧JSON门槛。审阅规则在工作流，实质规则在创作规则总集，语法在文本格式，避免在多个文件重复维护。
 
-单元4～30秒、单镜1～6秒整数；固定仅限1～3秒，4～6秒必须有服务观看重点的实际相机位移或转向，仅移焦或主体运动不算，运动后可短暂稳定。26～30秒8～13镜，短单元及建议镜数按自然负荷选择，不补动作、反应或停顿凑时长。新提交/选定替换使用reference-v3、none-v1及visual-only-v2纯视觉抬头；旧receipt保持原版。
-
-一个生成写者、一个独立场次主审，主代理验收交接与闭环证据，不再作第三轮逐镜通读。按完整自然场次或必要连续段冻结，集中同根因问题后一次修订；真实依赖未变的判断可追溯复用，只实读pending镜头与必要连接。声音变化核对整声音单元，状态变化沿真实承接至有证据的收敛边界；不为固定小批数量反复交接。待审期间可继续来源和进入状态独立的后续工作，依赖未决状态的部分等待解决。
-
-新制作使用紧凑staging材料并按需展开核验来源，实际校验仍绑定完整材料；展示投影不构成通过证据。完整prepare/prepare-incremental已对同版执行完整check时，补齐真实审阅记录后直接commit，由commit校验最终结构与证据，不紧邻重复check/verify。具体兼容、依赖与复核命令见场次审阅流程。
+已有旧receipt仍原样读取/导出，明确继续旧格式时才进入[旧分镜契约](references/storyboard-contract.md)和原装配/状态/审阅脚本。用户明确选用文字路径修改旧单元时，仅转换选定对象，保留身份、范围和其他历史；不静默迁移生产项目。退出新路径的旧机制及归并位置统一见[移除记录](references/storyboard-removal-record.md)，旧摘要兼容实现见[规则职责](references/rule-domains.md)。
 
 ## 交付与进度
 
-对用户简短报告草稿已保存、检查通过、正式编译的实际数量及具体阻塞，不输出思考过程或后台JSON，不把结构通过说成语义通过。长任务按有意义的依赖组报告，不固定凑20—30项。阶段事件使用[pipeline_metrics](references/asset-workflow.md#实际进度与计量)，只有可靠宿主元数据才登记实际模型和Token，不估算提速。
+对用户简短报告草稿已保存、检查通过、正式编译的实际数量及具体阻塞，不输出思考过程或后台JSON，不把结构通过说成语义通过。长任务按已完成的依赖组报告，不为达到固定数量合并或拆分进度。资产阶段事件使用[pipeline_metrics](references/asset-workflow.md#实际进度与计量)，新文字分镜使用storyboard_text_delivery.py event/timing记录少量真实起止及里程碑，不手写另一份进度状态。只有可靠宿主元数据才登记实际模型和Token，不估算提速。
 
 资产完成时交付标准剧本TXT、最终台账JSON、从同一台账渲染的分类图片提示词TXT。assets范围到此结束，bind后的phase为complete，不自动进入画布/分镜菜单。screenplay范围在完整复核、合并和交付后结束，不建立资产。workflow在资产交付后询问是否传输到画布；选择是提交assets后台任务后即可选择分镜范围，选择否直接选择范围。图片上传只在资产任务完整核验且用户选择后询问目录。已经明确授权的操作不重复询问。
 

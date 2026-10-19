@@ -1,14 +1,14 @@
 # 资产生产主顺序
 
-此页是标准化到资产交付的顺序入口。字段定义沿用模块规则，分镜与画布分别按各阶段参考加载。`<module>`表示`<skill>/modules/screenplay-standardizer`；所有输出写入项目目录，候选版本用新文件。已绑定项目按改稿迁移，不能重新init抹去历史。
+此页是标准化到资产交付的顺序入口。字段定义沿用模块规则，分镜与画布分别按各阶段参考加载。`<module>`表示`<skill>/modules/screenplay-standardizer`；所有输出写入项目目录，候选版本用新文件。已绑定项目按改稿迁移，不能重新init覆盖历史。下文涉及服装、佩戴、移动载体或时间层的步骤，仅在本稿具有相应对象或依赖时执行；示例不授权新增剧情事实。
 
 ## 入口、样本与逐场整理
 
-确认完整剧本可访问，先保存用户已选风格；未选才显示入口菜单并等待。风格之前不解析全文或分派任务。根据本次已授权范围初始化交付契约，assets表示三份资产交付，workflow表示还进入分镜/画布选择，screenplay表示只交标准稿。范围从用户请求确定，不增加一次菜单。
+确认完整剧本可访问，先保存用户已选风格；未选才显示入口菜单并等待。风格之前不解析全文或分派任务。按入口的范围判定初始化交付契约：完整剧本加已确认风格、未限定单一阶段时使用workflow；明确仅要资产使用assets，明确仅要标准稿使用screenplay。当前先执行资产阶段不改变完整任务范围，不增加一次菜单。
 
 ```text
 python <skill>/scripts/director.py style --project <project> --choice 3 --file <用户风格.txt>
-python <skill>/scripts/director.py project-init --project <project> --scope assets
+python <skill>/scripts/director.py project-init --project <project> --scope workflow
 python <module>/scripts/screenplay_io.py prepare <input.docx> --workdir <workdir>
 ```
 
@@ -33,7 +33,7 @@ python <module>/scripts/screenplay_io.py assemble <workdir> --review-report <全
 python <module>/scripts/asset_ledger.py init <标准剧本.txt> <workdir> --project <project> --observations <观察包.json> --observations-review <全稿复核.json> --output <索引台账.json>
 ```
 
-init导入当前审阅支持的已确认事实，其余保留观察队列。必须实际确认的未决项阻止交付；一般候选不全变成阻塞。后补目标映射用scene_observations import写新候选台账，不修改原观察摘要或猜ID。
+init导入当前审阅支持的已确认事实，其余保留观察队列。影响人物身份、场界、声源或资产依赖且尚未解决的决定按既有待核机制阻止交付；普通候选提及不自动设为阻塞。后补目标映射用scene_observations import写新候选台账，不修改原观察摘要或推测ID。
 
 在索引台账上统筹全剧身份、世次、服装、物理LOC与时间层，核实引用和原文事实。合并地点后再归一化制作名称及重复群像/道具；先建立SET，之后决定草稿才绑定最终ID。跨段证据在冻结前用[evidence_draft](../modules/screenplay-standardizer/references/asset-decisions.md)从明确原文范围生成单行证据，原摘录和出处集中保留；不等review-check报错后才改冻结候选。把这一步所得的完整候选保存为固定输入，审阅过程中不边填结论边改底稿。
 
@@ -62,7 +62,7 @@ python <module>/scripts/design_inputs.py check <新索引.json>
 
 已有共享设计时加`--shared-design <当前共享设计.json>`；选定范围用`--asset-id CHAR0001 SET0001`并自动带入既有依赖闭包，省略则索引全部图片资产。输出保留facts、absorbed_candidates原记录及继承引用，不自动生成交互事实。check重验来源文件、风格、可选共享设计、规则和编译器摘要及完整内容；过期须重建，不能编辑索引或替换旧摘要。current仅表示输入有效，短约束表和语义结论仍在现有审阅记录中引用binding_sha256保存。
 
-先冻结身份锚点及分配、基础人物服装、会被佩戴引用的PROP、同一LOC的空间共性。头套人物只补佩戴范围和可见身份；同一空间变化先继承共性再填原文支持的差异。未知空间不得用制作补足伪装原文事实。
+先冻结身份锚点及分配、适用的基础造型、会被佩戴引用的PROP、同一LOC的空间共性。关联独立PROP的佩戴版本只补贴合关系、遮挡范围和实际可见身份；同一空间版本先继承共性，再填原文支持的差异。未明示的空间补全须标为制作设计，不写成原文事实。
 
 无跨资产继承风险的小项目可直接做完整设计；大量设计采用[设计工作区](design-workspace.md)。出现佩戴PROP、多个同身份形象或父SET继承时，即使总资产少也先预览代表组。代表样本覆盖实际使用的字段类型，有SET时纳入一个代表SET；佩戴依赖闭包仍须完整。草稿保存即运行`design_scope.py <设计草稿.json>`检查字段用途；它允许不完整草稿，不代替原文/身份检查。再做完整候选上的design-check，按短约束表实读并记录实现情况；佩戴组同时看PROP单品板与人物佩戴板，SET检查照明与展示字段分离。共享基线与代表组通过后扩展其余组。
 
@@ -87,7 +87,7 @@ python <skill>/scripts/director.py bind --project <project> --script <标准剧�
 
 新契约使validate/render/bind自动要求完整设计，不依赖执行者记得附加--require-designed。只有显式--candidate可作候选前检，不能据此交付。旧无契约台账读取兼容，不自动补写契约、重绑定或迁移画布。
 
-assets范围到三份交付即结束，bind保存phase=complete，不主动要求传输、上传或选择分镜范围。workflow范围继续既有资产菜单；未获授权不提交画布任务。
+assets范围到三份交付即结束，bind保存phase=complete，不主动要求传输、上传或选择分镜范围。workflow范围继续既有资产菜单：已授权传输则排队后进入分镜范围，选择不传输同样进入范围；未给范围才提示输入，已明确给出则直接按[范围定位](storyboard-workflow.md)检查。未获授权不提交画布任务。阶段交付后用户追加分镜请求时，按该工作流的续接分支复用有效绑定，不重做未变资产。
 
 变化前后用`asset_ledger.py impact <旧台账> <新台账>`及可选source/design快照生成直接、依赖与未知影响报告。报告绑定输入，区分语义重审与重编译建议，不自动复制通过结论。原文改变仍按全局未知依赖保守失效；下一步自动增量复用需另行设计验证。
 
@@ -95,6 +95,6 @@ assets范围到三份交付即结束，bind保存phase=complete，不主动要�
 
 来源全文保存在source.json；辅助语义记录以场次/资产ID、段落引用、输入摘要、具体判断及必要短引文为主，不在每层交接报告重复拷贝全文。正式review与ledger协议必需的证据字段照常保留。复用公共prepare/check工具及同一证据草稿，避免每个阶段重写一次临时包装脚本；不得为节省记录删除首次实读、待核项或依赖失效检查。
 
-委派阶段直接读取handoff的prepared_at和closed_at，标为“交接准备至关闭”，其中包含分派、等待和主代理验收。手工事件另列，不相加；未记录风格确认、准备或其他前后区间时全流程耗时未知，不用后补started假充任务起点。`pipeline_metrics.py status --project <project>`同时显示并集、重叠和空档，不能把等待重复加到同一阶段。
+委派阶段直接读取handoff的prepared_at和closed_at，标为“交接准备至关闭”，其中包含分派、等待和主代理验收。手工事件另列，不相加；未记录风格确认、准备或其他前后区间时，全流程耗时记为未知，不把后补的started记录当作实际任务起点。`pipeline_metrics.py status --project <project>`同时显示并集、重叠和空档，不能把等待重复加到同一阶段。
 
 进度用`scripts/pipeline_metrics.py record --project <project> --stage <standardize|assets|design|review|delivery> --task-key <任务ID> --status <状态> --object-id <ID> --input-digest <当前摘要>`记录，status汇总。只登记真实事件；changed输入独立计首检，返工记needs_review及原因。同一对象当前状态只计一次，完成窗口与任务耗时之和分列，避免并行叠加被误报总耗时。宿主未提供实际模型/Token时留空。用户反馈用完成数、剩余范围和具体阻塞，不把这些日志当已证实的提速比例。

@@ -73,14 +73,6 @@ def photography_warnings(state, entries, boundary_only=False):
             return None
         return (shot.get("framing"), tuple(sorted(shot["focus"])), shot.get("angle"), compact(shot["camera"]))
 
-    if not boundary_only:
-        long_shots = [item for item in entries if type(item[2].get("start")) is int
-                      and type(item[2].get("end")) is int
-                      and 4 <= item[2]["end"] - item[2]["start"] <= 6]
-        if long_shots:
-            emit("4至6秒实际运镜需审查", long_shots,
-                 "所列各镜必须有服务观看重点的相机位置或朝向变化；结合时码核对camera中的实际路径、起止取景和purpose。仅移焦、主体运动或‘运镜丝滑’不算运镜；运动后可短暂稳定，不能整镜固定。同轮逐镜实读确认所列范围，可合并处置，不另加逐镜证明；程序不按关键词判定通过，未满足则修订。")
-
     for index, (_, number, shot) in enumerate(entries):
         face = face_focus(shot, characters)
         frontal = face if shot.get("angle") == "正面" and shot.get("framing") in FACE_FRAMINGS else None
@@ -93,7 +85,7 @@ def photography_warnings(state, entries, boundary_only=False):
             if (frontal and shot.get("framing") in CLOSE and other_face
                     and previous.get("angle") == "正面" and previous.get("framing") in CLOSE):
                 emit("连续正面面部近景需审查", entries[index - 1:index + 1],
-                     "连续两镜为明确的正面面部近景/特写；检查每镜新增表演信息、焦点及空间关系。合法正反打与关键反应可以保留。只识别明确面部信号，不保证发现全部怼脸画面。")
+                     "连续两镜为明确的正面面部近景/特写；检查每镜新增表演信息、焦点及空间关系。合法正反打与关键反应可以保留。只识别明确面部信号，不保证发现全部以面部为主要内容的近景/特写。")
         if index < 2:
             continue
         window = entries[index - 2:index + 1]
@@ -105,7 +97,7 @@ def photography_warnings(state, entries, boundary_only=False):
                  and item[2].get("framing") in FACE_FRAMINGS else None for item in window]
         if faces[0] is not None and len(set(faces)) == 1:
             emit("同人物连续正面面部镜需审查", window,
-                 "同人物连续三镜正面面部中近景/近景/特写；评估关系、动作或空间的其他看点，不用换个景别标签维持同一怼脸画面。只识别明确面部信号，仍须人工审查。")
+                 "同人物连续三镜正面面部中近景/近景/特写；评估关系、动作或空间的其他看点，不得仅修改景别标签而保持相同的面部观看内容。只识别明确面部信号，仍须人工审查。")
     return warnings
 
 
@@ -371,7 +363,13 @@ def set_style(args, state=None):
     # Semantic conflicts (including negated requests) are reviewed by the caller.
     atomic_text(args.project / "video-style.txt", style + "\n")
     if state is not None:
-        state["style_hash"], state["phase"] = sha(style), ("complete" if state.get("delivery_contract", {}).get("scope") in {"assets", "screenplay"} else "range")
+        state["style_hash"] = sha(style)
+        # The initial delivery contract is history, not the active task. An
+        # assets project may already have an authorized storyboard follow-up.
+        # Only the explicit style gate advances; all other phases are retained.
+        if state.get("phase") == "style":
+            state["phase"] = ("complete" if state.get("delivery_contract", {}).get("scope")
+                              in {"assets", "screenplay"} else "range")
         save(args.project, state)
     return {"status": "style_saved", "style_file": str((args.project / "video-style.txt").resolve())}
 
@@ -649,10 +647,6 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
     asset_text(state, unit, unit["global"])
     shots, warnings = unit["shots"], []
     require(shots, "单元没有镜头")
-    if duration >= 26:
-        require(8 <= len(shots) <= 13, "26～30秒单元镜数必须在8～13镜")
-    if duration >= 29 and len(shots) != 11 or 26 <= duration <= 28 and len(shots) not in (9, 10):
-        require(isinstance(unit.get("count_reason"), str) and unit["count_reason"].strip(), "偏离默认镜数须在后台记录自然表达依据")
     cursor, closeups, used_chars, used_props = 0, 0, set(), set()
     for i, shot in enumerate(shots):
         start, end = shot["start"], shot["end"]
@@ -835,6 +829,8 @@ def require_workflow(request):
 
 
 def validate(state, request, partial=False):
+    require(not any(u.get('output_format') == 'scene-text-v1' for u in state.get('units', [])),
+            '项目已有文字稿；新增及选定修改使用storyboard_text_delivery.py，旧回执仍可render，不回填旧结构化门槛')
     fixed_header(HEADER_POLICY)
     require(state["style_hash"], "尚未选择并保存视频风格")
     require(request.get("mode") in ("append", "replace"), "mode须为append或replace")
@@ -895,6 +891,9 @@ def validate(state, request, partial=False):
 
 
 def render_unit(state, unit, reference_text=None):
+    if unit.get("output_format") == "scene-text-v1":
+        from storyboard_text import render_unit as render_text_unit
+        return render_text_unit(state, unit, reference_text)
     convert = reference_text or (lambda text: text)
     chars = {c["id"]: c["name"] for c in state["ledger"]["characters"]}
     scenes = {s["id"]: s["heading"] for s in state["ledger"]["scenes"]}
@@ -1063,6 +1062,9 @@ def commit(args, state):
         working = copy.deepcopy(state)
         units = copy.deepcopy(request["units"])
         scenes = {s["id"]: s for s in working["ledger"]["scenes"]}
+        # Visible shot numbers belong to this batch and main scene. Stable IDs
+        # retain the project's historical counters for receipts and Canvas keys.
+        display_numbers = {}
         for index, unit in enumerate(units, 1):
             unit["style"] = style
             unit["black_reference_mode"] = BLACK_REFERENCE_MODE
@@ -1074,7 +1076,9 @@ def commit(args, state):
                 unit.update(id=f'场景{scenes[main]["number"]}-分镜{number}', version=1,
                             batch_id=request["request_id"], previous_versions=[], predecessor=prior["id"] if prior else None,
                             batch_label=batch_label, batch_index=index)
-                unit["display_name"] = f'{batch_label}{index:02d}-{unit["id"]}'
+                display_number = display_numbers.get(main, 1)
+                unit["display_name"] = f'{batch_label}{index:02d}-场景{scenes[main]["number"]}-分镜{display_number}'
+                display_numbers[main] = display_number + 1
                 working["next_numbers"][main] = number + 1
                 working["units"].append(unit)
             else:
@@ -1168,7 +1172,7 @@ def main():
                 result = {"phase": state["phase"]}
             elif args.command == "status":
                 result = {k: state[k] for k in ("phase", "revision", "entry", "ranges", "next_numbers")}
-                result["units"] = [{k: u[k] for k in ("id", "version", "span", "duration", "start_state", "end_state")} for u in state["units"]]
+                result["units"] = [{k: u[k] for k in ("id", "version", "span", "duration", "start_state", "end_state", "output_format") if k in u} for u in state["units"]]
                 for item, unit in zip(result["units"], state["units"]):
                     item["name"] = unit_name(unit)
                 result["batch_scope"] = state.get("batch_scope")

@@ -981,6 +981,10 @@ def desired_videos(session, state, doc, units, bind_references=False, failures=N
 
 
 def unit_asset_ids(session, unit):
+    if unit.get("output_format") == "scene-text-v1":
+        prompt_only = {item["id"] for item in session["ledger"]["characters"]
+                       if item.get("visual_mode") == "prompt_only"}
+        return set(unit["asset_ids"]) - prompt_only
     mentioned = set(unit["character_ids"] + d.scene_asset_ids(session, unit["scene_ids"]) + unit["prop_ids"])
     fields = [unit["global"]]
     for shot in unit["shots"]:
