@@ -184,6 +184,30 @@ class CreativeRuleDomainsTests(unittest.TestCase):
         with self.assertRaises(SyntaxError):
             self.digest()
 
+    def test_canonical_asset_rules_remain_required_and_content_bound(self):
+        for relative in rules.REQUIRED_FILES:
+            if not (self.root / relative).exists():
+                self.put(relative, '# Required fixture entry\n')
+        baseline = rules.rules_digest(self.root)
+        for relative in (
+            'references/asset-workflow.md',
+            'modules/screenplay-standardizer/INSTRUCTIONS.md',
+            'modules/screenplay-standardizer/references/asset-ledger.md',
+            'references/asset-image-design.md',
+        ):
+            with self.subTest(relative=relative):
+                path = self.root / relative
+                original = path.read_bytes()
+                try:
+                    path.write_bytes(original + b'\nA revised source-bound requirement.\n')
+                    self.assertNotEqual(baseline, rules.rules_digest(self.root))
+                    path.unlink()
+                    with self.assertRaisesRegex(ValueError, '缺失'):
+                        rules.rules_digest(self.root)
+                finally:
+                    path.write_bytes(original)
+                self.assertEqual(baseline, rules.rules_digest(self.root))
+
     def test_warm_projection_cache_rereads_same_path_same_mtime_content(self):
         before = self.digest()
         self.assertEqual(before, self.digest())

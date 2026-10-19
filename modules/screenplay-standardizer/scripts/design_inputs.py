@@ -19,11 +19,9 @@ MODULE = Path(__file__).resolve().parents[1]
 SKILL = MODULE.parents[1]
 RULE_FILES = (
     MODULE / "references/asset-ledger.md",
-    MODULE / "references/asset-decisions.md",
-    MODULE / "references/observations.md",
+    MODULE / "INSTRUCTIONS.md",
     SKILL / "references/asset-image-design.md",
     SKILL / "references/asset-workflow.md",
-    SKILL / "references/design-workspace.md",
     MODULE / "scripts/asset_ledger.py",
     MODULE / "scripts/asset_visual_design.py",
     MODULE / "scripts/design_preview.py",

@@ -26,7 +26,9 @@ python <skill>/scripts/director.py range --project <project> --start <起点整�
 
 ## 恢复与画布
 
-`director.py status.recovery`读取session、当前有效单元、提交和匹配当前绑定的队列；历史intake-state不作为续接指令。查询只读、不连接云端、不改变phase、不解除暂停。phase只表前台位置，不代表外部授权；后台worker状态独立，完成事件不覆盖正在创作的phase。
+先按项目文件选择入口。已有`session.json`的绑定项目运行`director.py status`；尚未bind的新项目读取`project-contract.json`、已保存来源/阶段产物及`pipeline_metrics.py status --project <project>`，不能把缺少session当作损坏或因此重复初始化。status的session/recovery接口不承担未绑定项目的阶段诊断。
+
+绑定项目以`status.recovery`中的session前台阶段、当前输入对应队列及提交记录为准；`intake-state.json`仅是历史快照，不用其旧计数、next_step或失败描述决定续接。查询只读、不连接云端、不改变phase、不解除暂停。phase只表前台位置，不代表外部授权；后台worker状态独立，已排队或单步ACK不计完整节点完成，完成事件不覆盖正在创作的phase。
 
 资产/图片/视频队列、上传菜单、真实节点ID、字段ACK/回读、UNCERTAIN_WRITE及续接只在[画布流程](canvas-workflow.md)、[接口](canvas.md)和[队列](canvas-jobs.md)维护。只在已授权画布工作时读取；本地分镜不依赖登录，后台失败不抹掉本地交付。同画布单writer，未知写入先回读且沿原ID，人工修改冲突保护和暂停边界保留。
 

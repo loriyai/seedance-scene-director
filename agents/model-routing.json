@@ -24,31 +24,20 @@
     "standardize": {
       "profile": "creative",
       "references": [
-        "modules/screenplay-standardizer/INSTRUCTIONS.md",
-        "modules/screenplay-standardizer/references/review.md",
-        "modules/screenplay-standardizer/references/observations.md"
+        "modules/screenplay-standardizer/INSTRUCTIONS.md"
       ]
     },
     "assets": {
       "profile": "creative",
       "references": [
-        "modules/screenplay-standardizer/INSTRUCTIONS.md",
-        "modules/screenplay-standardizer/references/asset-ledger.md",
         "references/asset-workflow.md",
-        "modules/screenplay-standardizer/references/asset-decisions.md",
-        "modules/screenplay-standardizer/references/observations.md",
-        "references/intake-assets.md",
-        "references/binding-changes.md"
+        "modules/screenplay-standardizer/references/asset-ledger.md"
       ]
     },
     "design": {
       "profile": "creative",
       "references": [
-        "references/asset-image-design.md",
-        "modules/screenplay-standardizer/references/asset-ledger.md",
-        "references/design-workspace.md",
-        "references/intake-assets.md",
-        "references/binding-changes.md"
+        "references/asset-image-design.md"
       ]
     },
     "storyboard": {

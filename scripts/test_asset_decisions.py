@@ -139,6 +139,13 @@ class AssetDecisionTests(unittest.TestCase):
         self.assertFalse(output.exists())
         self.assertFalse(report.exists())
 
+    def test_review_check_accepts_collective_speakers_and_rejects_wrong_label(self):
+        script = ledger.parse_script(self.script)
+        self.assertEqual(review.check_review_drafts(script, self.paragraphs, self.data, [self.payload])["status"], "draft_checked")
+        self.payload["decisions"][0]["values"]["source_speaker"] = "另一个集合"
+        with self.assertRaisesRegex(ValueError, "人物声源"):
+            review.check_review_drafts(script, self.paragraphs, self.data, [self.payload])
+
     def test_apply_and_verify_cli_preserve_inputs(self):
         save(self.work / "ledger.json", self.data)
         save(self.work / "decisions.json", self.payload)
@@ -172,6 +179,98 @@ class AssetDecisionTests(unittest.TestCase):
         value, report = review.apply_review_decisions(data, decision_payload(data, records, chars=[item["id"]], candidates=[candidate["candidate_id"]]))
         self.assertEqual(report["checked_count"], 2)
         self.assertEqual(value["prop_coverage_review"]["candidates"][0]["target_id"], "SET0001")
+
+
+class AssetSpeakerPrecheckTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.work = Path(self.temp.name)
+        self.script, self.source, self.paragraphs, self.data, _ = fixture(self.work, with_prop=False)
+        self.data["group_policy"] = design.GROUP_POLICY
+        self.data["characters"][0]["source_speaker"] = "陈默"
+        self.paragraphs[0] += "陈默说开始。行人从门前经过。围观路人在门外驻足。"
+        self.data["source_digest"] = ledger.digest(self.paragraphs)
+        self.selections, entries = [], []
+        for number, speaker, evidence in ((2, "行人", "行人从门前经过"), (3, "围观路人", "围观路人在门外驻足")):
+            aid, entry = f"CHAR{number:04d}", f"{speaker}-群像-基础形象"
+            self.data["characters"].append({"id": aid, "name": entry + "-陈府", "source_entry": entry,
+                "aliases": [], "visual_facts": [], "personality_facts": [], "visual_mode": "prompt_only",
+                "extraction_review": {"kind": "background_group", "reviewed_full_script": True,
+                    "source_digest": self.data["source_digest"], "identity_basis": "门外无独立台词的背景人群",
+                    "selection_basis": "prompt_only", "requires_reference": False,
+                    "text_sufficiency_reason": "只有行走或驻足行为，无成员辨识需求", "exclusion_reason": "文字足以表达门外背景活动"},
+                "visible_uses": [{"scene_id": "SC0001", "event_id": speaker + "门外活动",
+                    "evidence": evidence, "source_paragraphs": [1]}]})
+            self.data["scenes"][0]["character_ids"].append(aid)
+            self.selections.append({"kind": "background_group", "asset_id": aid})
+            entries.append(entry + "；")
+        text = self.script.read_text(encoding="utf-8")
+        text = text.replace("人物：陈默-基础形象；", "人物：陈默-基础形象；" + "".join(entries), 1)
+        text = text.replace("场景2-", "陈默：开始。\n△ 行人从门前经过。围观路人在门外驻足。\n\n场景2-", 1)
+        save(self.script, text)
+        save(self.source, {"paragraphs": [{"id": n, "text": value} for n, value in enumerate(self.paragraphs, 1)]})
+
+    def payload(self, data):
+        # Author the frozen decision independently so check also covers old
+        # draft files created before prepare gained this early validation.
+        decisions = [{**selection, "expected_record_digest": review.fingerprint(item),
+                      "values": {field: copy.deepcopy(item[field]) for field in review.CHAR_FIELDS["background_group"]}}
+                     for selection, item in zip(self.selections, data["characters"][1:])]
+        return decision_payload(data, decisions, chars=[item["asset_id"] for item in self.selections])
+
+    def test_two_background_speaker_mismatches_fail_prepare_check_and_full_validation(self):
+        for index, wrong_speaker in ((1, "行人"), (2, "围观路人")):
+            with self.subTest(speaker=wrong_speaker):
+                data = copy.deepcopy(self.data)
+                data["characters"][index]["source_speaker"] = wrong_speaker
+                before = copy.deepcopy(data)
+                with self.assertRaisesRegex(ValueError, "人物声源"):
+                    review.prepare_review_payload(data, self.selections)
+                payload = self.payload(data)
+                with self.assertRaisesRegex(ValueError, "人物声源"):
+                    review.check_review_drafts(ledger.parse_script(self.script), self.paragraphs, data, [payload])
+                applied, _ = review.apply_review_decisions(data, payload)
+                with self.assertRaisesRegex(ValueError, "人物声源"):
+                    ledger.validate(ledger.parse_script(self.script), self.paragraphs, applied)
+                self.assertEqual(data, before)
+
+    def test_non_speaking_groups_omit_speaker_and_regular_speaker_still_passes(self):
+        before = copy.deepcopy(self.data)
+        template = review.prepare_review_payload(self.data, self.selections)
+        self.assertEqual(template["scope"]["character_ids"], ["CHAR0002", "CHAR0003"])
+        payload = self.payload(self.data)
+        report = review.check_review_drafts(ledger.parse_script(self.script), self.paragraphs, self.data, [payload])
+        self.assertEqual(report["status"], "draft_checked")
+        self.assertFalse(report["formal_ready"])
+        applied, _ = review.apply_review_decisions(self.data, payload)
+        ledger.validate(ledger.parse_script(self.script), self.paragraphs, applied)
+        self.assertEqual(self.data, before)
+
+    def test_legacy_matching_group_speaker_remains_readable(self):
+        for item in self.data["characters"][1:]:
+            item["source_speaker"] = item["source_entry"].split("-基础形象")[0]
+        payload = self.payload(self.data)
+        review.check_review_drafts(ledger.parse_script(self.script), self.paragraphs, self.data, [payload])
+        applied, _ = review.apply_review_decisions(self.data, payload)
+        ledger.validate(ledger.parse_script(self.script), self.paragraphs, applied)
+
+    def test_related_regular_speaker_mismatch_is_caught_by_check(self):
+        self.data["characters"][0]["source_speaker"] = "旁人"
+        with self.assertRaisesRegex(ValueError, "人物声源"):
+            review.check_review_drafts(ledger.parse_script(self.script), self.paragraphs, self.data, [self.payload(self.data)])
+
+    def test_review_check_cli_fails_without_changing_any_input(self):
+        self.data["characters"][1]["source_speaker"] = "行人"
+        save(self.work / "ledger.json", self.data)
+        save(self.work / "decisions.json", self.payload(self.data))
+        inputs = {path: path.read_bytes() for path in (self.script, self.source, self.work / "ledger.json", self.work / "decisions.json")}
+        run = subprocess.run([sys.executable, "-B", str(CLI), "review-check", str(self.script), str(self.source),
+            str(self.work / "ledger.json"), str(self.work / "decisions.json")], capture_output=True, text=True, encoding="utf-8")
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("人物声源", run.stderr)
+        for path, content in inputs.items():
+            self.assertEqual(path.read_bytes(), content)
 
 
 class AssetLifecycleTests(unittest.TestCase):

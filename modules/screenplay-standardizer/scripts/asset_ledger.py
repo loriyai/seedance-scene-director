@@ -16,7 +16,7 @@ from asset_visual_design import (PROP_POLICY, GROUP_POLICY, apply_design, apply_
                                  validate_visual_design, visual_assets, scene_source_digests)
 from character_variants import (apply_variant_review, scene_character_ids,
                                 validate_character_variants)
-from cast_contract import split_cast_entry, validate_cast_entries
+from cast_contract import split_cast_entry, validate_cast_entries, validate_source_speaker
 from asset_review import (prepare_review_payload, apply_review_decisions, verify_review_decisions,
                           validate_asset_lifecycle)
 from project_contract import delivery_contract, requires_design
@@ -416,8 +416,7 @@ def validate(script: list[dict], paragraphs: list[str], data: dict, *, require_d
                 raise ValueError(f"场景{base['number']} 道具实体记录无效；共用图片不合并实体/数量")
             occurrence_ids.add(oid)
         for ref in char_ids:
-            if characters[ref].get('source_speaker') and characters[ref]['source_speaker'] != split_cast_entry(characters[ref].get('source_entry', characters[ref]['name']))[0]:
-                raise ValueError(f"场景{base['number']} 人物声源须对应原人物行")
+            validate_source_speaker(characters[ref], context=f"场景{base['number']}")
         if not isinstance(scene.get("visual_facts"), list):
             raise ValueError(f"场景{base['number']} 缺少 visual_facts 数组")
         fact_list(scene["visual_facts"], paragraphs, scenes_by_id, scene["id"], scene["id"])

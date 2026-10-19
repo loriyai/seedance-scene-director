@@ -7,7 +7,6 @@ evidence, not prompts: give reviewers the scene and dependencies they need.
 """
 import argparse
 import copy
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -21,28 +20,6 @@ POLICY = 'scene-review-conservative-v1'
 VERSION = 1
 GENERIC_BASES = {'通过', '已检查', '同前', '同上', '字段完整', '构图合理', '符合要求'}
 ASSET_ID = re.compile(r'^(?:CHAR|PROP|SET|LOC|SC)\d+$')
-# This is the semantic/render/validation domain for storyboard review. Queue,
-# login, recovery, agent routing and unrelated runtime maintenance are not
-# creative-rule changes. Add new semantic dependencies here when introduced.
-RULE_FILES = (
-    'SKILL.md', 'assets/fixed-header.txt', 'assets/fixed-header-visual-v2.txt',
-    'scripts/director.py', 'scripts/batch_naming.py',
-    'scripts/review_gate.py', 'scripts/scene_review.py',
-    'scripts/shot_review.py', 'scripts/shot_dependencies.py',
-    'scripts/authoring_gates.py', 'scripts/storyboard_preflight.py',
-    'scripts/staging_preflight.py', 'scripts/continuity.py',
-    'scripts/dialogue_layout.py', 'scripts/speech_timing_audit.py',
-    'scripts/prop_reference_review.py', 'scripts/group_reference_review.py',
-    'references/storyboard-authoring.md', 'references/scene-review-workflow.md',
-    'references/cinematic-rules.md', 'references/continuity-state.md',
-    'references/performance-direction.md', 'references/shot-options.md',
-    'references/output-format.md', 'references/runtime.md',
-    'references/intake-assets.md', 'references/asset-image-design.md',
-    'modules/screenplay-standardizer/references/asset-ledger.md',
-    'modules/screenplay-standardizer/scripts/character_variants.py',
-)
-
-
 def digest(value):
     return gate.digest(value)
 
@@ -56,15 +33,6 @@ def rules_digest():
     """Current semantic/validation contract; historical snapshots keep theirs."""
     import creative_rules
     return creative_rules.rules_digest(Path(__file__).resolve().parent.parent)
-
-
-def legacy_rules_digest():
-    """Bind reuse to actual installed validation and authoring rules."""
-    root = Path(__file__).resolve().parent.parent
-    missing = [name for name in RULE_FILES if not (root / name).is_file()]
-    require(not missing, '分镜复核规则文件缺失：' + '、'.join(missing))
-    return digest({name: hashlib.sha256((root / name).read_bytes()).hexdigest()
-                   for name in RULE_FILES})
 
 
 def source_binding(state):

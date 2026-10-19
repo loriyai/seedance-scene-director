@@ -15,6 +15,23 @@ def split_cast_entry(entry: str) -> tuple[str, str]:
     return name, image
 
 
+def validate_source_speaker(item: dict, *, context: str = "") -> None:
+    """Check the optional source label against the same canonical cast slot.
+
+    This is a field contract, not proof of dialogue. Background groups normally
+    omit source_speaker; an existing exact slot label remains compatible.
+    """
+    if "source_speaker" not in item:
+        return
+    label = f"{context} {item.get('id', '')}".strip()
+    speaker = item["source_speaker"]
+    if not isinstance(speaker, str) or not speaker.strip():
+        raise ValueError(f"{label} source_speaker须为非空字符串")
+    expected, _ = split_cast_entry(item.get("source_entry", item.get("name")))
+    if speaker != expected:
+        raise ValueError(f"{label} 人物声源须对应原人物行：source_speaker={speaker!r}，人物槽位={expected!r}")
+
+
 def validate_cast_entries(entries: list[str]) -> list[str]:
     """Return all deterministic errors; do not infer aliases or merge identities."""
     errors, seen = [], set()

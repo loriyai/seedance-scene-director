@@ -1,5 +1,6 @@
 """Regression tests for close-before-bind and honestly scoped handoff timing."""
 import json
+from datetime import timedelta
 from pathlib import Path
 import tempfile
 import unittest
@@ -72,6 +73,72 @@ class BindLifecycleTests(unittest.TestCase):
         self.assertEqual(handoff.verify(str(path))['result_status'], 'draft_complete')
         self.assertEqual(path.read_bytes(), before)
 
+    def test_linked_milestones_share_lifecycle_and_keep_versions_and_check_kinds(self):
+        prepared, path, manifest = self.prepare('design')
+        self.assertIn('pipeline_metrics.py record --handoff', prepared['task'])
+        self.artifact(manifest)
+        revision = Path(manifest['output_dir']) / 'result.json'
+        first = metrics.record_handoff_event(path, 'draft_saved', revision_file=revision)
+        structure = metrics.record_handoff_event(path, 'checked', revision_file=revision, check_kind='structure')
+        metrics.record_handoff_event(path, 'needs_review', revision_file=revision, check_kind='semantic')
+        # A new draft is a new check input while immutable source identity stays.
+        revision.write_text(revision.read_text(encoding='utf-8') + '\n', encoding='utf-8')
+        second = metrics.record_handoff_event(path, 'checked', revision_file=revision, check_kind='semantic')
+        self.assertEqual(first['input_digest'], second['input_digest'])
+        self.assertNotEqual(first['revision_digest'], second['revision_digest'])
+        self.assertEqual(first['revision_digest'], structure['revision_digest'])
+        handoff.close(str(path), 'completed', '已实际验收最新稿')
+        result = metrics.summarize_project(self.project)
+        self.assertEqual(result['tasks'], [])
+        self.assertEqual(result['completed_task_seconds_sum'], 0)
+        observed = result['handoff_metrics']
+        self.assertEqual(len(observed['tasks']), 1)
+        self.assertEqual(observed['completed_interval_count'], 1)
+        self.assertEqual(observed['first_checks_by_kind'], {
+            'semantic': {'passed': 1, 'total': 2}, 'structure': {'passed': 1, 'total': 1}})
+        self.assertEqual(observed['tasks'][0]['milestones']['first_draft_at'], first['occurred_at'])
+        self.assertEqual(result['unmatched_handoff_event_ids'], [])
+
+    def test_linked_events_refuse_history_backfill_and_unbound_checks(self):
+        _, path, manifest = self.prepare('assets')
+        with self.assertRaisesRegex(ValueError, '起止'):
+            metrics.record_handoff_event(path, 'started')
+        with self.assertRaisesRegex(ValueError, 'check_kind'):
+            metrics.record_handoff_event(path, 'checked')
+        with self.assertRaisesRegex(ValueError, 'revision_file'):
+            metrics.record_handoff_event(path, 'checked', check_kind='structure')
+        with self.assertRaisesRegex(ValueError, 'output'):
+            metrics.record_handoff_event(path, 'draft_saved', revision_file=self.source)
+        handoff.close(str(path), 'cancelled', '未继续')
+        with self.assertRaisesRegex(ValueError, '已关闭'):
+            metrics.record_handoff_event(path, 'compiled')
+        self.assertFalse((self.project / 'pipeline-events.jsonl').exists())
+
+    def test_close_and_verify_do_not_create_semantic_success_events(self):
+        _, path, manifest = self.prepare('assets')
+        self.artifact(manifest)
+        handoff.verify(str(path))
+        handoff.close(str(path), 'completed', '主代理说明')
+        result = metrics.summarize_project(self.project)['handoff_metrics']
+        self.assertEqual(result['first_check_total'], 0)
+        self.assertEqual(result['tasks'][0]['milestones']['first_checks_at'], {})
+        self.assertFalse((self.project / 'pipeline-events.jsonl').exists())
+
+    def test_linked_events_outside_lifecycle_are_rejected(self):
+        _, path, manifest = self.prepare('design')
+        before_prepare = (metrics.stamp(manifest['prepared_at']) - timedelta(seconds=1)).isoformat()
+        with self.assertRaisesRegex(ValueError, '早于'):
+            metrics.record_handoff_event(path, 'compiled', occurred_at=before_prepare)
+        self.assertFalse((self.project / 'pipeline-events.jsonl').exists())
+        metrics.record_handoff_event(path, 'compiled')
+        closed = handoff.close(str(path), 'cancelled', '未采用')
+        event_path = self.project / 'pipeline-events.jsonl'
+        event = json.loads(event_path.read_text(encoding='utf-8'))
+        event['occurred_at'] = (metrics.stamp(closed['closed_at']) + timedelta(seconds=1)).isoformat()
+        event_path.write_text(json.dumps(event) + '\n', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '超出交接生命周期'):
+            metrics.summarize_project(self.project)
+
 
 class HandoffMetricsTests(unittest.TestCase):
     def setUp(self):
@@ -139,6 +206,84 @@ class HandoffMetricsTests(unittest.TestCase):
         row = metrics.summarize(events)['tasks'][0]
         self.assertEqual(row['coverage'], 'late_start')
         self.assertEqual(row['elapsed_seconds'], 60)
+
+    def work(self, identifier, category, status, minute, parent=None):
+        return metrics.record_event(self.project, 'design', 'work', status,
+                                    work_id=identifier, category=category, parent_work_id=parent,
+                                    reason='真实问题或确认事项', occurred_at=self.time(minute))
+
+    def test_nested_and_overlapping_rework_is_not_added_as_net_time(self):
+        events = [self.work('review-1', 'review_revision', 'work_started', 0),
+                  self.work('proof-1', 'confirmation', 'work_started', 1),
+                  self.work('tool-1', 'tool_repair', 'work_started', 2, 'review-1'),
+                  self.work('tool-1', 'tool_repair', 'work_finished', 3, 'review-1'),
+                  self.work('review-1', 'review_revision', 'work_finished', 4),
+                  self.work('proof-1', 'confirmation', 'work_finished', 5)]
+        work = metrics.summarize(events)['tasks'][0]['work']
+        self.assertEqual(work['seconds_sum'], 540)
+        self.assertEqual(work['interval_union_seconds'], 300)
+        self.assertEqual(work['interval_overlap_seconds'], 240)
+        self.assertEqual(work['by_category']['tool_repair']['seconds_sum'], 60)
+        self.assertEqual(next(r for r in work['windows'] if r['work_id'] == 'tool-1')['parent_work_id'], 'review-1')
+
+    def test_unknown_work_endpoints_and_failed_checks_do_not_invent_rework(self):
+        events = [self.work('unknown-start', 'author_revision', 'work_finished', 2),
+                  self.work('unknown-end', 'confirmation', 'work_started', 3),
+                  metrics.record_event(self.project, 'design', 'work', 'needs_review',
+                                       input_digest='old', occurred_at=self.time(4))]
+        work = metrics.summarize(events)['tasks'][0]['work']
+        self.assertEqual(len(work['windows']), 2)
+        self.assertTrue(all(row['elapsed_seconds'] is None for row in work['windows']))
+        self.assertEqual(work['interval_count'], 0)
+
+    def test_work_id_cannot_silently_join_two_repair_rounds(self):
+        self.work('repair', 'author_revision', 'work_started', 0)
+        self.work('repair', 'author_revision', 'work_finished', 1)
+        path = self.project / 'pipeline-events.jsonl'
+        before = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, '新一轮'):
+            self.work('repair', 'author_revision', 'work_started', 2)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(metrics.summarize_project(self.project)['tasks'][0]['work']['interval_count'], 1)
+
+    def test_category_conflict_and_time_reversal_are_rejected_before_append(self):
+        self.work('repair', 'author_revision', 'work_started', 2)
+        path = self.project / 'pipeline-events.jsonl'
+        before = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, '类别'):
+            self.work('repair', 'confirmation', 'work_finished', 3)
+        with self.assertRaisesRegex(ValueError, '倒序'):
+            self.work('repair', 'author_revision', 'work_finished', 1)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_unlinked_legacy_attempts_stay_in_manual_metrics(self):
+        for status, minute in [('started', 0), ('finished', 2)]:
+            metrics.record_event(self.project, 'design', 'old', status,
+                                 attempt_id='legacy-attempt', occurred_at=self.time(minute))
+        result = metrics.summarize_project(self.project)
+        self.assertEqual(result['tasks'][0]['attempt_id'], 'legacy-attempt')
+        self.assertEqual(result['tasks'][0]['elapsed_seconds'], 120)
+        self.assertEqual(result['unmatched_handoff_event_ids'], [])
+
+    def test_same_draft_under_changed_inputs_has_independent_first_check(self):
+        events = [metrics.record_event(self.project, 'assets', 'new-input', status,
+                                       input_digest=source, revision_digest='same-draft', check_kind='semantic',
+                                       occurred_at=self.time(index))
+                  for index, (source, status) in enumerate([('v1', 'needs_review'), ('v2', 'checked')])]
+        result = metrics.summarize(events)
+        self.assertEqual(result['first_checks_by_kind']['semantic'], {'passed': 1, 'total': 2})
+
+    def test_read_does_not_backfill_or_rewrite_old_event_schema(self):
+        old = {'event_id': 'old', 'stage': 'design', 'task_key': 'old', 'status': 'checked',
+               'object_ids': [], 'input_digest': 'input-v1', 'reason': None, 'occurred_at': self.time(0)}
+        path = self.project / 'pipeline-events.jsonl'
+        path.write_text(json.dumps(old) + '\n', encoding='utf-8')
+        before = path.read_bytes()
+        result = metrics.summarize_project(self.project)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(result['first_checks_by_kind'], {'unspecified': {'passed': 1, 'total': 1}})
+        self.assertEqual(result['tasks'][0]['first_checks'], {'input-v1': 'checked'})
+        self.assertEqual(result['tasks'][0]['work']['windows'], [])
 
 
 if __name__ == '__main__':

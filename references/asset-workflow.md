@@ -1,22 +1,68 @@
-# 资产生产主顺序
+# 标准化与资产主流程
 
-此页是标准化到资产交付的顺序入口。字段定义沿用模块规则，分镜与画布分别按各阶段参考加载。`<module>`表示`<skill>/modules/screenplay-standardizer`；所有输出写入项目目录，候选版本用新文件。已绑定项目按改稿迁移，不能重新init覆盖历史。下文涉及服装、佩戴、移动载体或时间层的步骤，仅在本稿具有相应对象或依赖时执行；示例不授权新增剧情事实。
+本页只维护入口、阶段先后、输入输出及交付边界。规则按职责读取，不再加载旧汇编页：
 
-## 入口、样本与逐场整理
+| 当前工作 | 唯一规则来源 |
+|---|---|
+| 标准格式、原文保真、声源与场界、逐场观察和全稿复核 | [标准化规则](../modules/screenplay-standardizer/INSTRUCTIONS.md) |
+| 身份与命名、SC/LOC/SET、人物/群像/道具筛选、候选决定和改稿迁移 | [资产台账](../modules/screenplay-standardizer/references/asset-ledger.md) |
+| 事实与制作设计、图片版式、设计JSON、共享依赖、分组和编译验收 | [图片设计](asset-image-design.md) |
 
-确认完整剧本可访问，先保存用户已选风格；未选才显示入口菜单并等待。风格之前不解析全文或分派任务。按入口的范围判定初始化交付契约：完整剧本加已确认风格、未限定单一阶段时使用workflow；明确仅要资产使用assets，明确仅要标准稿使用screenplay。当前先执行资产阶段不改变完整任务范围，不增加一次菜单。
+`<skill>`为Skill根目录，`<module>`为`<skill>/modules/screenplay-standardizer`，`<project>`为当前任务`work/seedance-scene-director/<项目标识>/`；下文`<workdir>`为prepare输出目录。执行时使用绝对路径。新候选、决定和设计用新文件保存，不覆盖已绑定材料；本流程不自动执行云端操作。
+
+## 风格确认
+
+收到完整剧本后，只检查文件是否存在且可读取（粘贴全文视为已收到），不先解析全文或分析剧情。不可访问时简短报告并请求可访问文件；可访问且本项目尚无已确认风格时，立即暂停工作，显示以下选项并等待用户回答：
+
+请选择视频风格：
+1.3D国风动漫,暗黑武侠/超写实仙侠风格
+2.3D国风动漫，眷思量风格，东方奇幻唯美风格
+3.自定义
+
+等待风格期间，不运行依赖检查、prepare、标准化、身份/资产审阅、设计或这些阶段的子代理任务；选择3后也须等到收到有效自定义文本才继续。用户随剧本或在本次会话中已明确提供本项目风格，或本项目已有有效的 `video-style.txt` 时，视为已确认，不重复提问，不跨项目或跨聊天推定风格。
+
+选择1或2用 `style` 将对应文字原样写入 `video-style.txt`。该命令支持在bind前保存风格，尚无session时仅保存文件，bind后纳入项目摘要。选择3只提示“请输入自定义的视频风格。”，收到后原样保存，不追加词语。直接提供的自定义风格同样用 `style --choice 3 --file <自定义风格.txt>` 保存。保存成功后才进入阶段1，顺序完成剧本分析、资产提取和按该风格制作图片提示词；阶段2不再询问风格。风格为非空单行文本；明确要求字幕、文字、BGM或其他固定禁止项时简短指出冲突并请用户调整，不改固定抬头。
+
+后续每次资产设计或分镜生成/修改读取该文件，持续使用所选风格，不重新展示菜单。仅用户明确要求更换时更新；换风格只影响新生成或明确指定修改的资产/单元，已有图片、设计和分镜保留原版。固定抬头中的写实要求始终保留。
+
+## 准备与范围
+
+风格已确认并保存后，使用实际运行本Skill的Python执行`scripts/ensure_dependencies.py`。Codex桌面通过workspace dependency loader取得解释器路径。只在该解释器缺少PyYAML（导入名yaml）时直接安装并重新导入验证，已有可用版本不升级；导入损坏、网络/权限或安装错误报告一次，不循环重试、不提权、不修改其他Python。
+
+`director.py`只调用包内模块，不搜索或回退本机同名Skill。模块规则内的命令相对`<module>`解释；缺失文件或component.json摘要不一致时恢复完整包，不能跳过标准化/复核。模块维护后同步文件清单及摘要；本机独立的screenplay-standardizer不受影响。核心脚本仅用标准库，PyYAML按上述步骤准备；画布另需Node.js与官方CLI，仅在相应任务配置。
+
+根据已明确请求直接运行`project-init`，不增加范围菜单：完整剧本且未限制阶段用workflow，只要资产/图片提示词用assets，只要标准剧本用screenplay。当前先做资产不改变完整任务范围；workflow仍须在资产交付后取得分镜范围，不把“完整剧本”当作全部分镜授权。
 
 ```text
-python <skill>/scripts/director.py style --project <project> --choice 3 --file <用户风格.txt>
-python <skill>/scripts/director.py project-init --project <project> --scope workflow
+python <skill>/scripts/ensure_dependencies.py
+python <skill>/scripts/director.py project-init --project <project> --scope assets|workflow|screenplay
 python <module>/scripts/screenplay_io.py prepare <input.docx> --workdir <workdir>
 ```
 
-style示例只适用于用户选自定义；入口的其他选项沿用原值。prepare之后先做能覆盖真实异常的少量样本，检查人物槽位、完整source_entry、基础人与佩戴状态、非人物播报、引号/OS兼容及资产解析。样本通过只允许扩大整理，不代表全稿通过。
+以上scope三选一。project-contract.json保存本次交付范围；资产init必须传--project。旧无契约项目保持原读取语义，不因更新自动补写契约。新项目与已绑定项目的状态入口按[恢复与画布](runtime.md#恢复与画布)区分；项目无法唯一定位时才询问目标。
 
-首次实读原文、逐场整理时同步保存[observations-v1观察](../modules/screenplay-standardizer/references/observations.md)：明确主体的外貌、服装和物件结构按visual_fact候选记录主体、属性及证据，瞬时状态另记；人物身份、地点和时间判断仍沿用对应观察类型。全部引用同一source.json段落与当前场稿摘要，未审仍pending；候选提及不会直接变成PROP，也不凭名称归并地点。无需逐名词建记录或在后续阶段重新抽取全文。
+## 阶段证据与验收
 
-跨场检查先解决会改变人物行、声源或场次边界的问题，再执行全稿review→assemble。按内置规则区分叙事场次、摄影视角和资产：同一地点连续上车、下车、车内外切镜不自动拆场；车辆先作为移动物件候选，需独立车厢空间参考时另审用途，不能从镜头位置反推新SC或SET。真实转场、时间跳跃和实际地理变化仍保留。场次覆盖范围与地点命名分别判断，按[地点称谓与移动过程](../modules/screenplay-standardizer/INSTRUCTIONS.md#地点称谓与移动过程)保留原文主要地点称谓；路径和动作过程写在正文或连续性说明，不拼接成LOC/SET名称。纯制作命名、显示名和是否单独建图的判断留在台账，不能反向改动原文字句。真实矛盾只问必要问题，等待时继续不受影响部分。每场首次语义仍须实读；--previous-report仅复用经过验证且输入未变的检查。
+来源正文只在source.json维护，观察证据按[标准化协议](../modules/screenplay-standardizer/INSTRUCTIONS.md#逐场观察协议)记录，身份/取舍决定在台账审阅记录维护，制作方案在作者设计JSON维护。后续阶段引用现有ID、路径和出处，只补本阶段新判断与实际变化，不重抄全量事实或再建一份平行清单。协议要求的逐字片段、摘要和不可变回执继续完整保存。
+
+result.json的checks引用实际报告路径、范围及结论，issues集中记录未决问题；语义说明可直接放checks中，已有说明文件则引用它，不要求另写逐资产长表复述JSON。作者首次实读和主代理独立验收仍完成各自判断；机检通过不自动变成语义通过。修订后复看改动及受影响连接/依赖，未变且绑定仍有效的证据与判断直接复用，正式提交仍核对最终版本。
+
+过程报告按实际发生的性质组织，同一事项不在多阶段重复计成问题；无需新增报告文件或机器字段：
+
+| 性质 | 记录依据与边界 |
+| --- | --- |
+| 实际缺陷与修订 | 曾保存的稿件或已执行交接中确有遗漏、矛盾或错误；写明影响对象、发现依据和实际改动，区分作者自查与主审反馈。主代理给错制作约束也属于实际缺陷。 |
+| 必要确认与制作决定 | 声源归属、片段映射、身份/图片资格/空间关系等需要真实判断，但不一定改动稿件；与返修分开记录。机检待确认条数不等于错误数。 |
+| 已检查的风险 | 实际核对且未出现的问题，只作为checks的验收依据；不能把“可能出错”包装成已发生又已解决的缺陷。 |
+| 计量或工具限制 | 输入不可访问、阶段尚不支持该命令、起点漏记、观察元数据缺失等，说明实际影响与可核实范围，不编造故障、耗时或处理结果。 |
+
+已关闭缺陷可在现有checks或过程说明中保留修订依据；当前未决项仍集中在issues。这些说明描述真实工作，不要求针对每条潜在风险另建台账、重复检查或增加审阅轮次。
+
+## 标准化与观察
+
+prepare → 少量代表样本 → 逐场整理并保存观察 → 处理影响原稿的跨场矛盾 → full review → assemble。样本覆盖本稿实际存在的风险：人物槽位与完整source_entry、声源/集合、引号或OS、场界、基础与佩戴状态、资产解析；不为凑种类虚构样本。样本通过只允许扩写，不代替全稿通过。
+
+首次实读各场时按[逐场观察协议](../modules/screenplay-standardizer/INSTRUCTIONS.md#逐场观察协议)同步记录后续所需证据，不等全文机检通过后再重读建立观察。影响人物行、声源、场界或依赖的真实跨场矛盾在全稿冻结前处理，纯制作名与图片范围判断留给台账。需要用户裁决时只问必要问题，继续不受影响部分。
 
 ```text
 python <module>/scripts/scene_observations.py prepare <观察条目.json> --source <workdir>/source.json --workdir <workdir> --output <观察包.json>
@@ -25,17 +71,19 @@ python <module>/scripts/screenplay_review.py <workdir> --report <全稿复核.js
 python <module>/scripts/screenplay_io.py assemble <workdir> --review-report <全稿复核.json> --output <标准剧本.txt>
 ```
 
-观察包的confirmed由实际审阅填写，prepare不替人确认。只交标准稿时到此交付；其余范围继续。
+confirmed及语义结论由真实阅读者填写，prepare/check不代签。`--previous-report`只复用输入未变且已验证的检查。sample/partial不得正式合并或绑定；完整出口见[复核协议](../modules/screenplay-standardizer/INSTRUCTIONS.md#复核协议)。screenplay范围到标准稿交付结束，不建立资产。
 
-## 资产身份与决定
+## 资产身份与最终图片范围
 
 ```text
 python <module>/scripts/asset_ledger.py init <标准剧本.txt> <workdir> --project <project> --observations <观察包.json> --observations-review <全稿复核.json> --output <索引台账.json>
 ```
 
-init导入当前审阅支持的已确认事实，其余保留观察队列。影响人物身份、场界、声源或资产依赖且尚未解决的决定按既有待核机制阻止交付；普通候选提及不自动设为阻塞。后补目标映射用scene_observations import写新候选台账，不修改原观察摘要或推测ID。
+init仅导入当前审阅支持的已确认事实，其余保留观察队列；后补映射用scene_observations import写新候选，不能改旧观察摘要或猜ID。普通候选提及不自动阻塞，真正影响主体/声源/场界/依赖的未决事项沿待核机制处理。
 
-在索引台账上统筹全剧身份、世次、服装、物理LOC与时间层，核实引用和原文事实。合并地点后再归一化制作名称及重复群像/道具；先建立SET，之后决定草稿才绑定最终ID。跨段证据在冻结前用[evidence_draft](../modules/screenplay-standardizer/references/asset-decisions.md)从明确原文范围生成单行证据，原摘录和出处集中保留；不等review-check报错后才改冻结候选。把这一步所得的完整候选保存为固定输入，审阅过程中不边填结论边改底稿。
+统一核实全剧身份、世次、服装、物理LOC与时间层 → 合并已确认别称 → normalize制作名及重复群像/道具 → build-scenes建立SET → 冻结候选 → 审阅基础分类 → 必要佩戴形象 → 最终图片范围。SC场界由标准化规则判断，LOC/SET/移动PROP映射与候选筛选只按[台账规则](../modules/screenplay-standardizer/references/asset-ledger.md)，不在流程另设门槛。
+
+跨段证据在冻结候选前用evidence_draft从明确原文范围准备，保留出处与原摘录。决定草稿绑定最终ID和同一候选输入，不边填结论边改底稿。命令及决定字段见[审阅决定工作区](../modules/screenplay-standardizer/references/asset-ledger.md#审阅决定工作区)。
 
 ```text
 python <module>/scripts/asset_ledger.py normalize <身份与时间已核实台账.json> --output <归一化台账.json> --report <命名报告.json>
@@ -45,56 +93,67 @@ python <module>/scripts/asset_ledger.py review-check <标准剧本.txt> <workdir
 python <module>/scripts/asset_ledger.py review-apply <标准剧本.txt> <workdir>/source.json <候选台账.json> <决定批次1.json> --batch <决定批次2.json> --output <已审台账.json> --report <决定落盘对账.json>
 ```
 
-按[审阅决定工作区](../modules/screenplay-standardizer/references/asset-decisions.md)逐批核对发声集合、背景群像、候选物件及退役项。review-check允许未选范围仍待核；每批真实证据与目标关系仍检查。各批必须同一输入且无责任重叠；全部收齐后一次review-apply严格验收并保存原批回执。不通过更新摘要让旧决定适配新底稿。回执形成后再normalize若影响其依赖会在写入前拒绝；确需改变则生成新候选并重新审阅受影响决定，保留旧版本。
-
-需要独立佩戴参考时才执行variants，依据已审基础人物和独立PROP登记；再校验最终图片资产范围、关联及决定回执。不需要则跳过。variants不能给人物行新增第二个人。群像prompt_only与明确排除道具保留相应证据，后者归档并退役ID，不混在inactive待核区。进入设计前以`validate ... --candidate`检查来源/身份/候选；输出明确不是正式交付。
-
-## 共享设计、样本与分组
-
-写共享基线或单项初稿前，先按[短约束表](asset-image-design.md#初稿前的短约束表)汇总事实、被吸收候选的交互要求、当前可见范围和继承来源。候选最终归入CHAR/SET后，仍沿稳定目标ID读取其证据与处置理由，不能在进入设计时丢掉功能要求。
-
-可用只读设计输入索引汇集已有记录：
+各批责任不得重叠；review-check允许未选范围待核，全部收齐后一次review-apply严格验收并保存原批回执。回执形成后若normalize影响依赖会拒绝；需变化时另建候选并重审受影响决定，不刷新旧摘要。只在需要独立佩戴参考时依已审基础人物和PROP登记variants；最终核对图片范围、关联及决定回执。排除项带证据归档并退役ID，不留作无解释的inactive，也不删除历史。
 
 ```text
-python <module>/scripts/design_inputs.py prepare <标准剧本.txt> <source.json> <候选台账.json> --style-file <project>/video-style.txt --output <新索引.json>
-python <module>/scripts/design_inputs.py check <新索引.json>
+python <module>/scripts/asset_ledger.py validate <标准剧本.txt> <workdir>/source.json <最终候选台账.json> --candidate
 ```
 
-已有共享设计时加`--shared-design <当前共享设计.json>`；选定范围用`--asset-id CHAR0001 SET0001`并自动带入既有依赖闭包，省略则索引全部图片资产。输出保留facts、absorbed_candidates原记录及继承引用，不自动生成交互事实。check重验来源文件、风格、可选共享设计、规则和编译器摘要及完整内容；过期须重建，不能编辑索引或替换旧摘要。current仅表示输入有效，短约束表和语义结论仍在现有审阅记录中引用binding_sha256保存。
+候选身份、来源、命名及引用检查通过后才进入设计；candidate只是前检，不是正式图片提示词交付。preflight是兼容入口，不另重复运行同一检查。
 
-先冻结身份锚点及分配、适用的基础造型、会被佩戴引用的PROP、同一LOC的空间共性。关联独立PROP的佩戴版本只补贴合关系、遮挡范围和实际可见身份；同一空间版本先继承共性，再填原文支持的差异。未明示的空间补全须标为制作设计，不写成原文事实。
+## 设计与代表组验收
 
-无跨资产继承风险的小项目可直接做完整设计；大量设计采用[设计工作区](design-workspace.md)。出现佩戴PROP、多个同身份形象或父SET继承时，即使总资产少也先预览代表组。代表样本覆盖实际使用的字段类型，有SET时纳入一个代表SET；佩戴依赖闭包仍须完整。草稿保存即运行`design_scope.py <设计草稿.json>`检查字段用途；它允许不完整草稿，不代替原文/身份检查。再做完整候选上的design-check，按短约束表实读并记录实现情况；佩戴组同时看PROP单品板与人物佩戴板，SET检查照明与展示字段分离。共享基线与代表组通过后扩展其余组。
+先按[短约束表](asset-image-design.md#初稿前的短约束表)汇总事实、已吸收候选的交互、可见范围与继承；可用design_inputs准备只读索引，但语义判断仍须实际阅读。先确定共享身份、基础造型、关联PROP和同LOC空间共性，再写差异项。
 
-freeze/plan输出JSON由主代理捕获到新UTF-8文件。每组拥有互不重叠的可写ID及显式只读依赖；同身份未冻结变体归同组，跨组仍可变的依赖拒绝。标准化、全剧身份统筹和连续分镜不能借此任意并行。
+无跨资产继承风险的小项目可直接设计；存在佩戴PROP、多形象或父SET继承时，先预览覆盖实际字段类型的代表组，有SET则含代表SET，并保留佩戴依赖闭包。草稿保存即design_scope检查，再在完整候选上design-check并实读编译结果；字段用途通过不代替事实与美术验收。共享基线和代表组通过后扩展其余组，最后统一合并。
 
-```text
-python <module>/scripts/design_workspace.py freeze <标准剧本.txt> <workdir>/source.json <最终候选台账.json> <共享设计.json> <project>/video-style.txt
-python <module>/scripts/design_workspace.py plan <基线.json> <组别.json>
-python <module>/scripts/design_workspace.py verify-group <基线.json> <分组计划.json> <组稿.json> --group-id <组ID>
-python <module>/scripts/design_workspace.py merge <基线.json> <分组计划.json> <组1.json> <组2.json>
-```
+索引、freeze/plan/verify-group/merge、设计JSON及编译接口全部见[图片设计](asset-image-design.md)。只在冻结基线、责任ID互斥且无跨组可变依赖时受控并行；标准化和全剧身份统筹仍为单写者。全部正式文件由主代理写入。委派时先verify产物 → 实际验收 → close completed → 正式写入/编译/bind，不能以cancelled绕过未关闭交接。
 
-所有组由主代理在一个入口合并成原格式完整美术设计JSON。合并与提交都重查原文件摘要，既检查组责任范围，也运行原完整编译器；不能把局部设计预览改名当最终台账。使用子代理时，先verify产物、完成实际验收并close completed，再由主代理正式编译/assemble/bind改变交接输入；未关闭交接会阻止bind，不以cancelled代替已完成的正常关闭。
-
-## 完整交付与变化后的复核
+## 完整交付与变更
 
 ```text
-python <module>/scripts/asset_ledger.py design <标准剧本.txt> <workdir>/source.json <最终候选台账.json> <完整美术设计.json> --style-file <project>/video-style.txt --output <正式资产台账.json> --catalog-output <分类视觉描述.txt>
+python <module>/scripts/asset_ledger.py design <标准剧本.txt> <workdir>/source.json <最终候选台账.json> <完整美术设计.json> --style-file <project>/video-style.txt --output <正式资产台账.json> --catalog-output <分类图片提示词.txt>
 python <module>/scripts/asset_ledger.py validate <标准剧本.txt> <workdir>/source.json <正式资产台账.json>
 python <skill>/scripts/director.py bind --project <project> --script <标准剧本.txt> --source <workdir>/source.json --review <全稿复核.json> --ledger <正式资产台账.json>
 ```
 
-新契约使validate/render/bind自动要求完整设计，不依赖执行者记得附加--require-designed。只有显式--candidate可作候选前检，不能据此交付。旧无契约台账读取兼容，不自动补写契约、重绑定或迁移画布。
+新契约使validate/render/bind自动要求完整设计；不能用候选前检代替。TXT只由同一最终JSON编译，不另维护一套设计。交付到任务outputs或用户指定位置：标准剧本TXT、正式资产台账JSON、分类图片提示词TXT，使用实际绝对路径给出文件链接；只报告实际数量、检查与具体阻塞，不输出后台JSON或把结构通过称为语义通过。
 
-assets范围到三份交付即结束，bind保存phase=complete，不主动要求传输、上传或选择分镜范围。workflow范围继续既有资产菜单：已授权传输则排队后进入分镜范围，选择不传输同样进入范围；未给范围才提示输入，已明确给出则直接按[范围定位](storyboard-workflow.md)检查。未获授权不提交画布任务。阶段交付后用户追加分镜请求时，按该工作流的续接分支复用有效绑定，不重做未变资产。
+assets范围到三份交付结束，bind保存phase=complete，不自动出现画布/上传/分镜菜单。workflow交付后询问是否传输资产：选择是则提交assets后台任务后取得分镜范围，选择否直接取得范围；已有授权或范围不重复问。图片上传仅在资产任务完整核验且用户选择后询问目录。后续分镜按[分镜工作流](storyboard-workflow.md)复用有效绑定。
 
-变化前后用`asset_ledger.py impact <旧台账> <新台账>`及可选source/design快照生成直接、依赖与未知影响报告。报告绑定输入，区分语义重审与重编译建议，不自动复制通过结论。原文改变仍按全局未知依赖保守失效；下一步自动增量复用需另行设计验证。
+已绑定材料发生变化按[绑定变更边界](binding-changes.md)生成可追溯新版本；当前没有原位rebind，不手改session。纯制作名不改正文，真实剧情改动按标准化和台账迁移重审；未变报告/设计仅在依赖仍有效时复用。impact只给直接、依赖、未知影响与重编译/重审建议，不自动搬用通过结论。冻结是版本基线，不能靠刷新摘要接受新输入；旧项目、节点和图片不自动迁移。
 
 ## 实际进度与计量
 
-来源全文保存在source.json；辅助语义记录以场次/资产ID、段落引用、输入摘要、具体判断及必要短引文为主，不在每层交接报告重复拷贝全文。正式review与ledger协议必需的证据字段照常保留。复用公共prepare/check工具及同一证据草稿，避免每个阶段重写一次临时包装脚本；不得为节省记录删除首次实读、待核项或依赖失效检查。
+### 计量对象与边界
 
-委派阶段直接读取handoff的prepared_at和closed_at，标为“交接准备至关闭”，其中包含分派、等待和主代理验收。手工事件另列，不相加；未记录风格确认、准备或其他前后区间时，全流程耗时记为未知，不把后补的started记录当作实际任务起点。`pipeline_metrics.py status --project <project>`同时显示并集、重叠和空档，不能把等待重复加到同一阶段。
+标准化、资产、设计及旧交接统一由`scripts/pipeline_metrics.py`维护项目`pipeline-events.jsonl`，用status读取或派生报告，不维护平行计时状态。阶段时间、首稿/检查里程碑、具体处理窗口是不同尺度：stage-handoff-v2的阶段起止自动取prepare/close，包含分派、等待与验收；写者用`--handoff`追加本次交接内的真实事件，不另记started/finished。没有交接的准备或交付工序才使用`--project/--stage/--task-key`记录真实阶段起止。
 
-进度用`scripts/pipeline_metrics.py record --project <project> --stage <standardize|assets|design|review|delivery> --task-key <任务ID> --status <状态> --object-id <ID> --input-digest <当前摘要>`记录，status汇总。只登记真实事件；changed输入独立计首检，返工记needs_review及原因。同一对象当前状态只计一次，完成窗口与任务耗时之和分列，避免并行叠加被误报总耗时。宿主未提供实际模型/Token时留空。用户反馈用完成数、剩余范围和具体阻塞，不把这些日志当已证实的提速比例。
+每阶段记录实际首稿保存与检查结果；只有发生确认或修订时才开处理窗口，不逐资产、逐观察或逐诊断打点。事件版本用真实`revision-file`计算；机器检查只登记structure/source/package/inputs，semantic由实际阅读者登记。未通过按真实状态记needs_review或failed；缺少首检保持未知，不当作零错误率。
+
+### 处理窗口的起止与分类
+
+先判断本次工作属于哪类，再在开始处理反馈、重新阅读、编辑正文或编写修改脚本**之前**记录work_started。完成本轮修改和受影响范围复验后记work_finished；不能先准备好修改脚本，再把一次运行脚本的亚秒区间称为全部返修耗时。一次集中处理可涵盖多个相关对象，不把每条诊断算作一轮返工。
+
+| category | 以触发工作而非发现阶段判断 |
+| --- | --- |
+| confirmation | 补归属、片段映射或其他决定，稿件内容不变。 |
+| author_revision | 作者自行发现并修改稿件，即使发现于作者自己的复核阶段也属于此类。 |
+| review_revision | 收到独立主审或用户的具体反馈后修改稿件；主代理修正自己先前传入的错误约束也按该实际反馈记录。 |
+| tool_repair | 命令、临时脚本或运行故障的实际修复；不是普通待确认诊断，也不代替内容修订。 |
+
+同一窗口使用相同work_id、category及parent-work-id；下一轮另开work_id。同一修订内的工具修复可用parent-work-id标识嵌套，区间按并集汇总，不能重复累计。若已经开始而漏记起点，保持完整窗口耗时未知，可记录仍能核实的结束或执行片段并注明覆盖局限；不根据文件时间、版本或事后回忆补造起点，不用短执行片段代表全部判断与编辑成本。
+
+```text
+python <skill>/scripts/pipeline_metrics.py record --handoff <handoff.json> --status draft_saved --revision-file <本批实际主稿或已有输入清单.json>
+python <skill>/scripts/pipeline_metrics.py record --handoff <handoff.json> --status checked --check-kind structure --revision-file <该次检查的实际输入.json>
+python <skill>/scripts/pipeline_metrics.py record --handoff <handoff.json> --status work_started --work-id <事项ID> --category <按上表选择的类别> --reason <实际处理原因>
+python <skill>/scripts/pipeline_metrics.py record --handoff <handoff.json> --status work_finished --work-id <同一事项ID> --category <相同类别> --revision-file <处理后实际输入.json>
+python <skill>/scripts/pipeline_metrics.py status --project <project>
+```
+
+### 汇总与历史
+
+关联事件并入对应交接，独立手工任务单列；区间之和、并集、重叠和未覆盖时段分别展示，未结束窗口不伪造完成。阶段时间不能当作模型纯计算时间，处理窗口不能当作净可节省工时；模型和Token仅登记可信宿主元数据。
+
+旧事件与交接原样保留。发现历史分类或覆盖范围记错，在当前过程说明中注明原标签、实际性质及可核实范围，不改旧事件来制造更好结果。报告按[阶段证据与验收](#阶段证据与验收)区分缺陷、确认、风险和限制；本节不另定义一套问题清单。

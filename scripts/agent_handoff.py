@@ -328,9 +328,14 @@ def prepare(project_value, stage, brief_value, escalation_reason=None):
             f"只把候选产物写入 {output}，不得直接提交、修改源项目/台账/队列或进行云端写入。"
             "authorization 仅描述现有授权，不产生新授权。材料缺失或冲突时明确报告，不能猜测补齐。"
             "交付时从清单result_template填写根级result.json，按真实完成情况更新status、产物、依据和待核事项；"
-            "scope.task_key保留完整层级。artifacts只列实际存在且非空的交付文件；成功时可空的stderr等辅助流不列入，不能填造内容。"
+            "scope.task_key保留完整层级。checks引用实际报告与新增判断，不重复抄写全量证据。artifacts只列实际存在且非空的交付文件；成功时可空的stderr等辅助流不列入，不能填造内容。"
             f"交付前运行agent_handoff.py check-result --handoff {handoff}自验包装；它不证明内容或输入通过，主代理仍须verify和实际业务验收。"
             "模型请求配置不能当作实际模型执行凭证。")
+    if modern:
+        task += (f'阶段计量只通过scripts/pipeline_metrics.py record --handoff "{handoff}"追加项目已有事件日志；'
+                 '这是output之外唯一允许的计量写入。首稿保存记draft_saved，实际检查记checked/needs_review/failed并明确check-kind，'
+                 '二者均以--revision-file绑定本次主稿或检查输入清单。只在实际确认或返工发生时记work_started/work_finished，'
+                 '同窗口保持work-id/category；不逐资产打点、不补猜历史时间。prepare/close已提供阶段起止，无须重复记录。')
     return {"handoff": str(handoff), **requested, "task": task}
 
 

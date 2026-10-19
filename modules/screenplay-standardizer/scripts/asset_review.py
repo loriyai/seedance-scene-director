@@ -9,6 +9,8 @@ import hashlib
 import json
 import re
 
+from cast_contract import validate_source_speaker
+
 
 POLICY = "asset-decisions-v1"
 PREFIXES = {"scenes": "SC", "characters": "CHAR", "locations": "LOC",
@@ -196,6 +198,10 @@ def prepare_review_payload(data, selections):
         else:
             raise ValueError(f"不支持的审阅选择：{kind}")
         _require(target is not None and aid not in scope[bucket], f"选择的ID不存在或重复：{aid}")
+        if kind == "background_group":
+            # This frozen field cannot be repaired by a background decision.
+            # Reject it before the author fills the decision batch.
+            validate_source_speaker(target)
         scope[bucket].append(aid)
         decision = dict(selection, expected_record_digest=fingerprint(target))
         if fields is not None:
@@ -325,6 +331,8 @@ def _checked_scene(data, script_by_number, sid):
     _require(isinstance(linked, list) and all(aid in characters for aid in linked), f"审阅场次人物关联无效：{sid}")
     _require([characters[aid].get("source_entry", characters[aid]["name"]) for aid in linked] == written.get("cast_entries"),
              f"审阅场次人物槽位与标准稿不一致：{sid}")
+    for aid in linked:
+        validate_source_speaker(characters[aid], context=f"审阅场次{sid}")
     return scene, written
 
 

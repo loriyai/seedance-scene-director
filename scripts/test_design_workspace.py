@@ -15,6 +15,115 @@ import test_character_variants as mask_fixture
 import design_workspace as workspace
 
 
+class AuthorDesignDiffTests(unittest.TestCase):
+    def setUp(self):
+        self.payload = {"image_design_version": "gpt-image-2-v2",
+                        "identity_anchors": [{"id": "person-a", "face": "方脸", "hair": "黑发"},
+                                             {"id": "person-b", "face": "圆脸", "hair": "棕发"}],
+                        "designs": [{"asset_id": "CHAR0002", "identity_anchor_id": "person-a", "styling": "蓝衣"},
+                                    {"asset_id": "CHAR0001", "identity_anchor_id": "person-a", "styling": "白衣"},
+                                    {"asset_id": "PROP0001", "structure": "木匣", "parts": ["盖", "底"]}]}
+
+    def test_field_order_and_asset_or_anchor_array_reordering_are_not_changes(self):
+        def reverse_keys(value):
+            if isinstance(value, dict):
+                return {key: reverse_keys(item) for key, item in reversed(list(value.items()))}
+            if isinstance(value, list):
+                return [reverse_keys(item) for item in value]
+            return value
+
+        original = copy.deepcopy(self.payload)
+        after = reverse_keys(self.payload)
+        after["designs"].reverse()
+        after["identity_anchors"].reverse()
+        report = workspace.compare_designs(self.payload, after)
+        self.assertFalse(report["has_changes"])
+        self.assertEqual(report["status"], "compared")
+        self.assertEqual(report["semantic_review"], "not_performed")
+        self.assertFalse(report["formal_ready"])
+        self.assertEqual(report["direct_anchor_references"], [])
+        self.assertEqual(self.payload, original)
+
+    def test_actual_added_removed_and_changed_assets_are_sorted_by_id_and_field(self):
+        after = copy.deepcopy(self.payload)
+        after["designs"] = [after["designs"][2], after["designs"][0]]
+        after["designs"][0].update(structure="金属匣", parts=["底", "盖"], z_note="z", a_note="a")
+        after["designs"][1].pop("styling")
+        after["designs"].extend([{"asset_id": "SET0002"}, {"asset_id": "SET0001"}])
+        report = workspace.compare_designs(self.payload, after)
+        self.assertTrue(report["has_changes"])
+        self.assertEqual(report["assets"], {
+            "added": ["SET0001", "SET0002"], "removed": ["CHAR0001"],
+            "changed": [{"asset_id": "CHAR0002", "fields": {"added": [], "removed": ["styling"], "changed": []}},
+                        {"asset_id": "PROP0001", "fields": {"added": ["a_note", "z_note"], "removed": [],
+                                                               "changed": ["parts", "structure"]}}]})
+
+    def test_top_level_values_and_ordered_content_are_compared_without_coercion(self):
+        self.payload.update(identity_assignments={"CHAR0002": "person-a", "CHAR0001": "person-a"},
+                            review_order=["identity", "structure"], old_note="删除", reviewed=True)
+        after = copy.deepcopy(self.payload)
+        after.update(identity_assignments={"CHAR0001": "person-a", "CHAR0002": "person-a"},
+                     image_design_version="another-version", review_order=["structure", "identity"],
+                     reviewed=1, new_note="新增")
+        after.pop("old_note")
+        report = workspace.compare_designs(self.payload, after)
+        self.assertEqual(report["top_level"], {"added": ["new_note"], "removed": ["old_note"],
+                                              "changed": ["image_design_version", "review_order", "reviewed"]})
+        self.assertEqual(report["assets"]["changed"], [])
+
+    def test_anchor_changes_include_before_and_after_direct_references(self):
+        after = copy.deepcopy(self.payload)
+        after["identity_anchors"] = [{"id": "person-c", "face": "圆脸"},
+                                     {"id": "person-a", "face": "长脸", "hair": "黑发"}]
+        after["designs"][0]["identity_anchor_id"] = "person-c"
+        # Shared author designs may state assignments separately from records.
+        self.payload["identity_assignments"] = {"CHAR0003": "person-b"}
+        after["identity_assignments"] = {"CHAR0003": "person-c"}
+        report = workspace.compare_designs(self.payload, after)
+        self.assertEqual(report["identity_anchors"], {"added": ["person-c"], "removed": ["person-b"],
+            "changed": [{"id": "person-a", "fields": {"added": [], "removed": [], "changed": ["face"]}}]})
+        self.assertEqual(report["direct_anchor_references"], [
+            {"id": "person-a", "before_asset_ids": ["CHAR0001", "CHAR0002"], "after_asset_ids": ["CHAR0001"]},
+            {"id": "person-b", "before_asset_ids": ["CHAR0003"], "after_asset_ids": []},
+            {"id": "person-c", "before_asset_ids": [], "after_asset_ids": ["CHAR0002", "CHAR0003"]}])
+
+    def test_duplicate_stable_ids_on_either_side_are_rejected(self):
+        for side in (0, 1):
+            for collection, message in (("designs", "重复资产设计"), ("identity_anchors", "重复人物身份锚点")):
+                pair = [copy.deepcopy(self.payload), copy.deepcopy(self.payload)]
+                pair[side][collection].append(copy.deepcopy(pair[side][collection][0]))
+                with self.subTest(side=side, collection=collection), self.assertRaisesRegex(ValueError, message):
+                    workspace.compare_designs(*pair)
+
+    def test_cli_only_reads_input_files_and_returns_errors_for_duplicate_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            before, after = root / "before.json", root / "after.json"
+            save(before, self.payload)
+            changed = copy.deepcopy(self.payload)
+            changed["designs"][0]["styling"] = "红衣"
+            save(after, changed)
+            command = SKILL / "modules/screenplay-standardizer/scripts/design_workspace.py"
+
+            def run():
+                inputs = {path: path.read_bytes() for path in root.iterdir()}
+                result = subprocess.run([sys.executable, "-B", str(command), "diff", str(before), str(after)],
+                                        capture_output=True, text=True, encoding="utf-8",
+                                        env={**os.environ, "PYTHONUTF8": "1"})
+                self.assertEqual(inputs, {path: path.read_bytes() for path in root.iterdir()})
+                return result.returncode, json.loads(result.stdout)
+
+            code, report = run()
+            self.assertEqual(code, 0)
+            self.assertEqual(report["assets"]["changed"][0]["asset_id"], "CHAR0002")
+            self.assertEqual(report["semantic_review"], "not_performed")
+            changed["designs"].append(copy.deepcopy(changed["designs"][0]))
+            save(after, changed)
+            code, report = run()
+            self.assertEqual(code, 1)
+            self.assertEqual(report["status"], "error")
+
+
 class DesignWorkspaceTests(unittest.TestCase):
     def setUp(self):
         root = SKILL.parent / "design-workspace-test-work"

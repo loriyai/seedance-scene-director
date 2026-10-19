@@ -1,4 +1,4 @@
-"""Frozen shared designs and disjoint draft groups; never writes a formal ledger.
+"""Read-only author-design comparison, frozen designs and disjoint draft groups.
 
 All validation keeps the complete source-validated inventory. Group acceptance
 is structural only; merge returns the existing full-design payload, which must
@@ -53,6 +53,69 @@ def _records(records):
         require(aid not in result, f"重复资产设计：{aid}")
         result[aid] = {k: copy.deepcopy(v) for k, v in record.items() if k != "asset_id"}
     return result
+
+
+def _changed_fields(before, after):
+    """Object key order is immaterial; lists inside fields retain their order."""
+    return {"added": sorted(after.keys() - before.keys()),
+            "removed": sorted(before.keys() - after.keys()),
+            "changed": sorted(key for key in before.keys() & after.keys()
+                              if design.fingerprint(before[key]) != design.fingerprint(after[key]))}
+
+
+def _record_changes(before, after, id_field):
+    changed = []
+    for record_id in sorted(before.keys() & after.keys()):
+        fields = _changed_fields(before[record_id], after[record_id])
+        if any(fields.values()):
+            changed.append({id_field: record_id, "fields": fields})
+    return {"added": sorted(after.keys() - before.keys()),
+            "removed": sorted(before.keys() - after.keys()), "changed": changed}
+
+
+def _author_records(payload):
+    require(isinstance(payload, dict), "作者设计须为JSON对象")
+    records = _records(payload.get("designs"))
+    values = payload.get("identity_anchors", [])
+    require(isinstance(values, list), "identity_anchors须为数组")
+    anchors = {}
+    for value in values:
+        require(isinstance(value, dict), "人物身份锚点须为对象")
+        aid = value.get("id")
+        require(isinstance(aid, str) and aid, "人物身份锚点缺少id")
+        require(aid not in anchors, f"重复人物身份锚点：{aid}")
+        anchors[aid] = {key: item for key, item in value.items() if key != "id"}
+    return records, anchors
+
+
+def compare_designs(before, after):
+    """Locate authored changes by stable IDs without validating or changing them.
+
+    Only designs and identity_anchors are unordered ID collections. Other lists
+    keep their authored order. Direct anchor references are hints for reading;
+    dependency propagation still requires the existing full compiler/validation.
+    """
+    old_records, old_anchors = _author_records(before)
+    new_records, new_anchors = _author_records(after)
+    assets = _record_changes(old_records, new_records, "asset_id")
+    anchors = _record_changes(old_anchors, new_anchors, "id")
+    collections = {"designs", "identity_anchors"}
+    top_level = _changed_fields({key: value for key, value in before.items() if key not in collections},
+                                {key: value for key, value in after.items() if key not in collections})
+
+    def references(payload, records, anchor_id):
+        assignments = payload.get("identity_assignments", {})
+        require(isinstance(assignments, dict), "identity_assignments须为对象")
+        return sorted({aid for aid, record in records.items() if record.get("identity_anchor_id") == anchor_id}
+                      | {aid for aid, assigned in assignments.items() if assigned == anchor_id})
+
+    anchor_ids = sorted(set(anchors["added"] + anchors["removed"] + [item["id"] for item in anchors["changed"]]))
+    return {"status": "compared", "semantic_review": "not_performed", "formal_ready": False,
+            "has_changes": any(any(section.values()) for section in (assets, anchors, top_level)),
+            "assets": assets, "identity_anchors": anchors, "top_level": top_level,
+            "direct_anchor_references": [
+                {"id": aid, "before_asset_ids": references(before, old_records, aid),
+                 "after_asset_ids": references(after, new_records, aid)} for aid in anchor_ids]}
 
 
 def _image_ids(data):
@@ -451,6 +514,9 @@ def _read(path):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+    command = sub.add_parser("diff", help="按稳定ID只读比较两份作者设计，不代表语义验收")
+    command.add_argument("before", type=Path)
+    command.add_argument("after", type=Path)
     command = sub.add_parser("freeze")
     for name in ("script", "source", "ledger", "shared_design", "style"):
         command.add_argument(name, type=Path)
@@ -469,7 +535,9 @@ def main(argv=None):
     # ledger. The caller chooses a separate draft output path when redirecting.
     args = parser.parse_args(argv)
     try:
-        if args.command == "freeze":
+        if args.command == "diff":
+            result = compare_designs(_read(args.before), _read(args.after))
+        elif args.command == "freeze":
             result = freeze_from_files(args.script, args.source, args.ledger, args.shared_design, args.style)
         else:
             baseline = _read(args.baseline)

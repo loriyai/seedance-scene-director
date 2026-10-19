@@ -210,7 +210,7 @@ def dependency(path=None):
     # A distributable package must never silently select a machine-local version.
     found = (Path(path) if path else ROOT / "modules" / "screenplay-standardizer").resolve()
     instructions = found / ("INSTRUCTIONS.md" if (found / "INSTRUCTIONS.md").is_file() else "SKILL.md")
-    required = {"INSTRUCTIONS.md", "references/asset-ledger.md", "references/review.md",
+    required = {"INSTRUCTIONS.md", "references/asset-ledger.md",
                 "scripts/asset_ledger.py", "scripts/asset_migrate.py",
                 "scripts/asset_visual_design.py", "scripts/character_variants.py",
                 "scripts/asset_review.py", "scripts/design_preview.py",
@@ -218,8 +218,7 @@ def dependency(path=None):
                 "scripts/cast_contract.py", "scripts/source_compat.py",
                 "scripts/screenplay_io.py", "scripts/screenplay_review.py",
                 "scripts/scene_observations.py", "scripts/project_contract.py",
-                "scripts/asset_impact.py", "scripts/design_workspace.py",
-                "references/observations.md", "references/asset-decisions.md"}
+                "scripts/asset_impact.py", "scripts/design_workspace.py"}
     require(instructions.is_file() and all((found / p).is_file() for p in required if p != "INSTRUCTIONS.md"),
             "剧本标准化模块不完整；请重新解压完整Skill包")
     if not path or (found / "component.json").is_file():
