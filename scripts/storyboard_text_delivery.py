@@ -16,6 +16,8 @@ sys.dont_write_bytecode = True
 import director as d
 import batch_naming
 import storyboard_text as text_core
+from storyboard_context import context_hash, scene_context
+import storyboard_metrics
 
 POLICY = 'scene-text-v1'
 
@@ -28,23 +30,12 @@ def digest(value):
     return d.sha(d.packed(value))
 
 
-def context_hash(state):
-    # Bind the actual source, assets, style and neighbouring delivered text;
-    # phase, clocks and unrelated orchestration metadata do not invalidate it.
-    data = {key: state.get(key) for key in
-            ('files', 'records', 'ledger', 'style_hash', 'units', 'entry')}
-    # One small binding, not the legacy recursive dependency/approval graph.
-    required = ('references/storyboard-rules.md', 'references/storyboard-text-format.md',
-                'scripts/storyboard_text.py', 'scripts/storyboard_text_delivery.py')
-    data['text_rules'] = {name: d.file_hash(d.ROOT / name) for name in required}
-    return digest(data)
-
-
 def prepare(project, draft, span=None, replace_ids=None):
     project, draft = Path(project).resolve(), Path(draft).resolve()
     state = d.load(project)
     d.require(state.get('style_hash'), '请先保存本项目风格')
-    raw = draft.read_text(encoding='utf-8-sig')
+    draft_bytes = draft.read_bytes()
+    raw = draft_bytes.decode('utf-8-sig')
     parse_span = list(span) if span is not None else None
     if replace_ids:
         existing = {unit['id']: unit for unit in state['units']}
@@ -81,7 +72,7 @@ def prepare(project, draft, span=None, replace_ids=None):
     for unit in units:
         unit.update(style=style, output_format=POLICY,
                     header_policy=d.HEADER_POLICY, black_reference_mode=d.BLACK_REFERENCE_MODE)
-    binding = {'draft_sha256': hashlib.sha256(draft.read_bytes()).hexdigest(),
+    binding = {'draft_sha256': hashlib.sha256(draft_bytes).hexdigest(),
                'context_sha256': context_hash(state)}
     info = {**info, **binding, 'scenes': selected, 'span': actual_span,
             'semantic_review': 'not_performed',
@@ -125,33 +116,75 @@ def render_units(state, units, preview=False):
     return '\n\n'.join(results) + '\n'
 
 
-def event(project, name, scene=None, note=None):
-    project = Path(project).resolve()
-    d.require((project / 'session.json').is_file(), '计时必须指向已绑定项目')
-    row = {'at': now(), 'event': name}
-    if scene:
-        row['scene'] = scene
-    if note:
-        row['note'] = note
-    folder = project / 'text-storyboards'
-    folder.mkdir(exist_ok=True)
-    with (folder / 'events.jsonl').open('a', encoding='utf-8') as stream:
-        stream.write(json.dumps(row, ensure_ascii=False) + '\n')
-    return row
+def write_preview(target, payload):
+    """Exclusively create a new artifact; never replace an existing version."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open('xb') as stream:
+        try:
+            stream.write(payload)
+        except BaseException:
+            stream.close()
+            target.unlink()
+            raise
+
+
+def preview(project, draft, output=None, span=None, replace_ids=None, activity_id=None):
+    project, draft = Path(project).resolve(), Path(draft).resolve()
+    state, units, info = prepare(project, draft, span, replace_ids)
+    payload = render_units(state, units, preview=True).encode('utf-8')
+    artifact = {key: info[key] for key in ('draft_sha256', 'context_sha256', 'span', 'scenes')}
+    artifact.update(draft=str(draft), output_sha256=hashlib.sha256(payload).hexdigest())
+    rows, _ = storyboard_metrics.effective_events(storyboard_metrics.read_events(project))
+    starts = [i for i, row in enumerate(rows) if row['event'] == 'start']
+    rows = rows[starts[-1]:] if starts else rows
+    explicit = output is not None
+    if explicit:
+        target = safe_output(state, project, output, (draft,))
+    else:
+        folder = project / 'text-storyboards/previews'
+        stem = f'preview-{info["draft_sha256"][:16]}-{info["context_sha256"][:16]}'
+        for index in range(1, 10001):
+            target = d.validate_output_path(state, project, folder / f'{stem}-{index:03d}.txt')
+            d.require(target != draft, '预览不能覆盖作者稿')
+            if not target.exists():
+                break
+            if target.is_file() and target.read_bytes() == payload:
+                current = {**artifact, 'output': str(target)}
+                matches = [row for row in rows if row.get('producer') == storyboard_metrics.PREVIEW_PRODUCER
+                           and row.get('artifact') == current and row.get('activity_id') == activity_id]
+                if set(row.get('scene') for row in matches) == set(info['scenes']):
+                    d.require(hashlib.sha256(draft.read_bytes()).hexdigest() == info['draft_sha256'],
+                              '作者稿在预览期间变化，请重新运行预览')
+                    return {**info, 'output': str(target), 'output_sha256': artifact['output_sha256'],
+                            'preview_reused': True, 'preview_event_ids': [row['event_id'] for row in matches]}
+        else:
+            raise ValueError('预览版本路径已耗尽；保留现场并选择新的输出路径')
+    d.require(hashlib.sha256(draft.read_bytes()).hexdigest() == info['draft_sha256'],
+              '作者稿在预览期间变化，请重新运行预览')
+    try:
+        write_preview(target, payload)
+    except FileExistsError as exc:
+        raise ValueError('预览路径已被占用；未覆盖文件，请重新运行自动路径预览') from exc
+    d.require(target.read_bytes() == payload, '预览写入核验失败，未记录成功事件')
+    artifact['output'] = str(target)
+    events = []
+    try:
+        for scene in info['scenes']:
+            events.append(storyboard_metrics.record_event(
+                project, 'previewed', at=now(), scene=scene, activity_id=activity_id,
+                producer=storyboard_metrics.PREVIEW_PRODUCER, artifact=artifact))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f'预览文件已写入，但成功事件未全部记录；保留产物 {target}，请核对日志：{exc}') from exc
+    return {**info, 'output': str(target), 'output_sha256': artifact['output_sha256'],
+            'preview_reused': False, 'preview_event_ids': [row['event_id'] for row in events]}
+
+
+def event(project, name, scene=None, note=None, **fields):
+    return storyboard_metrics.record_event(project, name, at=now(), scene=scene, note=note, **fields)
 
 
 def timing(project):
-    path = Path(project) / 'text-storyboards/events.jsonl'
-    rows = [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip()] if path.is_file() else []
-    starts = [i for i, row in enumerate(rows) if row['event'] == 'start']
-    recent = rows[starts[-1]:] if starts else rows
-    ends = [row for row in recent if row['event'] == 'complete']
-    elapsed = None
-    if starts and ends:
-        elapsed = (datetime.fromisoformat(ends[-1]['at']) - datetime.fromisoformat(recent[0]['at'])).total_seconds()
-    return {'events': rows, 'current_run_events': recent, 'total_wall_seconds': elapsed,
-            'complete': bool(starts and ends), 'model_seconds': None,
-            'note': '阶段/审阅可能重叠，不相加；未记录start与complete时总时长未知。'}
+    return storyboard_metrics.timing(project)
 
 
 def commit(project, draft, request_id, review, output, span=None,
@@ -250,7 +283,9 @@ def main():
         p.add_argument('--span', type=int, nargs=2)
         p.add_argument('--replace-ids', nargs='+')
         if name != 'check':
-            p.add_argument('--output', type=Path, required=True)
+            p.add_argument('--output', type=Path, required=name == 'commit')
+        if name == 'preview':
+            p.add_argument('--activity-id', help='与本次起草窗口相同的activity-id，未指定时使用默认窗口')
         if name == 'commit':
             p.add_argument('--request-id', required=True)
             p.add_argument('--review', type=Path, required=True)
@@ -264,16 +299,25 @@ def main():
     p.add_argument('--name', required=True)
     p.add_argument('--scene')
     p.add_argument('--note')
+    p.add_argument('--activity-id', help='同场同阶段并行或多次尝试时区分工作窗口')
+    p.add_argument('--coverage', choices=sorted(storyboard_metrics.COVERAGES))
+    p.add_argument('--issue-kind', choices=sorted(storyboard_metrics.WORK_CATEGORIES))
+    p = commands.add_parser('invalidate-event', help='追加撤销错误阶段事件的记录，不修改原日志')
+    p.add_argument('--project', type=Path, required=True)
+    p.add_argument('--event-id', required=True)
+    p.add_argument('--note', required=True)
     p = commands.add_parser('timing')
     p.add_argument('--project', type=Path, required=True)
+    p = commands.add_parser('context', help='只读导出一场来源、合法引用、版本与已交付边界')
+    p.add_argument('--project', type=Path, required=True)
+    p.add_argument('--scene', required=True)
+    p.add_argument('--span', type=int, nargs=2)
     args = parser.parse_args()
     try:
-        if args.command in ('check', 'preview'):
+        if args.command == 'check':
             state, units, result = prepare(args.project, args.draft, args.span, args.replace_ids)
-            if args.command == 'preview':
-                target = safe_output(state, args.project, args.output, (args.draft,))
-                d.atomic_text(target, render_units(state, units, preview=True))
-                result['output'] = str(target)
+        elif args.command == 'preview':
+            result = preview(args.project, args.draft, args.output, args.span, args.replace_ids, args.activity_id)
         elif args.command == 'commit':
             result = commit(args.project, args.draft, args.request_id, args.review, args.output,
                             args.span, args.replace_ids, args.range_confirmation)
@@ -285,7 +329,12 @@ def main():
             d.atomic_text(target, '\n\n'.join(d.render_unit(state,u) for u in receipt['units'])+'\n')
             result = {'output':str(target), **d.receipt_summary(receipt)}
         elif args.command == 'event':
-            result = event(args.project, args.name, args.scene, args.note)
+            result = event(args.project, args.name, args.scene, args.note,
+                           activity_id=args.activity_id, coverage=args.coverage, issue_kind=args.issue_kind)
+        elif args.command == 'invalidate-event':
+            result = storyboard_metrics.invalidate_event(args.project, args.event_id, at=now(), note=args.note)
+        elif args.command == 'context':
+            result = scene_context(args.project, args.scene, args.span)
         else:
             result = timing(args.project)
         print(json.dumps(result, ensure_ascii=False, indent=2))

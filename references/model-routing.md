@@ -50,7 +50,7 @@ python <skill>/scripts/agent_handoff.py close --handoff <绝对路径> --status 
 
 check-result只检查包装，不核验输入或接收业务。主代理串行执行 verify → 实际阶段验收 → completed关闭 → 正式写入/bind；close会再次verify但不代替语义验收。设计组另运行verify-group并明确--group-id。需要看编译结果先编译到独立草稿目录；不可先bind再取消交接绕过保护。bind-ready可检查残留活动交接。
 
-取消前先确认宿主写者已停止，cancelled不表示接收成果，不能用超时自动释放仍在写入的任务。verify检查有效依赖、输出边界及实际结果；失败保留记录并重新准备，不刷新旧摘要。输入快照、stdout包装和路径保护见[共同契约](execution-contract.md)。旧 JSON 分镜只在明确继续旧格式时沿[旧契约](storyboard-contract.md)及原审阅脚本执行，不使用文字稿的场级报告替代旧接口。
+取消前先确认宿主写者已停止，cancelled不表示接收成果，不能用超时自动释放仍在写入的任务。verify检查有效依赖、输出边界及实际结果；失败保留记录并重新准备，不刷新旧摘要。输入快照、stdout包装和路径保护见[共同契约](execution-contract.md)。旧 JSON 分镜只在明确继续旧格式时沿[历史回执兼容](runtime.md#历史回执兼容)及原审阅脚本执行，不使用文字稿的场级报告替代旧接口。
 
 ## 真正调用、升级与回退
 

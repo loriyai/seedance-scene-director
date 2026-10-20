@@ -1,12 +1,14 @@
 # Seedance 场景分镜导演
 
-本 Skill 将完整中文剧本整理成标准稿，筛选并设计可复用人物、场景和主要道具，输出 Gpt-image-2 图片提示词，再按用户指定范围生成 Seedance 2.5 分镜提示词。通过明确授权的小云雀CLI操作画布，不自动生成图片或视频。当前版本为 **v0.20**，更新日期 **2026-10-20**，以 `VERSION` 为准。
+本 Skill 将完整中文剧本整理成标准稿，筛选并设计可复用人物、场景和主要道具，输出 Gpt-image-2 图片提示词，再按用户指定范围生成 Seedance 2.5 分镜提示词。通过明确授权的小云雀CLI操作画布，不自动生成图片或视频。当前版本为 **v0.21**，更新日期 **2026-10-20**，以 `VERSION` 为准。
 
-v0.20按职责归并标准化、资产审阅与美术设计规则，集中维护逐主体事实采集、设计字段与共享继承、整段动作的物理约束、过程问题分类及计时口径；新项目和已绑定项目使用各自的状态入口。阶段交接、候选决定、共享设计和计量的配套实现与回归测试一并发布，职责导航见[规则归属](references/rule-domains.md#当前规则归属)。
+v0.21将新文字分镜的摄影、表演、声音和连续性规则按职责集中维护于创作规则总集，配套起草、整场审阅和局部修订流程；退出使用的旧分镜专项页不再分发。预览成功记录绑定实际产物，事件计量支持保留原始日志的明确撤销。标准化、资产审阅与美术设计继续按各阶段权威规则执行，职责导航见[规则归属](references/rule-domains.md#当前规则归属)。
+
+分镜规则按叙事视角、信息组织、运镜时机与切点维护，优先选择有叙事作用的运动。表演按来源组织情绪进程、表里关系及哭戏阶段，部位词库提供有条件的中文表达，面部、身体与声音保持相容；动作过程、拟音及跨镜状态分别依对应章节处理。短节拍和一次独立整场阅读负责实际取舍，局部修改复看真实影响。按场只读上下文由storyboard_context提供，预览完成后自动绑定实际产物记录成功，storyboard_metrics从有效事件派生计量并保留明确撤销记录；沿用文字命令入口，不增加逐镜表单或审核轮次。具体规则和接口分别维护于下列三份分镜资料。
 
 新分镜采用 **scene-text-v1 文字母稿**：范围简报一次，当前场短节拍，直接写完整提示词；作者边写边检查，每场由一位独立主审完整阅读一次，集中修订后只复看改动与受影响连接。场末只记后续需要的事实，范围末只核覆盖和场次连接。脚本负责原话、时轴、引用、编号、导出和事件计时；真实表演、摄影与连续性仍由作者和主审判断。
 
-新稿只需[分镜工作流](references/storyboard-workflow.md)、[创作规则总集](references/storyboard-rules.md)和[文本母稿格式](references/storyboard-text-format.md)三份资料；命令另由[后台接口](references/runtime.md)索引。历史移除/退出新路径的机制集中记录在[分镜重构移除记录](references/storyboard-removal-record.md)。旧脚本和回执仍保留读取及明确旧格式修改用途；安装不会迁移真实项目、资产或Canvas状态。
+新稿只需[分镜工作流](references/storyboard-workflow.md)、[创作规则总集](references/storyboard-rules.md)和[文本母稿格式](references/storyboard-text-format.md)三份资料；命令另由[后台接口](references/runtime.md)索引。历史回执与旧接口边界见[历史回执兼容](references/runtime.md#历史回执兼容)。旧参考文档已退出安装包，仍被调用的兼容实现保留；安装不会迁移真实项目、资产或Canvas状态。
 
 标准化与资产阶段按职责读取四份资料：[主流程](references/asset-workflow.md)、[标准化及复核观察协议](modules/screenplay-standardizer/INSTRUCTIONS.md)、[资产台账与审阅决定](modules/screenplay-standardizer/references/asset-ledger.md)、[图片设计与共享分组](references/asset-image-design.md)。原补充分散页的有效规则已归并，旧资产入口和设计分组兼容页已移除，活动引用直接指向对应权威文件。
 

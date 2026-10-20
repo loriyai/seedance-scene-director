@@ -6,6 +6,7 @@ performance, screenplay fidelity or production work.
 """
 import copy
 from contextlib import ExitStack
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,7 @@ import director as d
 import review_gate
 import storyboard_text as core
 import storyboard_text_delivery as delivery
+import storyboard_metrics as metrics
 
 
 class TextDeliveryIntegration(unittest.TestCase):
@@ -145,7 +147,13 @@ class TextDeliveryIntegration(unittest.TestCase):
                           '--draft', self.draft, '--output', preview)
         after = self.snapshot()
         after.pop('preview.txt')
+        after.pop(str(Path('text-storyboards/events.jsonl')))
         self.assertEqual(after, before)
+        events = metrics.read_events(self.project)
+        self.assertEqual([r['scene'] for r in events], ['SC0001', 'SC0002'])
+        self.assertEqual([r['event_id'] for r in events], result['preview_event_ids'])
+        self.assertTrue(all(r['artifact']['output_sha256'] == hashlib.sha256(preview.read_bytes()).hexdigest()
+                            for r in events))
         self.assertIn('预览01-场景1-分镜1', preview.read_text(encoding='utf-8'))
         self.assertEqual(result['semantic_review'], 'not_performed')
         self.assertEqual(result['status'], 'checked')
@@ -153,6 +161,116 @@ class TextDeliveryIntegration(unittest.TestCase):
         self.assertEqual(preview.read_text(encoding='utf-8'),
                          delivery.render_units(*delivery.prepare(self.project, self.draft)[:2], preview=True))
         self.assertFalse((self.project / batch_naming.REGISTRY).exists())
+
+    def test_auto_preview_retry_reuses_exact_artifact_without_new_events(self):
+        first = delivery.preview(self.project, self.draft)
+        before = self.snapshot()
+        again = delivery.preview(self.project, self.draft)
+        self.assertTrue(again['preview_reused'])
+        self.assertEqual(again['preview_event_ids'], first['preview_event_ids'])
+        self.assertEqual(again['output'], first['output'])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_auto_preview_preserves_damaged_artifact_and_allocates_new_version(self):
+        first = delivery.preview(self.project, self.draft)
+        old = Path(first['output'])
+        old.write_bytes(b'externally modified preview')
+        again = delivery.preview(self.project, self.draft)
+        self.assertNotEqual(again['output'], first['output'])
+        self.assertEqual(old.read_bytes(), b'externally modified preview')
+        self.assertFalse(again['preview_reused'])
+
+    def test_preview_failures_never_allow_manual_success_event(self):
+        before = self.snapshot()
+        self.output.parent.mkdir(exist_ok=True)
+        self.output.write_bytes(b'existing version')
+        failed_before = self.snapshot()
+        self.cli('storyboard_text_delivery.py', 'preview', '--project', self.project,
+                 '--draft', self.draft, '--output', self.output, success=False)
+        result = self.cli('storyboard_text_delivery.py', 'event', '--project', self.project,
+                          '--name', 'previewed', '--scene', 'SC0001', success=False)
+        self.assertIn('不能手工', result['message'])
+        self.assertEqual(self.snapshot(), failed_before)
+        self.assertFalse(metrics.read_events(self.project))
+        self.assertEqual(self.output.read_bytes(), b'existing version')
+        self.assertEqual(before['session.json'], self.snapshot()['session.json'])
+
+    def test_parse_render_write_and_verification_failures_record_no_success(self):
+        bad = self.write_draft('bad.txt', 'not a storyboard')
+        with self.assertRaises(ValueError):
+            delivery.preview(self.project, bad)
+        with patch.object(delivery, 'render_units', side_effect=ValueError('synthetic render failure')):
+            with self.assertRaisesRegex(ValueError, 'synthetic render'):
+                delivery.preview(self.project, self.draft)
+        with patch.object(delivery, 'write_preview', side_effect=OSError('synthetic write failure')):
+            with self.assertRaisesRegex(OSError, 'synthetic write'):
+                delivery.preview(self.project, self.draft)
+        def corrupt(target, payload):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b'not the rendered payload')
+        with patch.object(delivery, 'write_preview', side_effect=corrupt):
+            with self.assertRaisesRegex(ValueError, '核验失败'):
+                delivery.preview(self.project, self.draft)
+        self.assertFalse(metrics.read_events(self.project))
+
+    def test_draft_change_during_render_is_rejected_before_writing(self):
+        render = delivery.render_units
+        def changed(*args, **kwargs):
+            result = render(*args, **kwargs)
+            self.draft.write_text(self.authored_text(label='changed during render'), encoding='utf-8')
+            return result
+        with patch.object(delivery, 'render_units', side_effect=changed):
+            with self.assertRaisesRegex(ValueError, '预览期间变化'):
+                delivery.preview(self.project, self.draft)
+        self.assertFalse(metrics.read_events(self.project))
+        self.assertFalse((self.project/'text-storyboards/previews').exists())
+
+    def test_event_failure_keeps_written_artifact_and_reports_incomplete(self):
+        with patch.object(metrics, 'record_event', side_effect=OSError('synthetic log failure')):
+            with self.assertRaisesRegex(ValueError, '成功事件未全部记录'):
+                delivery.preview(self.project, self.draft)
+        saved = list((self.project/'text-storyboards/previews').glob('*.txt'))
+        self.assertEqual(len(saved), 1)
+        before = saved[0].read_bytes()
+        good = delivery.preview(self.project, self.draft)
+        self.assertNotEqual(Path(good['output']), saved[0])
+        self.assertEqual(saved[0].read_bytes(), before)
+        self.assertEqual(len(metrics.read_events(self.project)), 2)
+
+    def test_changed_draft_context_and_new_run_cannot_reuse_old_preview(self):
+        first = delivery.preview(self.project, self.draft)
+        self.draft.write_text(self.authored_text(label='revision'), encoding='utf-8')
+        changed = delivery.preview(self.project, self.draft)
+        self.assertNotEqual(changed['draft_sha256'], first['draft_sha256'])
+        self.assertNotEqual(changed['output'], first['output'])
+        state = d.load(self.project)
+        state['entry']['min'] = 5
+        d.write_json(self.project/'session.json', state)
+        context = delivery.preview(self.project, self.draft)
+        self.assertNotEqual(context['context_sha256'], changed['context_sha256'])
+        self.assertNotEqual(context['output'], changed['output'])
+        delivery.event(self.project, 'start')
+        run = delivery.preview(self.project, self.draft)
+        self.assertNotEqual(run['output'], context['output'])
+
+    def test_revoked_preview_is_preserved_but_cannot_be_reused(self):
+        first = delivery.preview(self.project, self.draft)
+        raw = (self.project/'text-storyboards/events.jsonl').read_bytes()
+        result = self.cli('storyboard_text_delivery.py', 'invalidate-event', '--project', self.project,
+                          '--event-id', first['preview_event_ids'][0], '--note', 'synthetic mistaken milestone')
+        self.assertEqual(result['invalidates'], first['preview_event_ids'][0])
+        self.assertTrue((self.project/'text-storyboards/events.jsonl').read_bytes().startswith(raw))
+        again = delivery.preview(self.project, self.draft)
+        self.assertNotEqual(again['output'], first['output'])
+        self.assertTrue(Path(first['output']).is_file())
+        self.assertEqual(len(delivery.timing(self.project)['invalidated_events']), 1)
+
+    def test_preview_cannot_overwrite_project_binding(self):
+        before = self.snapshot()
+        for path in (self.draft, self.project/'session.json', self.project/'script.txt'):
+            with self.assertRaises(ValueError):
+                delivery.preview(self.project, self.draft, output=path)
+        self.assertEqual(self.snapshot(), before)
 
     def test_merge_candidates_exclude_units_spanning_multiple_source_scenes(self):
         records = self.state['records']

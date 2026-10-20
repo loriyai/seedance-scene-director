@@ -173,12 +173,19 @@ def _parse_units(text, state):
 
 
 def _scene_characters(scene):
-    result = set(scene.get("character_ids", []))
+    return set(scene_asset_ids(scene)['characters'])
+
+
+def scene_asset_ids(scene):
+    """Legal scene references shared by the parser and read-only context view."""
+    characters = list(scene.get("character_ids", []))
     for track in scene.get("character_appearances", []):
-        result.add(track["initial_asset_id"])
+        characters.append(track["initial_asset_id"])
         for event in track.get("transitions", []):
-            result.update((event["from_asset_id"], event["to_asset_id"]))
-    return result
+            characters.extend((event["from_asset_id"], event["to_asset_id"]))
+    return {'characters': list(dict.fromkeys(characters)),
+            'scene_assets': [scene['scene_asset_id']],
+            'props': list(dict.fromkeys(scene.get('prop_ids', [])))}
 
 
 def _speaker(asset):

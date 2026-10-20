@@ -13,7 +13,9 @@ import re
 
 POLICY = 'storyboard-rule-domains-v1'
 REQUIRED_FILES = (
-    'SKILL.md', 'references/runtime.md', 'references/storyboard-contract.md',
+    'SKILL.md', 'references/runtime.md',
+    'references/storyboard-rules.md', 'references/storyboard-workflow.md',
+    'references/storyboard-text-format.md', 'references/execution-contract.md',
     'references/rule-domains.md', 'assets/fixed-header.txt',
     'assets/fixed-header-visual-v2.txt', 'scripts/director.py',
     'scripts/review_gate.py', 'scripts/scene_review.py', 'scripts/creative_rules.py',
@@ -23,13 +25,10 @@ REQUIRED_FILES = (
     'scripts/staging_preflight.py', 'scripts/dialogue_layout.py',
     'scripts/speech_timing_audit.py', 'scripts/audio_sources.py',
     'scripts/prop_reference_review.py', 'scripts/group_reference_review.py',
-    'references/storyboard-authoring.md', 'references/scene-review-workflow.md',
-    'references/cinematic-rules.md', 'references/continuity-state.md',
-    'references/performance-direction.md', 'references/shot-options.md',
-    'references/output-format.md', 'references/asset-workflow.md',
+    'references/asset-workflow.md',
     'modules/screenplay-standardizer/INSTRUCTIONS.md',
-    'references/asset-image-design.md', 'references/draft-assembly.md',
-    'references/draft-revision.md', 'references/state-effects.md', 'scripts/state_effects.py',
+    'references/asset-image-design.md',
+    'scripts/state_effects.py',
     'modules/screenplay-standardizer/references/asset-ledger.md',
     'modules/screenplay-standardizer/scripts/character_variants.py',
 )

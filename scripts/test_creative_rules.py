@@ -40,12 +40,12 @@ class CreativeRuleDomainsTests(unittest.TestCase):
         # accidentally become the rules under test.
         self.put('scripts/director.py', DIRECTOR)
         self.put('scripts/creative_rules.py', Path(rules.__file__).read_text(encoding='utf-8'))
-        self.put('references/storyboard-contract.md', '# Contract\nKeep source wording.\n')
+        self.put('references/storyboard-rules.md', '# Contract\nKeep source wording.\n')
         self.put('references/runtime.md', '# Runtime\n'
                  '<!-- rule-domain:operations:start dependencies -->\n'
                  'Locate the Python interpreter.\n'
                  '<!-- rule-domain:operations:end dependencies -->\n')
-        self.put('SKILL.md', '# Entry\n[Contract](references/storyboard-contract.md)\n')
+        self.put('SKILL.md', '# Entry\n[Contract](references/storyboard-rules.md)\n')
 
     def put(self, relative, text):
         path = self.root / relative
@@ -58,7 +58,7 @@ class CreativeRuleDomainsTests(unittest.TestCase):
 
     def test_creative_reference_and_actual_validator_changes_invalidate(self):
         before = self.digest()
-        self.put('references/storyboard-contract.md', '# Contract\nKeep all source words.\n')
+        self.put('references/storyboard-rules.md', '# Contract\nKeep all source words.\n')
         changed = self.digest()
         self.assertNotEqual(before, changed)
         self.put('scripts/director.py', DIRECTOR.replace("<= 30", "<= 25"))

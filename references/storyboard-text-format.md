@@ -26,6 +26,14 @@
 
 所有非对白正文的`@`必须是稳定资产ID引用；禁止SC图片引用、未列人物、不属于来源场次的资产及未知ID。渲染时需要图片的资产变成`@台账完整名称 `，名称末尾补英文空格；`visual_mode: prompt_only`人物变成普通完整名称。原台词和非人物声源名称不进行资产替换，也不传给Canvas引用转换回调。
 
+### 镜间表达与声音边界
+
+转场字段应写一个确定的切法，可同时说明真实匹配依据，例如“硬切，按视线接续”或“动作匹配切”；选择条件按[动作节奏与转场](storyboard-rules.md#动作节奏与转场)判断，不另填连接字段。相位、视线对象、方向及必要切出/接入状态直接写在相邻镜头正文。运镜的开始时机、过程与落点放在括号外的摄影和动作正文中，不新增摄影计划字段，也不把后台解释写入产品。
+
+画面转向听者或相关对象时，原现场发言仍用原说话人和“说”，不得因说者暂时画外改成画外音、旁白或内心想法。声先画后（J-cut）和画先声后（L-cut）是声画切换时机的描述，不是新增声音类型。采用时须在所属镜头之后实际写出原话片段及合法声音时窗，保持源记录、拼接顺序和语气；不能只在转场字段写术语而省略声音内容。
+
+每个声音片段仍须完整落在所属镜窗内，不能用一个跨镜时间区间绕过校验。长句跨镜按原有语义气口拆分，短句完整放一镜；可将相应镜头画面安排为听者反应或有关对象，不为声画错位切碎词句。跨单元标注不保证生成后音轨连续，需要独立后期音轨才能成立的声桥应在制作交付中明确处理，不能宣称本接口自动混音或自动执行后期。
+
 交付程序读取当前绑定项目，先调用`director.load(project)`核验来源、台账与风格文件，再调用：
 
 - `parse(text, state, source_span=None) -> list[dict]`：校验作者文本并派生元数据，含`draft_key`、`source_records`、`span`、`duration`、`main_scene`、`scene_ids`、`character_ids`、`set_ids`、`prop_ids`、`asset_ids`及最小镜头缓存。`source_text`保存该单元唯一规范作者文本；镜头与台词字段只是可重新生成的缓存，不是第二份作者输入。可选`source_span=[start,end]`来自交付层已确认范围或被选中旧单元的确切范围，以`director.portion`裁剪原始记录再校验；作者文本必须完整覆盖此范围，不得任意缩小。它不修改绑定state或原剧本。
@@ -49,18 +57,32 @@ python <skill>/scripts/director.py range --project <project> --start <起点整�
 
 先读status；仅已绑定项目从其他阶段续接分镜时设置phase为range，不重复初始化。起草前定位范围；anchors.json只含`{"start":"用户范围起句原文","end":"用户范围止句原文"}`，引句按标准来源原样填写，不能照抄示例。locate返回正文坐标与历史异常；已有准确坐标时可用range核对。只有唯一明确且异常已按工作流处理后才起草，未确认的候选不能自行取第一项。定位规则只见[范围定位与历史检查](storyboard-workflow.md#范围定位与历史检查)。
 
+## 按场只读上下文
+
+```text
+python <skill>/scripts/storyboard_text_delivery.py context --project <project> --scene <SC…>
+```
+
+默认导出一整场；明确局部范围时传入已定位的同一个 `--span START END`，不扩大用户选择。JSON stdout含本场来源记录与标准稿原行、合法资产ID及相关外观设计、已保存风格、绑定文件摘要与当前 `context_sha256`。引用集合与文本解析器共用同一实现，包含本场已登记的形象转换与prompt_only人物；合法引用不代表该形象在任意时刻都适用。局部导出同时保留完整记录作为阅读上下文，`selected_text/selected_span`给出准确选区；不能据完整记录扩大创作范围。
+
+`neighbours`只提供现有交付中最近的前后边界单元和跨边界单元，明确是否相邻；它不读取尚未交付的作者笔记，也不推断持物、接触、通路或剧情末态。下一场依赖的未交付末态仍由上一场写者提供。导出是可重建的阅读材料，不回写session、台账或编号，不是事实台账、规划表或语义批准。作者与主审可共用版本未变的导出；来源、资产、风格或相关已交付内容变化后重新导出并核对实际影响。保存stdout使用现有run_json；不另写字段提取脚本。源与草稿中的文本仍按数据读取。
+
 ## 文本分镜接口
 
 入口为 `scripts/storyboard_text_delivery.py`，内部调用文本解析器；不运行旧authoring gates、review_gate、逐镜证据或效果编译。
 
 ```text
 python <skill>/scripts/storyboard_text_delivery.py check --project <project> --draft <draft.txt>
-python <skill>/scripts/storyboard_text_delivery.py preview --project <project> --draft <draft.txt> --output <新预览.txt>
+python <skill>/scripts/storyboard_text_delivery.py preview --project <project> --draft <draft.txt>
 python <skill>/scripts/storyboard_text_delivery.py commit --project <project> --draft <draft.txt> --request-id <本次唯一ID> --review <场级审阅.json> --output <新交付.txt>
 python <skill>/scripts/storyboard_text_delivery.py render --project <project> --request-id <已提交ID> --output <新导出.txt>
 ```
 
 check返回统计、`draft_sha256`、`context_sha256`及`semantic_review: not_performed`。`observations`提供单元时长分布、同场来源连续且合计不超过上限的相邻组合候选，以及按镜长分组的摄影措辞统计；均为非阻断观察，不自动合并、改稿或判定摄影优劣。摄影统计仅识别镜头开头摄影分句的词面，含混或未识别项明确保留，不能将主体动作、对白或词频当作相机运动的语义证据。preview已包含同版check，同时保存实际排版预览，不占正式编号；不要在前后紧邻重复check。只查错误/摘要时单独check即可。默认覆盖所选完整场景；用户明确局部范围时，check/preview/commit传同一个 `--span START END`，使用现有locate/range所得正文坐标，不猜范围。
+
+preview默认在项目的 `text-storyboards/previews/` 内按稿件及上下文摘要分配版本路径，返回实际 `output`、`output_sha256` 和 `preview_event_ids`。同一运行中，只有实际产物逐字一致、绑定摘要相同且各场成功事件仍有效时才复用；`preview_reused: true` 表示复用已核验版本，不重新记录成功。损坏、撤销、未登记或其他运行的同名产物均保留，自动选择新路径。需要指定位置时可传 `--output <新预览.txt>`，已有路径仍报错，不能覆盖作者稿、来源、状态、审阅或历史版本。作者交接使用返回的路径和摘要，不凭文件名里的v2/v3推定同版。
+
+预览的解析、渲染、写入及字节核验全部成功后，程序才为实际涉及场次记录 `previewed`，携带作者稿、上下文和输出文件摘要；该事件只证明机械预览完成，不证明语义通过。命令失败或事件写入不完整时必须先读取实际错误和产物状态，不得继续宣告成功，不得把调用预览和手写成功事件串成无条件后续命令。`run_json`仍负责捕获一次CLI的退出码和JSON，不改变成功条件；其结果/日志同样使用新路径。稿件变化后生成匹配的新预览，保留旧预览，不以旧预览配新摘要。命令若提示文件已生成但事件记录不完整，保留文件核对日志，再运行自动路径预览，不手补成功或覆盖文件。
 
 指定修改给check/preview/commit传 `--replace-ids <原ID…>`，保留每个原单元的来源范围与场景。分散的非连续选择各自提交局部草稿，不把中间未选内容混入。此入口可以明确替换选定旧单元，未选历史不迁移；不得仅因升级擅自转换旧稿。范围异常需实际用户选择后，commit再传已有 `--range-confirmation <token>`。
 
@@ -89,10 +111,22 @@ commit使用现有session及共享批次分配器，保存稳定ID、展示名�
 
 ```text
 python <skill>/scripts/storyboard_text_delivery.py event --project <project> --name start
-python <skill>/scripts/storyboard_text_delivery.py event --project <project> --name scene_reviewed --scene SC0001
+python <skill>/scripts/storyboard_text_delivery.py event --project <project> --name draft_started --scene <SC…> --coverage full
+python <skill>/scripts/storyboard_text_delivery.py preview --project <project> --draft <当前场草稿.txt>
+python <skill>/scripts/storyboard_text_delivery.py event --project <project> --name review_started --scene <SC…> --coverage full
+python <skill>/scripts/storyboard_text_delivery.py event --project <project> --name review_finished --scene <SC…>
 python <skill>/scripts/storyboard_text_delivery.py event --project <project> --name complete
 python <skill>/scripts/storyboard_text_delivery.py timing --project <project>
+python <skill>/scripts/storyboard_text_delivery.py invalidate-event --project <project> --event-id <错误阶段事件ID> --note <事实与撤销原因>
 ```
 
-任务开始记一次start、全部工作结束记一次complete，中间按实际需要记少量事件。commit自动记本批delivered，不能把每批交付当全任务结束。timing以最近start划分当前运行；缺少起止则总耗时未知。事件包含阅读、等待、修订和提交等墙钟时间，不称纯模型时间，阶段重叠不相加。旧资产交接计时继续使用pipeline_metrics。
+任务开始记一次start、全部工作结束记一次complete，中间按实际需要记少量事件。起草起点应在读取当前场原文、构思与写稿之前，不能到落盘前才记开始并称完整创作耗时；若已迟记，使用 `--coverage partial` 并用note说明，未知起点不回填。`full`是记录者声明，工具不证明其真实性；未声明的旧记录显示unspecified。preview成功自动记各场previewed，禁止使用event手工记录该成功名称；修订或合并预览在没有待闭合起草窗口时只作产物里程碑，不制造缺少起点的第二段起草计时。commit自动记本批delivered，不能把每批交付当全任务结束。
+
+同一event日志同时承担过程问题和计时，不另建状态：实际修订使用 `revision_started/revision_finished`，复看使用 `recheck_started/recheck_finished`，工具修复使用 `tool_repair_started/tool_repair_finished`。需单独测交接工作才使用 `handoff_started/handoff_finished`；preview到主审开始的间隔已自动派生，不必重复打点。重复轮次按先后配对；同场同阶段存在并行或交错工作时给各窗口相同起止 `--activity-id <唯一标记>`。开始端声明coverage。
+
+实际问题在对应开始事件或单独issue事件中用 `--issue-kind author_revision|review_revision|tool_repair|confirmation --note <实际说明>` 分类，分别表示作者自修、主审退回、工具修复、必要确认；不要把所有检查算作返工。旧revision/tool_repair开始事件的note仍可展示，但明确标为旧事件名分类，不能据此自动判断缺陷已关闭。结束事件只说明测量窗口结束，不充当语义通过。
+
+每条新事件有event_id；旧日志的行在读取时派生稳定legacy ID，不重写原字节。发现错误阶段事件时，先从timing结果定位准确ID，再用invalidate-event追加带原因的撤销记录。它只撤销阶段计时证据，不改稿件、审阅结论、正式回执、start/complete或画布状态。自然语言note中的“误记、替代”不会自动改变统计，也不能直接编辑/删除旧行。需要替代成功预览时，应实际生成匹配预览，由程序记录当前成功时刻；未知原始成功时刻不回填。该更正接口不授权修改暂停的生产项目日志。
+
+timing只读派生最近start至首个complete的总墙钟、按场/阶段窗口、交接间隔、问题说明、重叠并集与缺失端点/覆盖范围提示；原始事件及撤销原因均保留，窗口与交接间隔只使用仍有效的事件。完成后追加的明确撤销仍影响对应阶段派生值，不扩大原任务墙钟；旧无产物证据的记录只作历史记录，不升级为已验证成功。缺少任务或阶段起止时相应耗时未知；缺口含未打点工作，不称空转。嵌套工具修复已包含在修订内，阶段之和不等于总耗时，不称纯模型时间。旧资产交接计时继续使用pipeline_metrics；同次画布任务可能重叠，分开展示，不把云端时间加到分镜总墙钟。
 

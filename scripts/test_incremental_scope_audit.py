@@ -267,7 +267,7 @@ class RuleDomainAuditTests(unittest.TestCase):
             self.assertNotEqual(sr.rules_digest(), before)
 
     def test_photography_sound_render_and_character_rules_are_bound(self):
-        for name in ('references/cinematic-rules.md', 'references/storyboard-authoring.md',
+        for name in ('references/storyboard-rules.md', 'references/storyboard-text-format.md',
                      'scripts/authoring_gates.py', 'scripts/dialogue_layout.py',
                      'assets/fixed-header.txt',
                      'modules/screenplay-standardizer/scripts/character_variants.py', 'SKILL.md'):
@@ -280,8 +280,8 @@ class RuleDomainAuditTests(unittest.TestCase):
                 path.write_bytes(original)
 
     def test_missing_required_rule_fails_closed(self):
-        (self.root / 'references/storyboard-authoring.md').unlink()
-        with self.assertRaisesRegex(ValueError, '规则文件缺失.*storyboard-authoring'):
+        (self.root / 'references/storyboard-rules.md').unlink()
+        with self.assertRaisesRegex(ValueError, '规则文件缺失.*storyboard-rules'):
             sr.rules_digest()
 
 

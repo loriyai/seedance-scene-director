@@ -34,47 +34,17 @@ python <skill>/scripts/director.py range --project <project> --start <起点整�
 
 只有旧JSON的既有替换commit保留原自动局部同步行为；scene-text-v1以本页的显式节点操作为准。none-v1不创建或检查黑幕；历史黑幕回执和冻结任务按原协议读取，不因安装改节点/连线。
 
-## 明确旧格式的接口
+## 历史回执兼容
 
-以下仅供用户明确继续旧JSON稿或读取旧回执。旧字段权威见[旧分镜契约](storyboard-contract.md)，装配、动作效果、修订分别见[draft-assembly](draft-assembly.md)、[state-effects](state-effects.md)、[draft-revision](draft-revision.md)。它们不是新文字稿交付步骤。
+历史reference-v1/v2/v3及scene-text-v1回执按保存格式读取和重导出，安装不迁移项目或刷新历史审阅摘要。已有回执使用下列命令；输出须为新路径，具体保护沿原接口执行。
 
 ```text
-python <skill>/scripts/director.py check --project <project> --request <旧格式batch.json> --require-workflow
-python <skill>/scripts/review_gate.py prepare --project <project> --request <旧格式batch.json> --report <旧格式最终复核.json> --require-workflow
-python <skill>/scripts/director.py commit --project <project> --request <旧格式batch.json> --review <旧格式最终复核.json> --output <新交付.txt> --require-workflow
+python <skill>/scripts/director.py render --project <project> --request-id <已保存请求ID> --output <新导出.txt>
 ```
 
-沿原协议和脚本--help确定旧报告/冻结接口，不把新场级报告传给旧gate。不补改历史rules_sha256，不自动迁移已交付receipt。旧PROD001问题本轮未修，边界见[移除记录](storyboard-removal-record.md#旧缺陷与兼容边界)。
+新创作和用户明确采用文字路径的指定修改使用[文本接口](storyboard-text-format.md#文本分镜接口)，不进入旧装配、状态效果、逐镜依赖或旧审阅链。新场级报告不能传给旧review_gate，旧JSON请求也不能传给文本入口。
 
-## 历史锚点索引
-
-### 范围坐标
-
-新文字范围见[文本语法](storyboard-text-format.md)，旧JSON见[旧范围坐标](storyboard-contract.md#范围坐标)。
-
-### 请求结构
-
-新稿只交文本；旧JSON见[旧请求结构](storyboard-contract.md#请求结构)。
-
-### 表演母稿与关键动作
-
-新稿见[创作规则总集](storyboard-rules.md)，旧字段见[旧契约](storyboard-contract.md#表演母稿与关键动作)。
-
-### 台词表现字段delivery
-
-新稿声音写文本标记；旧delivery只见[旧字段](storyboard-contract.md#台词表现字段delivery)。
-
-### 最终稿复核与估时诊断
-
-新稿见本页文本接口；旧报告见[旧契约](storyboard-contract.md#最终稿复核与估时诊断)。
-
-### 引用与统计
-
-新稿引用/统计由文本适配器派生；旧字段见[旧契约](storyboard-contract.md#引用与统计)。
-
-### 可复用布景
-
-SC/LOC/SET身份及版本见[资产主流程](asset-workflow.md)，旧字段接口见[旧契约](storyboard-contract.md#可复用布景)。
+用户明确继续编辑旧JSON时，保留原稿结构、来源范围和历史版本，依据实际保存的请求及相应脚本--help使用兼容接口；这些实现仍被历史操作及回归调用，不是新文字稿前置。旧流程可能返回原有问题；兼容保留不表示已修复，例如scene_review.verify_reuse_evidence仍按列表顺序比较复用警告键。不能为通过旧检查重写历史证据或自动切换生产格式。
 
 ## 本地验证
 
