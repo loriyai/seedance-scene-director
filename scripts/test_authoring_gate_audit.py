@@ -127,6 +127,7 @@ class SingleWarningSourceTests(unittest.TestCase):
                  dialogue_layout='semantic-v2', voice_direction='event-inheritance-v1',
                  audio_plan=[{'record': 'L1', 'parts': [part]}],
                  audio=[dict(part, record='L1', character_id='CHAR0001', voice='说', units=6, speed='常速')])
+        d.dialogue_layout.prepare_render_policy(u)
         u['shots'][0]['dialogue_parts'] = [dict(part, record='L1')]
         u['audio_preflight'] = copy.deepcopy(assess(self.state, u)['semantic_template'])
         u['audio_preflight'].update(reviewer='fictional writer', basis='虚构回归样例在一秒中急促表达请求，按该指定窗口核对片段发音与停顿。')

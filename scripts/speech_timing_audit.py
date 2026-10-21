@@ -2,9 +2,7 @@
 import re
 import math
 
-from dialogue_layout import pause_seconds
-
-SPEEDS = {'常速': (4.0, 5.2), '快节奏': (4.5, 5.8), '情绪慢速': (3.3, 4.4)}
+from dialogue_layout import pause_seconds, SPEEDS, PAUSE_RANGES
 
 
 def audit(unit):
@@ -52,10 +50,12 @@ def audit(unit):
             units.append(value)
             if i and gaps[i] > .001:
                 boundary = parts[i-1]['text'].rstrip()
-                limit = .5 if boundary and boundary[-1] in '。？！?!；;' else .25
-                if boundary and boundary[-1] in '…—～~':
-                    limit = .5
-                if gaps[i] > limit + .001:
+                mark = boundary[-1:] if boundary else ''
+                limit = (PAUSE_RANGES['sentence'][1] if mark in '。？！?!' and mark
+                         else PAUSE_RANGES['comma'][1] if mark in '，、,' and mark else None)
+                # Other punctuation and unmarked semantic breaks require context,
+                # not a mechanically borrowed comma/sentence threshold.
+                if limit is not None and gaps[i] > limit + .001:
                     warn('分句间停顿偏长需复核', part=i+1, gap_seconds=gaps[i],
                          basis=part.get('gap_basis', ''), review='核对原文情绪、接话或动作依据；不要求所有分句零间隔。')
             if value is None:

@@ -22,9 +22,9 @@ import batch_naming
 import audio_sources
 HEADER_SHA = "8001822afdf324cbbfa3eb284b2a03ccbde084b2e70fa66763a26b5c738e5962"
 HEADER_POLICY = "visual-only-v2"
-VISUAL_HEADER_SHA = "cd5eb2c7a9c50b6d6962bf8fe00ae53cb32b1f36e4d050a83d2e3508e4fdf7a6"
+VISUAL_HEADER_SHA = "8001822afdf324cbbfa3eb284b2a03ccbde084b2e70fa66763a26b5c738e5962"
 STYLES = {"1": "3D国风动漫,暗黑武侠/超写实仙侠风格", "2": "3D国风动漫，眷思量风格，东方奇幻唯美风格"}
-SPEEDS = {"常速": (4.0, 5.2), "快节奏": (4.5, 5.8), "情绪慢速": (3.3, 4.4)}
+SPEEDS = dialogue_layout.SPEEDS
 FRAMINGS = {"大远景", "大全景", "远景", "全景", "中景", "中近景", "近景", "特写"}
 CLOSE = {"近景", "特写"}
 OUTPUT_FORMAT = "reference-v3"
@@ -841,6 +841,8 @@ def validate(state, request, partial=False):
         if unit.get("audio"):
             require(unit.get("dialogue_layout") == dialogue_layout.POLICY,
                     "新生成/修改的有声单元须采用semantic-v2台词布局；旧交付仅保留读取和渲染")
+            require(unit.get("speech_render_policy") == dialogue_layout.SPEECH_RENDER_POLICY,
+                    "新生成/修改的有声单元须在预览前登记speech_render_policy=explicit-cues-v1；历史回执仅保留读取和渲染")
     request = resolved_request(state, request)
     units = request["units"]
     from shot_dependencies import validate_request as validate_dependencies, scope_warning

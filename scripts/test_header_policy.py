@@ -18,7 +18,7 @@ class HeaderPolicyTests(unittest.TestCase):
         self.unit = self.harness.unit([0, 9])
         self.unit.update(id='fictional-header-unit', style='3D国漫', black_reference_mode='none-v1')
 
-    def test_legacy_unit_keeps_original_header_and_visual_version_changes_only_header(self):
+    def test_requested_current_header_and_legacy_render_selection(self):
         original = copy.deepcopy(self.unit)
         legacy = d.render_unit(self.state, self.unit)
         current = d.render_unit(self.state, dict(self.unit, header_policy=d.HEADER_POLICY))
@@ -33,7 +33,7 @@ class HeaderPolicyTests(unittest.TestCase):
         for phrase in ('composed and graceful movements', 'natural blinking',
                        'Subtle micro-expressions', 'breathing chest movement',
                        'clothing fluttering gently in the wind'):
-            self.assertNotIn(phrase, current)
+            self.assertIn(phrase, current)
 
     def test_authoring_preview_uses_current_header_without_mutating_draft(self):
         original = copy.deepcopy(self.unit)

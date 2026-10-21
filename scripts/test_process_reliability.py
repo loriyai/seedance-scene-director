@@ -21,10 +21,10 @@ import test_video_write_receipt as video_fixture
 class FragmentTimingChecks(unittest.TestCase):
     def unit(self):
         return {'audio': [{'record': 'L1', 'text': '我们继续，现在出发。', 'units': 8,
-                           'start': 0, 'end': 2.58, 'pause': .58, 'speed': '常速'}],
+                           'start': 0, 'end': 2.05, 'pause': .45, 'speed': '常速'}],
                 'shots': [{'dialogue_parts': [
-                    {'record': 'L1', 'text': '我们继续，', 'start': 0, 'end': 1.14, 'pause': .14},
-                    {'record': 'L1', 'text': '现在出发。', 'start': 1.24, 'end': 2.58, 'pause': .34}]}]}
+                    {'record': 'L1', 'text': '我们继续，', 'start': 0, 'end': .95, 'pause': .15},
+                    {'record': 'L1', 'text': '现在出发。', 'start': 1.05, 'end': 2.05, 'pause': .2}]}]}
 
     def test_natural_nonzero_gap_is_allowed_without_rewriting(self):
         unit = self.unit()
@@ -35,15 +35,15 @@ class FragmentTimingChecks(unittest.TestCase):
     def test_whole_event_rate_cannot_hide_an_impossible_last_fragment(self):
         unit = self.unit()
         # Same whole-event duration/units, but almost all time went to part one.
-        unit['shots'][0]['dialogue_parts'][0]['end'] = 1.77
-        unit['shots'][0]['dialogue_parts'][1]['start'] = 1.87
+        unit['shots'][0]['dialogue_parts'][0]['end'] = 1.5
+        unit['shots'][0]['dialogue_parts'][1]['start'] = 1.6
         issues = speech.audit(unit)
         self.assertTrue(any(w['kind'] == '片段估计净语速超档' and w['part'] == 2 for w in issues))
 
     def test_numbers_require_reading_units_and_expose_short_countdown(self):
         unit = self.unit()
         part = unit['shots'][0]['dialogue_parts'][1]
-        part.update(text='倒计时19分59秒。', start=1.87)
+        part.update(text='倒计时19分59秒。', start=1.6)
         unit['audio'][0].update(text='我们继续，倒计时19分59秒。', units=14)
         self.assertTrue(any(w['kind'] == '片段发音单位待核' for w in speech.audit(unit)))
         part.update(spoken_units=10, spoken_basis='倒计时十九分五十九秒，十个发音单位')
@@ -53,7 +53,7 @@ class FragmentTimingChecks(unittest.TestCase):
     def test_double_counted_pause_and_long_gap_are_visible(self):
         unit = self.unit()
         parts = unit['shots'][0]['dialogue_parts']
-        parts[1]['start'] = 1.94
+        parts[1]['start'] = 1.4
         issues = speech.audit(unit)
         self.assertTrue(any(w['kind'] == '片段停顿与整句总停顿不一致' for w in issues))
         self.assertTrue(any(w['kind'] == '分句间停顿偏长需复核' for w in issues))

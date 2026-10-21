@@ -277,6 +277,30 @@ class JobInputGuard:
         self.stamps = after
 
 
+def event_id(event):
+    """Derive stable IDs for legacy events without rewriting their history."""
+    return event.get("event_id") or "event-" + c.digest([
+        event["job_id"], event.get("event", "completed"),
+        event.get("signature"), event.get("created_at")])[:32]
+
+
+def current_events(items, events, binding, control):
+    """Only the current target's immutable manifests can identify old events."""
+    by_id = {job["job_id"]: job for job in items if job["binding"] == binding}
+    reports = control.get("event_reports", {})
+    result = []
+    for event in events:
+        job = by_id.get(event.get("job_id"))
+        if not job or event.get("binding", job["binding"]) != binding:
+            continue
+        identifier = event_id(event)
+        result.append({**event, "event_id": identifier, "binding": job["binding"],
+                       "request_id": job["options"].get("request_id"),
+                       "unit_ids": job["options"].get("ids", []),
+                       "reported": identifier in reports})
+    return result
+
+
 def status(project):
     project = Path(project)
     items = manifests(project)
@@ -290,7 +314,7 @@ def status(project):
     assets = [j for j in jobs if j["job_id"] in current_asset_ids]
     latest = assets[-1] if assets else None
     control = read(directory(project) / "control.json", {})
-    events = read(directory(project) / "events.json", [])
+    events = current_events(items, read(directory(project) / "events.json", []), binding, control)
     choice = control.get("image_choice", {})
     ready = bool(latest and latest["status"] == "completed")
     if ready:
@@ -301,10 +325,71 @@ def status(project):
             validate_job(project, latest_manifest)
         except (ValueError, OSError, KeyError, TypeError):
             ready = False
+    states = {row["job_id"]: row for row in jobs}
+    # A resolved/replaced failure remains history, but is not a fresh warning.
+    latest_events = {event["job_id"]: event["event_id"] for event in events}
+    pending_events = [event for event in events if not event["reported"]
+                      and latest_events[event["job_id"]] == event["event_id"]
+                      and states[event["job_id"]]["status"] == event.get("event", "completed")]
+    video_followups = []
+    handled = control.get("video_followups", {})
+    by_id = {job["job_id"]: job for job in items}
+    for event in events:
+        if (event["kind"] != "videos" or event.get("event", "completed") != "completed"
+                or states[event["job_id"]]["status"] != "completed"
+                or event["job_id"] in handled):
+            continue
+        try:
+            validate_job(project, by_id[event["job_id"]])
+        except (ValueError, OSError, KeyError, TypeError):
+            continue
+        video_followups.append({"job_id": event["job_id"], "event_id": event["event_id"],
+                                "request_id": event["request_id"], "unit_ids": event["unit_ids"],
+                                "completion_reported": event["reported"]})
     return {"jobs": jobs, "worker_active": active, "paused": control.get("paused", False),
             "assets_ready": ready, "image_choice_available": ready and choice.get("asset_job_id") != latest["job_id"],
             "asset_job_id": latest["job_id"] if latest else None,
-            "events": events}
+            "events": events, "pending_events": pending_events,
+            "video_followups": video_followups, "video_followup_available": bool(video_followups)}
+
+
+def report_event(project, identifier):
+    """Called by the foreground only after it actually reports this event."""
+    with metadata_lock(project):
+        current = status(project)
+        event = next((row for row in current["events"] if row["event_id"] == identifier), None)
+        d.require(event is not None, "事件不存在或不属于当前画布，不能标记已报告")
+        if event["reported"]:
+            return {"status": "already_reported", "event_id": identifier}
+        d.require(any(row["event_id"] == identifier for row in current["pending_events"]),
+                  "事件已解决或被替代，请读取当前待报告事件")
+        control = read(directory(project) / "control.json", {})
+        control.setdefault("event_reports", {})[identifier] = {"job_id": event["job_id"],
+            "binding": event["binding"], "reported_at": time.time()}
+        d.write_json(directory(project) / "control.json", control)
+    return {"status": "reported", "event_id": identifier}
+
+
+def video_followup(project, job_id, action):
+    """Record an offered/handled next step; never dispatch work or change phase."""
+    d.require(action in ("shown", "continue", "modify", "finish", "already-directed"), "无效后续入口处理方式")
+    with metadata_lock(project):
+        current = status(project)
+        event = next((row for row in current["events"] if row["job_id"] == job_id
+                      and row["kind"] == "videos" and row.get("event", "completed") == "completed"), None)
+        d.require(event is not None and event["reported"], "先向用户报告本批视频节点的完整核验结果")
+        job = next(row for row in manifests(project) if row["job_id"] == job_id)
+        d.require(job_state(project, job)["status"] == "completed", "视频任务尚未完整核验")
+        validate_job(project, job)
+        control = read(directory(project) / "control.json", {})
+        followups = control.setdefault("video_followups", {})
+        previous = followups.get(job_id)
+        if previous and (previous["action"] == action or action == "shown"):
+            return {"status": "already_handled", "job_id": job_id, "action": previous["action"]}
+        d.require(not previous or previous["action"] == "shown", "本批后续入口已处理；新请求直接按用户指示执行")
+        followups[job_id] = {"action": action, "binding": event["binding"], "updated_at": time.time()}
+        d.write_json(directory(project) / "control.json", control)
+    return {"status": "shown" if action == "shown" else "handled", "job_id": job_id, "action": action}
 
 
 def pause(project):
@@ -378,25 +463,27 @@ def start_worker(project):
 
 
 def notify_desktop(text, warning=False):
-    # Best effort desktop notification. Durable events remain authoritative.
+    # Starting a helper is not evidence that a popup was shown or read.
     if os.name != "nt":
-        return
+        return {"status": "not_attempted", "reason": "unsupported_platform"}
+    attempted_at = time.time()
     script = "$w=New-Object -ComObject WScript.Shell; $null=$w.Popup('" + text.replace("'", "''") + "',8,'小云雀同步'," + ("48" if warning else "64") + ")"
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     try:
-        subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-                         creationflags=subprocess.CREATE_NO_WINDOW, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
-        pass
+        process = subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+                                   creationflags=subprocess.CREATE_NO_WINDOW, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        return {"status": "start_failed", "attempted_at": attempted_at, "error": c.safe_message(exc)}
+    return {"status": "started_result_unknown", "attempted_at": attempted_at, "pid": process.pid}
 
 
 def notify_completion(text):
-    notify_desktop(text)
+    return notify_desktop(text)
 
 
 def notify_attention(text):
-    notify_desktop(text, warning=True)
+    return notify_desktop(text, warning=True)
 
 
 def publish_event(project, job, state):
@@ -424,10 +511,24 @@ def publish_event(project, job, state):
         target = ("，节点" + error["node_id"]) if error.get("node_id") else ""
         command = ("，命令" + error["command"]) if error.get("command") else ""
         message = f"{label}同步需要处理，已核验{count}/{state.get('total', '?')}项{target}{command}：" + c.safe_message(error.get("message", error.get("code", "")))
-    events.append({"job_id": job["job_id"], "kind": job["kind"], "event": event,
-                   "count": count, "message": message, "created_at": time.time(), **payload})
+    published = {"job_id": job["job_id"], "kind": job["kind"], "event": event,
+                 "count": count, "total": state.get("total"), "binding": job["binding"],
+                 "message": message, "created_at": time.time(), **payload}
+    published["event_id"] = event_id(published)
+    published["desktop_notification"] = {"status": "attempt_outcome_unknown"}
+    events.append(published)
     d.write_json(directory(project) / "events.json", events)
-    (notify_completion if event == "completed" else notify_attention)(message)
+    if job["binding"] != c.read_state(project).get("binding"):
+        notification = {"status": "not_attempted", "reason": "non_current_canvas"}
+    else:
+        try:
+            notification = (notify_completion if event == "completed" else notify_attention)(message)
+        except Exception as exc:
+            # Notification failures must not reclassify completed remote work.
+            notification = {"status": "attempt_outcome_unknown", "error": c.safe_message(exc)}
+    published["desktop_notification"] = (notification if isinstance(notification, dict)
+                                          else {"status": "attempt_outcome_unknown"})
+    d.write_json(directory(project) / "events.json", events)
 
 
 def recover_dead_operation_locks(project):
@@ -570,7 +671,7 @@ def main():
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("enqueue", "start", "worker", "status", "pause", "resume", "image-choice", "recover-assets"))
+    parser.add_argument("command", choices=("enqueue", "start", "worker", "status", "pause", "resume", "image-choice", "recover-assets", "report-event", "video-followup"))
     parser.add_argument("--project", type=Path, required=True)
     parser.add_argument("--kind", choices=("assets", "videos", "references", "images"))
     parser.add_argument("--request-id")
@@ -579,6 +680,9 @@ def main():
     parser.add_argument("--decisions", type=Path)
     parser.add_argument("--start", action="store_true")
     parser.add_argument("--choice", choices=("1", "2"))
+    parser.add_argument("--event-id")
+    parser.add_argument("--job-id")
+    parser.add_argument("--action", choices=("shown", "continue", "modify", "finish", "already-directed"))
     parser.add_argument("--operation-id")
     parser.add_argument("--fingerprint")
     parser.add_argument("--apply", action="store_true")
@@ -592,6 +696,12 @@ def main():
             result = recover_assets(args.project, args.operation_id, args.apply, args.fingerprint)
         elif args.command == "image-choice":
             result = image_choice(args.project, args.choice)
+        elif args.command == "report-event":
+            d.require(args.event_id, "必须指定已向用户报告的事件ID")
+            result = report_event(args.project, args.event_id)
+        elif args.command == "video-followup":
+            d.require(args.job_id and args.action, "必须指定视频任务ID及实际后续处理方式")
+            result = video_followup(args.project, args.job_id, args.action)
         else:
             function = {"start": start_worker, "worker": run_worker, "status": status, "pause": pause, "resume": resume}[args.command]
             result = function(args.project)

@@ -6,7 +6,7 @@ import dialogue_layout as dl
 
 
 class VoiceInheritanceChecks(unittest.TestCase):
-    def sample(self, *, modern=True, voice='说', speed='常速'):
+    def sample(self, *, modern=True, current=True, voice='说', speed='常速'):
         chunks = ['我先告诉你，', '这件事情很复杂，', '请听我说完。']
         event = dict(record='R1', character_id='CHAR0001', voice=voice,
                      text=''.join(chunks), start=0, end=6, pause=.62,
@@ -15,6 +15,8 @@ class VoiceInheritanceChecks(unittest.TestCase):
                     duration=6, audio=[event], shots=[])
         if modern:
             unit['voice_direction'] = dl.VOICE_POLICY
+        if current:
+            unit['speech_render_policy'] = dl.SPEECH_RENDER_POLICY
         for index, text in enumerate(chunks):
             unit['shots'].append(dict(start=index * 2, end=(index + 1) * 2,
                                      dialogue_parts=[dict(record='R1', text=text,
@@ -34,7 +36,7 @@ class VoiceInheritanceChecks(unittest.TestCase):
                 unit['audio'][0]['delivery'] = {'articulation': '略显吞吐'}
                 before = copy.deepcopy(unit)
                 dl.validate(unit)
-                self.assertEqual(self.rendered(unit), ['（语速：自然语速；咬字：略显吞吐）'] * 3)
+                self.assertEqual(self.rendered(unit), ['（咬字：略显吞吐）'] * 3)
                 self.assertEqual(unit, before)
                 self.assertEqual(''.join(part['text'] for part in self.parts(unit)), unit['audio'][0]['text'])
                 self.assertTrue(all('嘴' not in text and '回响' not in text for text in self.rendered(unit)))
@@ -59,19 +61,19 @@ class VoiceInheritanceChecks(unittest.TestCase):
         self.parts(unit)[1].update(delivery_reset=True,
                                   transition_basis='原文在第二分句明确恢复流畅表达')
         dl.validate(unit)
-        self.assertEqual(self.rendered(unit), ['（语速：自然语速；咬字：略显吞吐）', '', ''])
+        self.assertEqual(self.rendered(unit), ['（咬字：略显吞吐）', '', ''])
 
-    def test_nondefault_speed_renders_without_any_delivery_and_after_reset(self):
+    def test_estimation_speed_never_adds_a_cue_before_or_after_reset(self):
         for speed, label in (('快节奏', '较快语速'), ('情绪慢速', '放缓语速')):
             with self.subTest(speed=speed):
                 unit = self.sample(speed=speed)
                 dl.validate(unit)
-                self.assertEqual(self.rendered(unit), [f'（语速：{label}）'] * 3)
+                self.assertEqual(self.rendered(unit), ['', '', ''])
                 unit['audio'][0]['delivery'] = {'volume': '轻声'}
                 self.parts(unit)[1].update(delivery_reset=True,
                                           transition_basis='原文在第二分句明确恢复普通音量')
                 dl.validate(unit)
-                self.assertEqual(self.rendered(unit)[1:], [f'（语速：{label}）'] * 2)
+                self.assertEqual(self.rendered(unit), ['（音量：轻声）', '', ''])
 
     def test_neutral_speech_remains_unannotated_without_warning(self):
         unit = self.sample()
@@ -80,7 +82,7 @@ class VoiceInheritanceChecks(unittest.TestCase):
         self.assertEqual(dl.voice_warnings(unit), [])
 
     def test_legacy_v3_render_is_byte_identical_including_no_delivery_speed(self):
-        unit = self.sample(modern=False, speed='快节奏')
+        unit = self.sample(modern=False, current=False, speed='快节奏')
         parts = self.parts(unit)
         parts[0]['delivery'] = {'volume': '轻声'}
         dl.validate(unit)
@@ -120,7 +122,7 @@ class VoiceInheritanceChecks(unittest.TestCase):
         dl.attach(unit, plans)
         self.assertEqual(unit['audio'][0], before)
         self.assertEqual(unit['voice_direction'], dl.VOICE_POLICY)
-        self.assertEqual(self.rendered(unit), ['（语速：自然语速；发声质感：原有沙哑声线）'] * 3)
+        self.assertEqual(self.rendered(unit), ['（发声质感：原有沙哑声线）'] * 3)
         self.assertNotIn('recording_evidence', event)
 
     def test_unknown_policy_and_new_fields_without_opt_in_are_rejected(self):
@@ -138,9 +140,42 @@ class VoiceInheritanceChecks(unittest.TestCase):
             dl.validate(unit)
         for output_format in ('reference-v1', 'reference-v2'):
             unit = self.sample()
+            unit.pop('speech_render_policy')
             unit['output_format'] = output_format
             with self.assertRaisesRegex(ValueError, 'voice_direction须使用'):
                 dl.validate(unit)
+
+    def test_unversioned_inheritance_keeps_all_historical_speed_labels(self):
+        for speed, label in dl.SPEED_LABELS.items():
+            with self.subTest(speed=speed):
+                unit = self.sample(current=False, speed=speed)
+                unit['audio'][0]['delivery'] = {'volume': '轻声'}
+                before = copy.deepcopy(unit)
+                expected = [f'（音量：轻声；语速：{label}）'] * 3
+                self.assertEqual(self.rendered(unit), expected)
+                dl.validate(unit)
+                self.assertEqual(self.rendered(unit), expected)
+                self.assertEqual(unit, before)
+
+    def test_preparing_explicit_revision_changes_only_rendering_policy(self):
+        unit = self.sample(current=False, speed='情绪慢速')
+        unit['audio'][0]['delivery'] = {'articulation': '略显吞吐'}
+        before = copy.deepcopy(unit)
+        self.assertEqual(self.rendered(unit), ['（语速：放缓语速；咬字：略显吞吐）'] * 3)
+        self.assertIs(dl.prepare_render_policy(unit), unit)
+        self.assertEqual(self.rendered(unit), ['（咬字：略显吞吐）'] * 3)
+        self.assertEqual({k: v for k, v in unit.items() if k != 'speech_render_policy'}, before)
+        self.assertEqual(self.rendered(before), ['（语速：放缓语速；咬字：略显吞吐）'] * 3)
+
+    def test_unknown_render_policy_cannot_fall_back_or_be_overwritten(self):
+        unit = self.sample()
+        unit['speech_render_policy'] = 'future-policy'
+        before = copy.deepcopy(unit)
+        for operation in (lambda: dl.validate(unit), lambda: self.rendered(unit),
+                          lambda: dl.prepare_render_policy(unit)):
+            with self.assertRaisesRegex(ValueError, 'speech_render_policy'):
+                operation()
+        self.assertEqual(unit, before)
 
     def test_event_and_piece_delivery_share_strict_schema(self):
         invalid = (None, {}, [], '轻声', {'speed': '快节奏'}, {'mouth': '张嘴'},
@@ -217,7 +252,7 @@ class VoiceInheritanceChecks(unittest.TestCase):
             return text.replace('@陈默-基础形象 ', '<ROLE:real-node>')
         before = copy.deepcopy(unit)
         rendered = d.render_unit(state, unit, reference_text=convert)
-        self.assertEqual(rendered.count('内心想法（语速：自然语速；咬字：略显吞吐）'), 3)
+        self.assertEqual(rendered.count('内心想法（咬字：略显吞吐）'), 3)
         self.assertIn('<ROLE:real-node>内心想法', rendered)
         self.assertTrue(all('略显吞吐' not in text and '请听我说完' not in text for text in converted))
         self.assertEqual(unit, before)

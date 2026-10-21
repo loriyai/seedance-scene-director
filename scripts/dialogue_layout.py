@@ -4,6 +4,15 @@ import re
 POLICY = 'semantic-v2'
 LEGACY_POLICY = 'semantic-v1'
 VOICE_POLICY = 'event-inheritance-v1'
+SPEECH_RENDER_POLICY = 'explicit-cues-v1'
+# One numerical source for the legacy text-estimate consumers. These are
+# diagnostic ranges, not playback controls or mandatory speaking instructions.
+SPEEDS = {'常速': (4.8, 5.4), '快节奏': (4.8, 6.0), '情绪慢速': (3.8, 4.4)}
+PAUSE_RANGES = {'comma': (.1, .2), 'sentence': (.1, .3)}
+DEFAULT_RATE = sum(SPEEDS['常速']) / 2
+# Ellipses, dashes, colons and semicolons need contextual interpretation. This
+# fallback only weights an estimate; an explicitly registered pause replaces it.
+SEMANTIC_PAUSE_ESTIMATE = .26
 PUNCTUATION = '，、,。？！?!；;…—～~：:'
 TAILS = set('了呢吧啊呀哦嘛么啦呗哟喽的')
 DELIVERY_FIELDS = (('volume', '音量'), ('ending', '尾音'),
@@ -16,6 +25,19 @@ def require(ok, message):
 
 def compact(text):
     return ''.join(c for c in text if c.isalnum())
+
+def prepare_render_policy(unit):
+    """Version newly authored/rearranged v3 drafts before any preview or review.
+
+    Receipt readers never call this function. Re-exporting an old unit therefore
+    cannot silently replace its persisted rendering behavior.
+    """
+    require(unit.get('output_format') == 'reference-v3',
+            'speech_render_policy须使用reference-v3')
+    require(unit.get('speech_render_policy', SPEECH_RENDER_POLICY) == SPEECH_RENDER_POLICY,
+            '未知speech_render_policy，不能静默迁移')
+    unit['speech_render_policy'] = SPEECH_RENDER_POLICY
+    return unit
 
 def validate_delivery_value(unit, value):
     """Shared schema for event baselines and local transitions, never inference."""
@@ -31,6 +53,11 @@ def validate_delivery_value(unit, value):
                 f'delivery.{field}须为具体单行中文声音描述，不含引号、括号或资产引用')
 
 def validate_voice_policy(unit):
+    if 'speech_render_policy' in unit:
+        require(unit['speech_render_policy'] == SPEECH_RENDER_POLICY,
+                'speech_render_policy只支持explicit-cues-v1；历史交付省略以保留原渲染')
+        require(unit.get('output_format') == 'reference-v3',
+                'speech_render_policy须使用reference-v3')
     if 'voice_direction' in unit:
         require(unit['voice_direction'] == VOICE_POLICY,
                 'voice_direction只支持event-inheritance-v1；旧交付省略以保留原渲染')
@@ -82,16 +109,21 @@ def effective_delivery(unit, part, event):
     raise ValueError('声音表现解析的片段不属于当前单元声音事件')
 
 def delivery_text(part, event, unit=None):
-    """Render outside the unchanged quote; pace has one source of truth."""
+    """Render explicit cues; unversioned receipts retain their historical text."""
     modern = unit is not None and unit.get('voice_direction') == VOICE_POLICY
+    if unit is not None and 'speech_render_policy' in unit:
+        require(unit['speech_render_policy'] == SPEECH_RENDER_POLICY,
+                '未知speech_render_policy，不能按历史策略渲染')
+    explicit_only = unit is not None and unit.get('speech_render_policy') == SPEECH_RENDER_POLICY
     value = effective_delivery(unit, part, event) if modern else part.get('delivery')
-    if not value and not (modern and event['speed'] != '常速'):
+    if not value and (explicit_only or not (modern and event['speed'] != '常速')):
         return ''
     value = value or {}
     cues = []
     if 'volume' in value:
         cues.append('音量：' + value['volume'].strip())
-    cues.append('语速：' + SPEED_LABELS[event['speed']])
+    if not explicit_only:
+        cues.append('语速：' + SPEED_LABELS[event['speed']])
     cues.extend(label + '：' + value[key].strip() for key, label in DELIVERY_FIELDS[1:] if key in value)
     return '（' + '；'.join(cues) + '）'
 
@@ -117,12 +149,18 @@ def voice_warnings(unit):
     return warnings
 
 def pause_seconds(text):
-    """Repeated punctuation is a single semantic pause."""
-    return round(sum(.34 if any(c in '。？！?!；;' for c in cluster)
-                     else .26 if any(c in '…—～~' for c in cluster) else .14
-                     for cluster in re.findall(r'[，、,。？！?!；;…—～~：:]+', text)), 3)
+    """Estimate each punctuation cluster once, never replace an explicit pause."""
+    total = 0.0
+    for cluster in re.findall(r'[，、,。？！?!；;…—～~：:]+', text):
+        if any(c in '。？！?!' for c in cluster):
+            total += sum(PAUSE_RANGES['sentence']) / 2
+        elif any(c in '；;…—～~：:' for c in cluster):
+            total += SEMANTIC_PAUSE_ESTIMATE
+        else:
+            total += sum(PAUSE_RANGES['comma']) / 2
+    return round(total, 3)
 
-def estimate(text, units, rate=4.8):
+def estimate(text, units, rate=DEFAULT_RATE):
     require(type(units) is int and units > 0 and rate > 0, '发音单位和语速须有效')
     return round(units / rate + pause_seconds(text), 3)
 
@@ -134,6 +172,8 @@ def attach(unit, plans=None):
     this helper never guesses word cuts. Legacy receipts retain v1 links.
     """
     unit['dialogue_layout'] = LEGACY_POLICY if unit.get('output_format') == 'reference-v1' else POLICY
+    if unit.get('output_format') == 'reference-v3':
+        prepare_render_policy(unit)
     for shot in unit['shots']:
         shot['dialogue_parts'] = []
         shot.pop('dialogue_continuations', None)
@@ -202,7 +242,7 @@ def validate(unit):
             if t1-t0 <= 6+.001:
                 require(t1 <= shot['end']+.001, '可在单镜说完的短句必须完整落在一镜；调整切点或发声起点')
             if len(parts) == 1:
-                low = {'常速':4.0,'快节奏':4.5,'情绪慢速':3.3}[event['speed']]
+                low = SPEEDS[event['speed']][0]
                 if event['units']/low + event['pause'] <= 6+.001:
                     require(t1 <= shot['end']+.001, '不能把自然短句拉长后跨镜；应重排镜头')
             for j, following in enumerate(unit['shots']):

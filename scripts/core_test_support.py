@@ -55,6 +55,7 @@ def setup_skill_fixture(self):
                      'kind': 'action', 'text': '陈默将笔放在桌上'}]}
     self.unit = {'id': '场景1-分镜1', 'version': 1, 'span': [0, 8], 'duration': 4,
         'output_format': 'reference-v3',
+        'speech_render_policy': 'explicit-cues-v1',
         'scene_ids': ['SC0001'], 'main_scene': 'SC0001', 'character_ids': ['CHAR0001'],
         'prop_ids': ['PROP0001'], 'time': '白天', 'weather': '未明示', 'style': '3D国风动漫',
         'global': '@{CHAR0001} 站在桌前。', 'start_state': '站立', 'end_state': '放笔',

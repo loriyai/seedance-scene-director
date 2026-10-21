@@ -61,7 +61,8 @@ class PerformanceDirectionChecks(unittest.TestCase):
             'volume': '压低音量', 'ending': '平稳收住', 'articulation': '清楚连贯'}
         self.assertEqual(self.validate(unit), self.validate(original))
         rendered = self.render(unit)
-        self.assertIn('说（音量：压低音量；语速：自然语速；尾音：平稳收住；咬字：清楚连贯）：“我知道。”', rendered)
+        self.assertIn('说（音量：压低音量；尾音：平稳收住；咬字：清楚连贯）：“我知道。”', rendered)
+        self.assertNotIn('语速：', rendered)
         self.assertEqual(re.findall('：“(.*?)”', rendered), ['我知道。'])
         self.assertEqual(unit['audio'], original['audio'])
         self.assertEqual(unit['duration'], original['duration'])
@@ -83,8 +84,8 @@ class PerformanceDirectionChecks(unittest.TestCase):
         unit['shots'][0]['dialogue_parts'][0]['delivery'] = {'volume': '轻声'}
         unit['audio'][0]['speed'] = '情绪慢速'
         rendered = self.render(unit)
-        self.assertIn('语速：放缓语速', rendered)
-        self.assertNotIn('语速：自然语速', rendered)
+        self.assertIn('音量：轻声', rendered)
+        self.assertNotIn('语速：', rendered)
         self.assertTrue(any(w['kind'] == '估计净语速超档' for w in self.validate(unit)))
 
     def test_duplicate_pace_pause_and_visual_fields_are_rejected(self):
@@ -112,7 +113,7 @@ class PerformanceDirectionChecks(unittest.TestCase):
                 unit['shots'][0]['dialogue_parts'][0]['delivery'] = {'texture': '清晰自然'}
                 self.validate(unit)
                 rendered = self.render(unit)
-                self.assertIn(voice + '（语速：自然语速；发声质感：清晰自然）：“我知道。”', rendered)
+                self.assertIn(voice + '（发声质感：清晰自然）：“我知道。”', rendered)
                 shot_text = rendered.split('·00秒-', 1)[1]
                 self.assertNotIn('张嘴', shot_text)
                 self.assertNotIn('嘴部', shot_text)
@@ -129,7 +130,7 @@ class PerformanceDirectionChecks(unittest.TestCase):
             converted.append(value)
             return value.replace('@陈默-基础形象 ', '<ROLE:actual-node>')
         rendered = self.render(unit, convert)
-        self.assertIn('<ROLE:actual-node>说（音量：轻声；语速：自然语速）', rendered)
+        self.assertIn('<ROLE:actual-node>说（音量：轻声）', rendered)
         self.assertIn('：“@陈默，我知道。”', rendered)
         self.assertFalse(any('我知道' in value or '轻声' in value for value in converted))
 
@@ -151,7 +152,8 @@ class PerformanceDirectionChecks(unittest.TestCase):
         self.validate(unit)
         rendered = self.render(unit)
         self.assertEqual(''.join(re.findall('：“(.*?)”', rendered)), text)
-        self.assertEqual(rendered.count('语速：自然语速'), 2)
+        self.assertNotIn('语速：', rendered)
+        self.assertEqual(rendered.count('音量：自然音量'), 2)
         self.assertEqual(unit['audio'][0]['pause'], .48)
         self.assertNotIn('继续说', rendered)
 
@@ -173,6 +175,7 @@ class PerformanceDirectionChecks(unittest.TestCase):
     def test_legacy_renders_ignore_new_cues_and_new_validation_rejects_old_format(self):
         unit = self.sample()
         unit.pop('continuity')
+        unit.pop('speech_render_policy')
         for shot in unit['shots']:
             shot.pop('continuity')
         for version in ('reference-v1', 'reference-v2'):
@@ -197,6 +200,29 @@ class PerformanceDirectionChecks(unittest.TestCase):
         self.assertEqual(second['status'], 'already_committed')
         self.assertEqual(output.read_bytes(), initial)
         self.assertIn('音量：轻声', initial.decode('utf-8'))
+        self.assertNotIn('语速：', initial.decode('utf-8'))
+        self.assertEqual(self.state['receipts'][0]['units'][0]['speech_render_policy'], dl.SPEECH_RENDER_POLICY)
+
+    def test_new_request_requires_policy_before_preview_but_old_receipt_renders(self):
+        unit = self.sample()
+        unit['shots'][0]['dialogue_parts'][0]['delivery'] = {'volume': '轻声'}
+        current_text = self.render(unit)
+        unit.pop('speech_render_policy')
+        before = copy.deepcopy(unit)
+        with self.assertRaisesRegex(ValueError, '预览前登记speech_render_policy'):
+            self.validate(unit)
+        self.assertEqual(unit, before)
+        expected = current_text.replace('说（音量：轻声）', '说（音量：轻声；语速：自然语速）')
+        historical = copy.deepcopy(unit)
+        historical.update(id='场景1-分镜1', style='3D国漫')
+        output = self.fixture.project / 'outputs' / 'historical.txt'
+        receipt = {'output': str(output), 'units': [historical]}
+        d.render_receipt(self.state, receipt, self.fixture.project)
+        self.assertEqual(output.read_text(encoding='utf-8'), expected + '\n')
+        original = output.read_bytes()
+        d.render_receipt(self.state, receipt, self.fixture.project)
+        self.assertEqual(output.read_bytes(), original)
+        self.assertNotIn('speech_render_policy', historical)
 
 
 if __name__ == '__main__':

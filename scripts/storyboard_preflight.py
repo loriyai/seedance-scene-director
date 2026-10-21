@@ -13,8 +13,7 @@ import re
 import sys
 from pathlib import Path
 
-from dialogue_layout import estimate, pause_seconds, PUNCTUATION, TAILS
-from speech_timing_audit import SPEEDS
+from dialogue_layout import estimate, pause_seconds, PUNCTUATION, TAILS, SPEEDS
 
 POLICY = "scene-review-b-v2"
 LEGACY_POLICY = "scene-review-b-v1"

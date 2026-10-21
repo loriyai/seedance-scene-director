@@ -320,12 +320,12 @@ class SkillChecks(unittest.TestCase):
         record = self.state['records'][0]
         record.update(kind='dialogue', speaker='陈默', voice='说')
         self.unit['audio'] = [{'record': record['id'], 'character_id': 'CHAR0001', 'voice': '说',
-                              'text': record['text'], 'start': 0, 'end': 2.34, 'pause': .34,
+                              'text': record['text'], 'start': 0, 'end': 1.8, 'pause': .2,
                               'speed': '常速', 'units': 8, 'timing_basis': 'recording'}]
         d.dialogue_layout.attach(self.unit)
         with self.assertRaisesRegex(ValueError, '录音测量依据'):
             d.validate_unit(self.state, self.unit, self.unit['span'])
-        self.unit['audio'][0]['recording_evidence'] = '虚构测试录音：测量区间0至2.34秒'
+        self.unit['audio'][0]['recording_evidence'] = '虚构测试录音：测量区间0至1.8秒'
         warnings = d.validate_unit(self.state, self.unit, self.unit['span'])
         self.assertEqual(warnings, [])
         self.assertNotIn('实配音', d.render_unit(self.state, self.unit))

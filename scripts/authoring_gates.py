@@ -80,6 +80,8 @@ def audio_payload(state, unit):
     # Action-level performance is already bound within the complete actions.
     if 'performance_brief' in unit:
         payload['performance_brief'] = unit['performance_brief']
+    if 'speech_render_policy' in unit:
+        payload['speech_render_policy'] = unit['speech_render_policy']
     if 'action_state_plan' in unit:
         payload['action_state_plan'] = unit['action_state_plan']
         # Action readiness depends on its starting conditions and the entity

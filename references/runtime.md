@@ -30,7 +30,7 @@ python <skill>/scripts/director.py range --project <project> --start <起点整�
 
 绑定项目以`status.recovery`中的session前台阶段、当前输入对应队列及提交记录为准；`intake-state.json`仅是历史快照，不用其旧计数、next_step或失败描述决定续接。查询只读、不连接云端、不改变phase、不解除暂停。phase只表前台位置，不代表外部授权；后台worker状态独立，已排队或单步ACK不计完整节点完成，完成事件不覆盖正在创作的phase。
 
-资产/图片/视频队列、上传菜单、真实节点ID、字段ACK/回读、UNCERTAIN_WRITE及续接只在[画布流程](canvas-workflow.md)、[接口](canvas.md)和[队列](canvas-jobs.md)维护。只在已授权画布工作时读取；本地分镜不依赖登录，后台失败不抹掉本地交付。同画布单writer，未知写入先回读且沿原ID，人工修改冲突保护和暂停边界保留。
+资产/图片/视频队列、完成反馈、后续入口、真实节点ID、字段ACK/回读、UNCERTAIN_WRITE及续接只在[画布流程](canvas-workflow.md)、[接口](canvas.md)和[队列](canvas-jobs.md)维护。节点事件的查询、实际报告后消费及视频后续选择使用队列接口，不把桌面通知启动当作用户已看到。只在已授权画布工作时读取；本地分镜不依赖登录，后台失败不抹掉本地交付。同画布单writer，未知写入先回读且沿原ID，人工修改冲突保护和暂停边界保留。
 
 只有旧JSON的既有替换commit保留原自动局部同步行为；scene-text-v1以本页的显式节点操作为准。none-v1不创建或检查黑幕；历史黑幕回执和冻结任务按原协议读取，不因安装改节点/连线。
 
@@ -45,6 +45,8 @@ python <skill>/scripts/director.py render --project <project> --request-id <已�
 新创作和用户明确采用文字路径的指定修改使用[文本接口](storyboard-text-format.md#文本分镜接口)，不进入旧装配、状态效果、逐镜依赖或旧审阅链。新场级报告不能传给旧review_gate，旧JSON请求也不能传给文本入口。
 
 用户明确继续编辑旧JSON时，保留原稿结构、来源范围和历史版本，依据实际保存的请求及相应脚本--help使用兼容接口；这些实现仍被历史操作及回归调用，不是新文字稿前置。旧流程可能返回原有问题；兼容保留不表示已修复，例如scene_review.verify_reuse_evidence仍按列表顺序比较复用警告键。不能为通过旧检查重写历史证据或自动切换生产格式。
+
+新写或明确修订的reference-v3有声单元在预览前登记`speech_render_policy: explicit-cues-v1`，声音括注仅渲染实际指定的声音表现，不从估时档位附加语速标签。现有`dialogue_layout.attach`及显式装配入口为工作副本登记该策略，手写请求须同样声明；未知策略报错。该标记参与原有声音审阅绑定，不改变声音继承协议。无此标记的历史回执按原渲染方式重导出，读取与导出不登记新策略；新文字路径不增加此字段。估时规则统一见[声音与时长](storyboard-rules.md#声音与时长)，兼容数值由现有`dialogue_layout`实现供调用方复用。
 
 ## 本地验证
 

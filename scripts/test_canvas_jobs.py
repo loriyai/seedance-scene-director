@@ -418,6 +418,184 @@ class CanvasJobChecks(unittest.TestCase):
         self.assertEqual(control['image_choice']['asset_job_id'], first['job_id'])
         self.assertFalse(jobs.status(self.project)['image_choice_available'])
 
+    def test_asset_and_video_events_remain_pending_until_explicit_report(self):
+        asset = self.enqueue(request_id='report-assets')
+        video = self.enqueue('videos', request_id='report-videos', ids=[self.unit['id']])
+        jobs.run_worker(self.project, runner=self.successful_runner([]))
+        event_file = self.project / 'canvas/jobs/events.json'
+        original = event_file.read_bytes()
+        first = jobs.status(self.project)
+        self.assertEqual([event['job_id'] for event in first['pending_events']],
+                         [asset['job_id'], video['job_id']])
+        self.assertEqual(first, jobs.status(self.project))
+        self.assertEqual(event_file.read_bytes(), original)
+        identifier = first['pending_events'][0]['event_id']
+        self.assertEqual(jobs.report_event(self.project, identifier)['status'], 'reported')
+        self.assertEqual(jobs.report_event(self.project, identifier)['status'], 'already_reported')
+        self.assertEqual([event['job_id'] for event in jobs.status(self.project)['pending_events']], [video['job_id']])
+        self.assertEqual(event_file.read_bytes(), original)
+        self.assertEqual(d.read_json(self.project / 'session.json'), self.session)
+
+    def test_legacy_events_filter_current_canvas_without_rewriting_history(self):
+        self.enqueue('videos', request_id='legacy-event', ids=[self.unit['id']])
+        jobs.run_worker(self.project, runner=self.successful_runner([]))
+        event_file = self.project / 'canvas/jobs/events.json'
+        legacy = d.read_json(event_file)
+        for event in legacy:
+            for key in ('event_id', 'binding', 'desktop_notification'):
+                event.pop(key, None)
+        d.write_json(event_file, legacy)
+        original = event_file.read_bytes()
+        identifier = jobs.status(self.project)['pending_events'][0]['event_id']
+        self.state['binding']['canvas_id'] = 'OTHER_TARGET'
+        c.save(self.project, self.state)
+        current = jobs.status(self.project)
+        self.assertEqual(current['events'], [])
+        self.assertEqual(current['pending_events'], [])
+        self.assertFalse(current['video_followup_available'])
+        with self.assertRaises(ValueError):
+            jobs.report_event(self.project, identifier)
+        self.state['binding']['canvas_id'] = 'JOB_TEST_ROOT'
+        c.save(self.project, self.state)
+        self.assertEqual(jobs.status(self.project)['pending_events'][0]['event_id'], identifier)
+        jobs.report_event(self.project, identifier)
+        self.assertEqual(event_file.read_bytes(), original)
+
+    def test_unknown_event_cannot_be_consumed(self):
+        self.enqueue(request_id='not-completed')
+        with self.assertRaises(ValueError):
+            jobs.report_event(self.project, 'event-made-up')
+        self.assertFalse((self.project / 'canvas/jobs/control.json').exists())
+
+    def test_previous_canvas_failure_is_saved_without_notifying_current_canvas(self):
+        self.enqueue(request_id='old-target-notification')
+        self.state['binding']['canvas_id'] = 'NEW_TARGET_FOR_NOTIFICATIONS'
+        c.save(self.project, self.state)
+        jobs.run_worker(self.project, runner=self.successful_runner([]))
+        self.attention.assert_not_called()
+        events = d.read_json(self.project / 'canvas/jobs/events.json')
+        self.assertEqual(events[0]['event'], 'needs_attention')
+        self.assertEqual(events[0]['desktop_notification'],
+                         {'status': 'not_attempted', 'reason': 'non_current_canvas'})
+        self.assertEqual(jobs.status(self.project)['pending_events'], [])
+
+    def test_partial_result_never_offers_video_followup_even_when_count_is_full(self):
+        video = self.enqueue('videos', request_id='partial-video', ids=[self.unit['id']])
+        def partial(project, manifest, check_control, progress):
+            progress({'completed': 1, 'total': 1})
+            return {'status': 'partial'}
+        jobs.run_worker(self.project, runner=partial)
+        first = jobs.status(self.project)
+        self.assertEqual(first['pending_events'][0]['event'], 'needs_attention')
+        self.assertFalse(first['video_followup_available'])
+        with self.assertRaises(ValueError):
+            jobs.video_followup(self.project, video['job_id'], 'shown')
+        jobs.report_event(self.project, first['pending_events'][0]['event_id'])
+        jobs.resume(self.project, start=False)
+        jobs.run_worker(self.project, runner=self.successful_runner([]))
+        recovered = jobs.status(self.project)
+        self.assertEqual([event['event'] for event in recovered['pending_events']], ['completed'])
+        self.assertTrue(recovered['video_followup_available'])
+        self.assertEqual(len(recovered['events']), 2)
+
+    def test_new_failure_replaces_unreported_old_warning_but_preserves_history(self):
+        self.enqueue(request_id='changing-failure')
+        jobs.run_worker(self.project, runner=lambda *args: {'status': 'partial'})
+        first = jobs.status(self.project)['pending_events'][0]['event_id']
+        jobs.resume(self.project, start=False)
+        jobs.run_worker(self.project, runner=lambda *args: {'status': 'needs_decision'})
+        current = jobs.status(self.project)
+        self.assertEqual(len(current['events']), 2)
+        self.assertEqual(len(current['pending_events']), 1)
+        self.assertNotEqual(current['pending_events'][0]['event_id'], first)
+        with self.assertRaises(ValueError):
+            jobs.report_event(self.project, first)
+
+    def test_video_followup_requires_report_then_records_shown_without_selecting(self):
+        video = self.enqueue('videos', request_id='followup-once', ids=[self.unit['id']])
+        jobs.run_worker(self.project, runner=self.successful_runner([]))
+        current = jobs.status(self.project)
+        self.assertTrue(current['video_followup_available'])
+        with self.assertRaises(ValueError):
+            jobs.video_followup(self.project, video['job_id'], 'shown')
+        jobs.report_event(self.project, current['pending_events'][0]['event_id'])
+        jobs.pause(self.project)
+        self.assertEqual(jobs.video_followup(self.project, video['job_id'], 'shown')['status'], 'shown')
+        control = d.read_json(self.project / 'canvas/jobs/control.json')
+        self.assertEqual(control['video_followups'][video['job_id']]['action'], 'shown')
+        self.assertFalse(jobs.status(self.project)['video_followup_available'])
+        self.assertEqual(jobs.video_followup(self.project, video['job_id'], 'shown')['status'], 'already_handled')
+        self.assertEqual(jobs.video_followup(self.project, video['job_id'], 'modify')['status'], 'handled')
+        self.assertEqual(jobs.video_followup(self.project, video['job_id'], 'modify')['status'], 'already_handled')
+        self.assertTrue(jobs.status(self.project)['paused'])
+        self.assertEqual(d.read_json(self.project / 'session.json'), self.session)
+        self.assertEqual(len(jobs.status(self.project)['jobs']), 1)
+
+    def test_user_direction_consumes_followup_without_showing_menu(self):
+        video = self.enqueue('videos', request_id='already-directed', ids=[self.unit['id']])
+        jobs.run_worker(self.project, runner=self.successful_runner([]))
+        jobs.report_event(self.project, jobs.status(self.project)['pending_events'][0]['event_id'])
+        result = jobs.video_followup(self.project, video['job_id'], 'already-directed')
+        self.assertEqual(result['status'], 'handled')
+        self.assertFalse(jobs.status(self.project)['video_followup_available'])
+        self.assertEqual(jobs.video_followup(self.project, video['job_id'], 'shown')['action'], 'already-directed')
+        with self.assertRaises(ValueError):
+            jobs.video_followup(self.project, video['job_id'], 'finish')
+
+    def test_changed_video_input_does_not_offer_or_handle_old_followup(self):
+        video = self.enqueue('videos', request_id='stale-followup', ids=[self.unit['id']])
+        jobs.run_worker(self.project, runner=self.successful_runner([]))
+        jobs.report_event(self.project, jobs.status(self.project)['pending_events'][0]['event_id'])
+        self.session['units'][0]['version'] += 1
+        self.save_session()
+        self.assertFalse(jobs.status(self.project)['video_followup_available'])
+        with self.assertRaises(ValueError):
+            jobs.video_followup(self.project, video['job_id'], 'already-directed')
+
+    def test_desktop_launch_failure_is_durable_and_does_not_consume_chat_event(self):
+        self.notify.return_value = {'status': 'start_failed', 'attempted_at': 123, 'error': 'test unavailable'}
+        self.enqueue(request_id='desktop-failure')
+        jobs.run_worker(self.project, runner=self.successful_runner([]))
+        current = jobs.status(self.project)
+        self.assertEqual(current['jobs'][0]['status'], 'completed')
+        self.assertEqual(current['pending_events'][0]['desktop_notification']['status'], 'start_failed')
+        self.assertFalse(current['pending_events'][0]['reported'])
+
+    def test_notification_exception_and_legacy_none_do_not_change_completion(self):
+        self.notify.side_effect = RuntimeError('test notification implementation failed')
+        self.enqueue(request_id='unknown-notification-outcome')
+        jobs.run_worker(self.project, runner=self.successful_runner([]))
+        event = jobs.status(self.project)['pending_events'][0]
+        self.assertEqual(event['desktop_notification']['status'], 'attempt_outcome_unknown')
+        self.assertEqual(event['event'], 'completed')
+        self.notify.side_effect = None
+        self.notify.return_value = None
+        self.enqueue('videos', request_id='legacy-none-notification', ids=[self.unit['id']])
+        jobs.run_worker(self.project, runner=self.successful_runner([]))
+        event = jobs.status(self.project)['pending_events'][-1]
+        self.assertEqual(event['desktop_notification']['status'], 'attempt_outcome_unknown')
+        self.assertEqual(event['event'], 'completed')
+
+    def test_desktop_helper_reports_only_start_evidence_and_never_waits(self):
+        from unittest.mock import Mock
+        process = Mock(pid=456)
+        with patch.object(jobs, 'os', SimpleNamespace(name='nt')), \
+                patch.object(jobs.subprocess, 'CREATE_NO_WINDOW', 0x08000000, create=True), \
+                patch.object(jobs.subprocess, 'Popen', return_value=process) as spawn:
+            result = jobs.notify_desktop('离线测试')
+        self.assertEqual(result['status'], 'started_result_unknown')
+        process.wait.assert_not_called()
+        process.communicate.assert_not_called()
+        self.assertEqual(spawn.call_args.kwargs['stderr'], jobs.subprocess.DEVNULL)
+        with patch.object(jobs, 'os', SimpleNamespace(name='nt')), \
+                patch.object(jobs.subprocess, 'CREATE_NO_WINDOW', 0x08000000, create=True), \
+                patch.object(jobs.subprocess, 'Popen', side_effect=OSError('test launch error')):
+            failed = jobs.notify_desktop('离线测试')
+        self.assertEqual(failed['status'], 'start_failed')
+        with patch.object(jobs, 'os', SimpleNamespace(name='posix')):
+            unsupported = jobs.notify_desktop('离线测试')
+        self.assertEqual(unsupported, {'status': 'not_attempted', 'reason': 'unsupported_platform'})
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

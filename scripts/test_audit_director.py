@@ -310,7 +310,7 @@ class AuditDirectorChecks(unittest.TestCase):
             d.render_receipt(self.state, receipt, self.project)
         self.assertFalse((self.project / 'canvas' / 'state.json').exists())
 
-    def speech_unit(self, end=2.34, pause=.34, measured=False):
+    def speech_unit(self, end=2.0, pause=.2, measured=False):
         record = self.state['records'][0]
         record.update(kind='dialogue', speaker='陈默', voice='说')
         unit = self.unit([0, 9])
@@ -328,10 +328,10 @@ class AuditDirectorChecks(unittest.TestCase):
         with patch.object(dl, 'estimate', wraps=dl.estimate) as estimate:
             self.assertEqual([w['kind'] for w in d.validate_unit(self.state, unit, [0, 9])],
                              [])
-        self.assertEqual([call.args[2] for call in estimate.call_args_list], [5.2, 4.0])
+        self.assertEqual([call.args[2] for call in estimate.call_args_list], [5.4, 4.8])
 
     def test_extra_emotional_pause_is_not_counted_twice(self):
-        unit = self.speech_unit(end=3.1, pause=1.1)
+        unit = self.speech_unit(end=2.9, pause=1.1)
         self.assertEqual([w['kind'] for w in d.validate_unit(self.state, unit, [0, 9])],
                          [])
 
@@ -348,9 +348,9 @@ class AuditDirectorChecks(unittest.TestCase):
         warnings = d.validate_unit(self.state, unit, [0, 9])
         self.assertEqual(warnings[0]['kind'], '估计净语速超档')
         timing = warnings[0]['text_estimate']
-        self.assertEqual(timing['source_pause_seconds'], .34)
-        self.assertEqual(timing['registered_pause_seconds'], .34)
-        self.assertEqual(timing['min_seconds'], 2.071)
+        self.assertEqual(timing['source_pause_seconds'], .2)
+        self.assertEqual(timing['registered_pause_seconds'], .2)
+        self.assertEqual(timing['min_seconds'], 1.867)
 
     def test_recording_path_does_not_use_text_estimate(self):
         unit = self.speech_unit(measured=True)
@@ -371,8 +371,8 @@ class AuditDialogueChecks(unittest.TestCase):
         return unit, {'L1': [first, {'text': '是为了告诉大家我们一定能成功', 'start': 3, 'end': 6}]}
 
     def test_mixed_contiguous_punctuation_counts_one_highest_pause(self):
-        for text, expected in [('真的？！……', .34), ('等一下……？', .34), ('真的，！', .34),
-                               ('等一下，……', .26), ('好，，', .14), ('等等……', .26), ('好！好！', .68)]:
+        for text, expected in [('真的？！……', .2), ('等一下……？', .2), ('真的，！', .2),
+                               ('等一下，……', .26), ('好，，', .15), ('等等……', .26), ('好！好！', .4)]:
             with self.subTest(text=text):
                 self.assertEqual(dl.pause_seconds(text), expected)
 

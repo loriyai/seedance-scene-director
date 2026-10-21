@@ -13,6 +13,7 @@ import sys
 import uuid
 
 import continuity
+import dialogue_layout
 
 
 DRAFT_POLICY = "strict-draft-v1"
@@ -274,6 +275,7 @@ def assemble_unit(source, path="unit"):
         from state_effects import compile_unit
         unit = compile_unit(unit)
     require(unit.get("output_format") == "reference-v3", path + ".output_format", "本入口要求明确使用reference-v3")
+    dialogue_layout.prepare_render_policy(unit)
     for field in UNIT_TEXT_FIELDS:
         text(unit.get(field), path + "." + field)
     for field in ("scene_ids", "character_ids", "prop_ids"):

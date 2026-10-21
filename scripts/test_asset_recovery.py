@@ -278,19 +278,24 @@ class AssetRecoveryChecks(unittest.TestCase):
             guard.release()
 
     def test_attention_deduplicates_and_success_still_emits_completion(self):
-        job = {'job_id': 'job-notification', 'kind': 'assets'}
-        state = {'status': 'needs_attention', 'completed': 270, 'total': 349,
-                 'error': {'code': 'COMMAND_REJECTED', 'message': 'scene asset not found'}}
-        with patch.object(jobs, 'notify_attention') as attention, patch.object(jobs, 'notify_completion') as complete:
+        with patch.object(jobs.d, 'load', return_value=self.session), \
+                patch.object(jobs, 'notify_attention') as attention, \
+                patch.object(jobs, 'notify_completion') as complete:
+            queued = jobs.enqueue(self.project, 'assets', request_id='notification-recovery', start=False)
+            job = jobs.read(jobs.directory(self.project) / (queued['job_id'] + '.json'))
+            state = {'job_id': job['job_id'], 'status': 'needs_attention', 'completed': 270, 'total': 349,
+                     'error': {'code': 'COMMAND_REJECTED', 'message': 'scene asset not found'}}
+            jobs.d.write_json(jobs.state_file(self.project, job['job_id']), state)
             jobs.publish_event(self.project, job, state)
             jobs.publish_event(self.project, job, state)
             attention.assert_called_once()
             complete.assert_not_called()
-            state.update(status='completed', completed=349)
+            state.update(status='completed', completed=349, result={'status': 'synced'})
+            jobs.d.write_json(jobs.state_file(self.project, job['job_id']), state)
             jobs.publish_event(self.project, job, state)
             jobs.publish_event(self.project, job, state)
             complete.assert_called_once()
-        self.assertEqual([e['event'] for e in jobs.status(self.project)['events']], ['needs_attention', 'completed'])
+            self.assertEqual([e['event'] for e in jobs.status(self.project)['events']], ['needs_attention', 'completed'])
 
 
 if __name__ == '__main__':
