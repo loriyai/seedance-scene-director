@@ -23,6 +23,7 @@ KINDS = {"role": "biz/role", "scene": "biz/scene", "image": "biz/image", "video"
 NODE_ASSET_TAG = re.compile(r"<node-asset\b[^>]*>([^<]*)</node-asset>")
 VIDEO_READBACK_ATTEMPTS = 3
 VIDEO_READBACK_DELAY = 0.5
+ASSET_IMAGE_DEFAULTS = {"resolution": "2K", "effort": "high", "ratio": "16:9"}
 
 
 class CanvasError(ValueError):
@@ -441,6 +442,9 @@ def target_satisfied(doc, target):
         return kind_of(nodes(doc)[node_id]) == target["kind"]
     if action == "duration":
         return (content(doc, node_id).get("generation") or {}).get("durationMs") == target["value"]
+    if action == "generation_settings":
+        generation = content(doc, node_id).get("generation") or {}
+        return all(generation.get(key) == value for key, value in target["value"].items())
     if action == "prompt":
         return prompt_of(doc, node_id) == target["value"] and prompt_references_satisfied(doc, node_id, target["value"])
     if action == "prompt_text":
@@ -725,10 +729,17 @@ def write_video(project, cli, state, doc, item, node_id, context, create=None, r
 def desired_assets(session):
     d.require(session["ledger"].get("schema_version") == 3, "旧台账须先审计并审核保留/修改/合并/删除方案，再升级绑定；不再按场次创建场景节点")
     d.reference_catalog(session)
-    return ([{"key": c["id"], "name": c["name"], "kind": "role"} for c in session["ledger"]["characters"]
+    result = ([{"key": c["id"], "name": c["name"], "kind": "role"} for c in session["ledger"]["characters"]
              if c.get("visual_mode") != "prompt_only"]
             + [{"key": s["id"], "name": s["name"], "kind": "scene"} for s in session["ledger"]["scene_assets"]]
             + [{"key": p["id"], "name": p["name"], "kind": "image"} for p in session["ledger"]["props"]])
+    source = {row["id"]: row for category in ("characters", "scene_assets", "props")
+              for row in session["ledger"][category]}
+    for item in result:
+        prompt = source[item["key"]].get("image_prompt")
+        if isinstance(prompt, str) and prompt.strip():
+            item["description"] = prompt
+    return result
 
 
 def selected_units(session, request_id=None, ids=None):
@@ -1105,7 +1116,8 @@ def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, pre
             try:
                 doc = write_verified(project, cli, state, "create_biz_node",
                                      {"nodeKind": item["kind"], "id": node_id, "initialData": initial_data(item), "topLeft": positions[key]},
-                                     [{"action": "create", "node_id": node_id, "kind": item["kind"], "name": item["name"]}])
+                                     [{"action": "create", "node_id": node_id, "kind": item["kind"], "name": item["name"]},
+                                      asset_settings_target(node_id)])
             except CanvasError as exc:
                 if exc.code != "COMMAND_REJECTED":
                     raise
@@ -1120,6 +1132,10 @@ def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, pre
             summary["created"].append(key)
         else:
             summary["adopted" if item["resolution"] == "adopted" else "reused"].append(key)
+        if state["mappings"].get(key, {}).get("stage") == "allocated" and not preview:
+            doc = initialize_asset_prompt(project, cli, state, doc, item, node_id)
+            if context is not None:
+                context["doc"] = doc
         if item["resolution"] != "mapped" or state["mappings"][key].get("stage") != "ready":
             state["mappings"][key] = {"node_id": node_id, "kind": item["kind"], "name": item["name"],
                                       "stage": "ready", "origin": item["resolution"]}
@@ -1352,7 +1368,8 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
                 create_video = command
             else:
                 doc = write_verified(project, cli, state, "create_biz_node", command,
-                                     [{"action": "create", "node_id": node_id, "kind": item["kind"], "name": item["name"]}])
+                                     [{"action": "create", "node_id": node_id, "kind": item["kind"], "name": item["name"]},
+                                      asset_settings_target(node_id)])
                 context["doc"] = doc
             created += 1
         else:
@@ -1403,6 +1420,9 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
                 continue
         updated += fingerprint(doc, node_id) != before
         mapping = state["mappings"][key]
+        if item["kind"] in ("role", "scene", "image") and mapping.get("stage") == "allocated":
+            doc = initialize_asset_prompt(project, cli, state, doc, item, node_id)
+            context["doc"] = doc
         mapping["stage"] = "ready"
         mapping.pop("initialization_fingerprint", None)
         mapping.pop("video_initialization_baseline", None)
@@ -1461,9 +1481,59 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
 
 def initial_data(item):
     if item["kind"] in ("role", "scene"):
-        return {"nodeName": item["name"], "basicInfo": {"name": item["name"], "appearanceName": ""}}
+        return {"nodeName": item["name"], "basicInfo": {"name": item["name"], "appearanceName": ""},
+                "generation": copy.deepcopy(ASSET_IMAGE_DEFAULTS)}
     return {"name": item["name"], "caption": item["name"], **({"title": item["name"]} if item["kind"] == "video" else {}),
-            **({"generation": copy.deepcopy(item["settings"])} if item.get("settings") else {})}
+            **({"generation": copy.deepcopy(ASSET_IMAGE_DEFAULTS)} if item["kind"] == "image" else
+               {"generation": copy.deepcopy(item["settings"])} if item.get("settings") else {})}
+
+
+def asset_settings_target(node_id):
+    return {"action": "generation_settings", "node_id": node_id, "value": copy.deepcopy(ASSET_IMAGE_DEFAULTS)}
+
+
+def pending_asset_settings(state, node_id):
+    """Verify defaults only while initializing nodes created with this contract."""
+    mapping = next((m for m in state["mappings"].values() if m.get("node_id") == node_id), {})
+    if mapping.get("stage") == "ready":
+        return []
+    for entry in reversed(state["journal"]):
+        value = entry.get("input", {})
+        if entry.get("command") == "create_biz_node" and value.get("id") == node_id:
+            if (value.get("nodeKind") in ("role", "scene", "image")
+                    and value.get("initialData", {}).get("generation") == ASSET_IMAGE_DEFAULTS):
+                return [asset_settings_target(node_id)]
+            break
+    return []
+
+
+def initialize_asset_prompt(project, cli, state, doc, item, node_id):
+    """Finish a new asset on its saved ID; preserve adopted/ready assets elsewhere."""
+    for target in pending_asset_settings(state, node_id):
+        if not target_satisfied(doc, target):
+            fail("READBACK_FAILED", "新建资产图片默认参数回读不一致。", node_id=node_id)
+    prompt = item.get("description")
+    if not prompt:
+        return doc  # Historical ledgers may predate image design.
+    role_scene = item["kind"] in ("role", "scene")
+    current = (content(doc, node_id).get("appearanceInfo", {}).get("description", "")
+               if role_scene else prompt_of(doc, node_id))
+    if current and current != prompt:
+        fail("CONCURRENT_EDIT", "新建资产已有不同图片提示词，停止覆盖。", node_id=node_id)
+    if current != prompt:
+        if role_scene:
+            doc = write_verified(project, cli, state, "xyq." + item["kind"] + ".updateDescription",
+                                 {"nodeId": node_id, "assetId": node_id,
+                                  "field": "appearance" if item["kind"] == "role" else "description", "value": prompt},
+                                 [{"action": "description", "node_id": node_id, "value": prompt}])
+        else:
+            doc = write_verified(project, cli, state, "xyq.generation.update_prompt",
+                                 {"nodeId": node_id, "prompt": prompt},
+                                 [{"action": "prompt", "node_id": node_id, "value": prompt}])
+    for target in pending_asset_settings(state, node_id):
+        if not target_satisfied(doc, target):
+            fail("READBACK_FAILED", "提示词写入后资产图片默认参数回读不一致。", node_id=node_id)
+    return doc
 
 
 def layout_positions(doc, plan):

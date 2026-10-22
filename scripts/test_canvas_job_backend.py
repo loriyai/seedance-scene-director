@@ -129,6 +129,73 @@ class AssetJobBackendChecks(unittest.TestCase):
         self.assertTrue(all(e['status'] == 'verified' for e in state['journal']))
         self.assertEqual(self.progress[-1]['completed'], 3)
 
+    def test_new_assets_receive_image_defaults_and_their_own_complete_prompts(self):
+        self.sync()
+        state = c.read_state(self.project)
+        for key, prompt in (('CHAR1', 'Actor full reference'), ('SET1', 'Room complete set'),
+                            ('PROP1', 'Pen complete object')):
+            with self.subTest(asset=key):
+                data = c.content(self.cli.doc, state['mappings'][key]['node_id'])
+                self.assertEqual({k: data['generation'][k] for k in ('resolution', 'effort', 'ratio')},
+                                 {'resolution': '2K', 'effort': 'high', 'ratio': '16:9'})
+                self.assertEqual(data['generation']['prompt'] if key == 'PROP1'
+                                 else data['appearanceInfo']['description'], prompt)
+        self.assertFalse(any('generate' in command for command, value in self.cli.writes))
+
+    def test_missing_or_wrong_image_defaults_cannot_complete_any_asset_kind(self):
+        for category in ('characters', 'scene_assets', 'props'):
+            for field in ('resolution', 'effort', 'ratio'):
+                with self.subTest(category=category, field=field):
+                    self.setUp()
+                    for other in ('characters', 'scene_assets', 'props'):
+                        if other != category:
+                            self.session['ledger'][other] = []
+                    def corrupt(doc, key=field):
+                        for node_id in c.nodes(doc):
+                            c.content(doc, node_id)['generation'].pop(key, None)
+                    self.cli.final_fault = corrupt
+                    with self.assertRaises(c.CanvasError):
+                        self.sync()
+                    self.assertFalse(any(m.get('stage') == 'ready'
+                                         for m in c.read_state(self.project)['mappings'].values()))
+
+    def test_ready_asset_custom_image_parameters_survive_prompt_update(self):
+        self.existing_role()
+        generation = {'resolution': '4K', 'effort': 'low', 'ratio': '1:1',
+                      'modelKey': 'user-selected', 'references': [{'id': 'ref'}]}
+        c.content(self.cli.doc, 'ROLE')['generation'] = copy.deepcopy(generation)
+        self.sync()
+        self.assertEqual(c.content(self.cli.doc, 'ROLE')['generation'], generation)
+
+    def test_video_preparation_creates_assets_with_defaults_and_prompts(self):
+        state, doc = c.connected(self.project, self.cli)
+        doc, summary = c.reconcile_asset_nodes(self.project, self.cli, self.session, state, doc)
+        self.assertEqual(len(summary['created']), 3)
+        for key, prompt in (('CHAR1', 'Actor full reference'), ('SET1', 'Room complete set'),
+                            ('PROP1', 'Pen complete object')):
+            data = c.content(doc, state['mappings'][key]['node_id'])
+            self.assertEqual({k: data['generation'][k] for k in ('resolution', 'effort', 'ratio')},
+                             {'resolution': '2K', 'effort': 'high', 'ratio': '16:9'})
+            self.assertEqual(data['generation']['prompt'] if key == 'PROP1'
+                             else data['appearanceInfo']['description'], prompt)
+        writes = len(self.cli.writes)
+        c.content(self.cli.doc, state['mappings']['CHAR1']['node_id'])['generation']['ratio'] = '1:1'
+        doc = c.document(self.cli, state['binding'])
+        doc, summary = c.reconcile_asset_nodes(self.project, self.cli, self.session, state, doc)
+        self.assertEqual(len(self.cli.writes), writes)
+
+    def test_direct_assets_creation_writes_defaults_and_prompts(self):
+        result = c.sync(self.project, self.cli, 'assets', session_override=self.session)
+        self.assertEqual(result['status'], 'synced')
+        state = c.read_state(self.project)
+        for key in ('CHAR1', 'SET1', 'PROP1'):
+            data = c.content(self.cli.doc, state['mappings'][key]['node_id'])
+            self.assertEqual(data['generation']['resolution'], '2K')
+            self.assertEqual(data['generation']['effort'], 'high')
+            self.assertEqual(data['generation']['ratio'], '16:9')
+            self.assertTrue(data['generation'].get('prompt') if key == 'PROP1'
+                            else data['appearanceInfo'].get('description'))
+
     def test_every_role_field_is_required_for_final_completion(self):
         def change(doc, field):
             nid = next(iter(c.nodes(doc)))

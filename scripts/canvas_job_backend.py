@@ -120,9 +120,11 @@ def recover_asset_rejection(project, cli, operation_id, apply=False, fingerprint
     earlier = state["journal"][:state["journal"].index(entry)]
     creation = next((e for e in reversed(earlier) if e.get("command") == "create_biz_node"
                      and e.get("input", {}).get("id") == node_id), None)
+    expected_initial = c.initial_data({"kind": "scene", "name": mapping["name"]})
+    legacy_initial = {key: value for key, value in expected_initial.items() if key != "generation"}
     d.require(creation and creation.get("status") in ("acknowledged", "verified")
               and creation["input"].get("nodeKind") == "scene"
-              and creation["input"].get("initialData") == c.initial_data({"kind": "scene", "name": mapping["name"]}),
+              and creation["input"].get("initialData") in (expected_initial, legacy_initial),
               "缺少同一原ID的已确认创建记录")
     relevant = [e for e in state["journal"] if e is not entry
                 and any(t.get("node_id") == node_id for t in e.get("targets", []))]
@@ -299,7 +301,9 @@ def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
     for item in items:
         item.update({k: v for k, v in by_key[item["key"]].items() if k not in item})
         node_id = item.get("node_id")
-        if node_id and all(c.target_satisfied(doc, t) for t in asset_targets(item, node_id)):
+        item["verify_image_defaults"] = not node_id or bool(c.pending_asset_settings(state, node_id))
+        if node_id and all(c.target_satisfied(doc, t) for t in
+                           asset_targets(item, node_id) + c.pending_asset_settings(state, node_id)):
             completed.append(item["key"])
             node_ids[item["key"]] = node_id
             state["mappings"][item["key"]] = {**state["mappings"].get(item["key"], {}), "node_id": node_id,
@@ -354,7 +358,8 @@ def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
             if is_new:
                 acknowledge(project, cli, state, "create_biz_node",
                             {"nodeKind": item["kind"], "id": node_id, "initialData": c.initial_data(item), "topLeft": positions[item["key"]]},
-                            [{"action": "node_kind", "node_id": node_id, "kind": item["kind"]}])
+                            [{"action": "node_kind", "node_id": node_id, "kind": item["kind"]},
+                             c.asset_settings_target(node_id)])
                 created += 1
                 mapping["stage"] = "writing"
                 c.save(project, state)
@@ -393,7 +398,8 @@ def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
         c.reconcile(project, cli, state, doc)
         for item in group:
             node_id = item["node_id"]
-            if not all(c.target_satisfied(doc, target) for target in asset_targets(item, node_id)):
+            if not all(c.target_satisfied(doc, target) for target in
+                       asset_targets(item, node_id) + ([c.asset_settings_target(node_id)] if item["verify_image_defaults"] else [])):
                 c.fail("READBACK_FAILED", "资产节点最终字段未全部通过核对。", key=item["key"], node_id=node_id)
             mapping = state["mappings"][item["key"]]
             mapping.update(stage="ready", name=item["name"], appearance_name="", description_hash=c.digest(item["description"]))

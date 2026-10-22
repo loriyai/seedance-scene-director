@@ -25,6 +25,12 @@ python <skill>/scripts/canvas.py status --project <project>
 
 ## 资产与视频节点
 
+新建角色role、场景scene及道具image节点时，统一通过`create_biz_node.initialData.generation`设置图片默认参数：`resolution: "2K"`（清晰度2K）、`effort: "high"`（推理强度高）、`ratio: "16:9"`（比例16:9）。这三项属于节点图片配置，不写成提示词文字，也不套用到video节点。资产批量任务、直接assets入口及videos流程补建资产共用这套创建参数；创建后逐项回读，不以创建ACK代替参数验收。
+
+新建节点同时完成对应台账资产的完整`image_prompt`写入：角色与场景通过各自的`updateDescription`写入`appearanceInfo.description`，道具通过`xyq.generation.update_prompt`写入`generation.prompt`。视频准备中自动补建的资产也须完成此步骤。名称、类型、图片参数、提示词及真实ID均通过核验后才计为初始化完成。所有操作仅配置节点，不触发图片或视频生成。
+
+默认参数仅用于新建节点及按原ID续接本版本未完成的初始化。已完成或复用节点保留当前模型、比例、清晰度、推理强度、图片与其他配置；不因Skill升级改写既有节点。历史创建日志没有这些参数时按原证据续接，不把新默认值追加为历史恢复门槛。
+
 ```text
 python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind assets --start [--decisions <选择.json>]
 python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind videos --request-id <本批提交ID> --start [--decisions <选择.json>]

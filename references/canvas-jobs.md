@@ -54,7 +54,7 @@ python <skill>/scripts/canvas_jobs.py recover-assets --project <project> --opera
 
 资产定稿且用户同意传输后，提交assets任务并立即进入剧本范围选择。后台脚本新建、核对、记录ID；Codex可同时用本地定稿台账生成分镜。同步进程不修改`session.json`的phase、分镜编号或历史范围。
 
-资产的`completed`表示名称、类型、空形象/视角名、完整image_prompt及ID映射均已核验；角色/场景图片提示词写入appearanceInfo.description，道具写入generation.prompt。空图片节点允许完成，图片就绪另列。成功计数只包括已核验节点，不能把queued/running、已申请ID或单步ACK当完成。
+资产的`completed`表示名称、类型、空形象/视角名、完整image_prompt及ID映射均已核验；新建节点还须核对[资产图片默认参数](canvas.md#资产与视频节点)。角色/场景图片提示词写入appearanceInfo.description，道具写入generation.prompt。空图片节点允许完成，图片就绪另列。成功计数只包括已核验节点，不能把queued/running、已申请ID或单步ACK当完成。
 
 `status.image_choice_available=true`时，在当前分镜交付/交互边界提示“是否上传本地图片到对应资产节点？1.是 2.暂不上传”，不打断正在起草的分镜，也不以补图阻塞分镜或视频空节点。收到选择后调用image-choice：1记录upload_pending并询问目录，已有目录直接提交images；2记录跳过。同一完成任务的菜单不重复询问。需要切换phase时由前台director执行，后台完成事件不能覆盖当前交互位置。
 
