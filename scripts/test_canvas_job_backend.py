@@ -67,7 +67,7 @@ class AssetJobCLI(WorkflowCLI):
             if self.pause_after_create:
                 self.paused = True
         if (name == 'get_snapshot' and self.final_fault
-                and any(n == 'xyq.generation.update_prompt' or v.get('field') in ('appearance', 'description')
+                and any(n in ('xyq.generation.update_prompt', 'xyq.role.updateAppearance') or v.get('field') in ('characterName', 'sceneName')
                         for n, v in self.writes)):
             self.final_fault(result['document'])
         return result
@@ -102,14 +102,15 @@ class AssetJobBackendChecks(unittest.TestCase):
         self.session['ledger']['scene_assets'] = []
         self.session['ledger']['props'] = []
 
-    def existing_role(self, description='', view=''):
+    def existing_role(self, prompt='', view=''):
         self.only_role()
         add_node(self.cli.doc, 'ROLE', 'role', 'Actor')
         data = c.content(self.cli.doc, 'ROLE')
-        data['appearanceInfo'] = {'description': description}
+        data['appearanceInfo'] = {'description': 'Independent appearance description'}
+        data['generation']['prompt'] = prompt
         data['basicInfo']['appearanceName'] = view
         self.state['mappings']['CHAR1'] = {'node_id': 'ROLE', 'kind': 'role', 'name': 'Actor',
-                                         'stage': 'ready', 'description_hash': c.digest(description)}
+                                         'stage': 'ready', 'prompt_hash': c.digest(prompt)}
         c.save(self.project, self.state)
 
     def test_all_fields_are_written_and_group_readback_is_bounded(self):
@@ -125,7 +126,7 @@ class AssetJobBackendChecks(unittest.TestCase):
             self.assertEqual(mapping['stage'], 'ready')
             self.assertTrue(all(c.target_satisfied(self.cli.doc, target)
                                 for target in backend.asset_targets(item, mapping['node_id'])))
-            self.assertEqual(mapping['description_hash'], c.digest(item['description']))
+            self.assertEqual(mapping['prompt_hash'], c.digest(item['image_prompt']))
         self.assertTrue(all(e['status'] == 'verified' for e in state['journal']))
         self.assertEqual(self.progress[-1]['completed'], 3)
 
@@ -138,8 +139,7 @@ class AssetJobBackendChecks(unittest.TestCase):
                 data = c.content(self.cli.doc, state['mappings'][key]['node_id'])
                 self.assertEqual({k: data['generation'][k] for k in ('resolution', 'effort', 'ratio')},
                                  {'resolution': '2K', 'effort': 'high', 'ratio': '16:9'})
-                self.assertEqual(data['generation']['prompt'] if key == 'PROP1'
-                                 else data['appearanceInfo']['description'], prompt)
+                self.assertEqual(data['generation']['prompt'], prompt)
         self.assertFalse(any('generate' in command for command, value in self.cli.writes))
 
     def test_missing_or_wrong_image_defaults_cannot_complete_any_asset_kind(self):
@@ -165,7 +165,7 @@ class AssetJobBackendChecks(unittest.TestCase):
                       'modelKey': 'user-selected', 'references': [{'id': 'ref'}]}
         c.content(self.cli.doc, 'ROLE')['generation'] = copy.deepcopy(generation)
         self.sync()
-        self.assertEqual(c.content(self.cli.doc, 'ROLE')['generation'], generation)
+        self.assertEqual(c.content(self.cli.doc, 'ROLE')['generation'], {**generation, 'prompt': 'Actor full reference'})
 
     def test_video_preparation_creates_assets_with_defaults_and_prompts(self):
         state, doc = c.connected(self.project, self.cli)
@@ -176,8 +176,7 @@ class AssetJobBackendChecks(unittest.TestCase):
             data = c.content(doc, state['mappings'][key]['node_id'])
             self.assertEqual({k: data['generation'][k] for k in ('resolution', 'effort', 'ratio')},
                              {'resolution': '2K', 'effort': 'high', 'ratio': '16:9'})
-            self.assertEqual(data['generation']['prompt'] if key == 'PROP1'
-                             else data['appearanceInfo']['description'], prompt)
+            self.assertEqual(data['generation']['prompt'], prompt)
         writes = len(self.cli.writes)
         c.content(self.cli.doc, state['mappings']['CHAR1']['node_id'])['generation']['ratio'] = '1:1'
         doc = c.document(self.cli, state['binding'])
@@ -193,8 +192,7 @@ class AssetJobBackendChecks(unittest.TestCase):
             self.assertEqual(data['generation']['resolution'], '2K')
             self.assertEqual(data['generation']['effort'], 'high')
             self.assertEqual(data['generation']['ratio'], '16:9')
-            self.assertTrue(data['generation'].get('prompt') if key == 'PROP1'
-                            else data['appearanceInfo'].get('description'))
+            self.assertTrue(data['generation'].get('prompt'))
 
     def test_every_role_field_is_required_for_final_completion(self):
         def change(doc, field):
@@ -209,8 +207,8 @@ class AssetJobBackendChecks(unittest.TestCase):
             elif field == 'view':
                 data['basicInfo']['appearanceName'] = 'Unexpected view'
             else:
-                data['appearanceInfo']['description'] = 'Wrong complete description'
-        for field in ('kind', 'displayName', 'basicName', 'view', 'description'):
+                data['generation']['prompt'] = 'Wrong complete prompt'
+        for field in ('kind', 'displayName', 'basicName', 'view', 'prompt'):
             with self.subTest(field=field):
                 self.setUp()
                 self.only_role()
@@ -220,15 +218,15 @@ class AssetJobBackendChecks(unittest.TestCase):
                 self.assertNotEqual(c.read_state(self.project)['mappings']['CHAR1']['stage'], 'ready')
                 self.assertFalse(any(p.get('completed') == 1 for p in self.progress))
 
-    def test_different_nonempty_description_is_not_overwritten_even_with_saved_hash(self):
-        self.existing_role(description='Human edited description')
-        self.state['mappings']['CHAR1']['description_hash'] = c.digest('Actor full reference')
+    def test_different_nonempty_prompt_is_not_overwritten_even_with_saved_hash(self):
+        self.existing_role(prompt='Human edited description')
+        self.state['mappings']['CHAR1']['prompt_hash'] = c.digest('Actor full reference')
         c.save(self.project, self.state)
         with self.assertRaises(c.CanvasError) as failure:
             self.sync()
         self.assertEqual(failure.exception.code, 'CONCURRENT_EDIT')
         self.assertEqual(self.cli.writes, [])
-        self.assertEqual(c.content(self.cli.doc, 'ROLE')['appearanceInfo']['description'], 'Human edited description')
+        self.assertEqual(c.content(self.cli.doc, 'ROLE')['generation']['prompt'], 'Human edited description')
 
     def test_every_image_field_is_required_for_final_completion(self):
         for field in ('name', 'caption', 'prompt'):
@@ -249,16 +247,16 @@ class AssetJobBackendChecks(unittest.TestCase):
                 self.assertNotEqual(c.read_state(self.project)['mappings']['PROP1']['stage'], 'ready')
                 self.assertFalse(any(p.get('completed') == 1 for p in self.progress))
 
-    def test_exact_explicit_fingerprint_allows_description_change(self):
-        self.existing_role(description='Previous approved description')
+    def test_exact_explicit_fingerprint_allows_prompt_change(self):
+        self.existing_role(prompt='Previous approved description')
         fingerprint = c.fingerprint(self.cli.doc, 'ROLE')
         result = self.sync(decisions={'CHAR1': {'overwrite_fingerprint': fingerprint}})
         self.assertEqual(result['status'], 'synced')
         self.assertEqual(self.cli.allocations, [])
-        self.assertEqual(c.content(self.cli.doc, 'ROLE')['appearanceInfo']['description'], 'Actor full reference')
+        self.assertEqual(c.content(self.cli.doc, 'ROLE')['generation']['prompt'], 'Actor full reference')
 
     def test_exact_complete_nodes_are_read_back_without_rewriting(self):
-        self.existing_role(description='Actor full reference')
+        self.existing_role(prompt='Actor full reference')
         result = self.sync()
         self.assertEqual(result['status'], 'synced')
         self.assertEqual(self.cli.writes, [])
@@ -267,8 +265,8 @@ class AssetJobBackendChecks(unittest.TestCase):
         self.assertEqual(self.progress[-1]['completed'], 1)
 
     def test_unknown_ack_stops_next_node_and_resume_never_replays(self):
-        self.cli.unknown_command = 'xyq.role.updateDescription'
-        self.cli.unknown_field = 'appearance'
+        self.cli.unknown_command = 'xyq.role.updateAppearance'
+        self.cli.unknown_field = None
         with self.assertRaises(c.CanvasError) as first:
             self.sync()
         self.assertEqual(first.exception.code, 'UNCERTAIN_WRITE')
@@ -319,8 +317,8 @@ class AssetJobBackendChecks(unittest.TestCase):
 
     def test_explicit_queue_resume_still_requires_reconcile_before_unknown_write(self):
         self.only_role()
-        self.cli.unknown_command = 'xyq.role.updateDescription'
-        self.cli.unknown_field = 'appearance'
+        self.cli.unknown_command = 'xyq.role.updateAppearance'
+        self.cli.unknown_field = None
         def runner(project, manifest, check_control, progress):
             return backend.sync_assets(project, self.cli, manifest['session'], progress)
         with patch.object(jobs.d, 'load', return_value=self.session), \
@@ -341,8 +339,8 @@ class AssetJobBackendChecks(unittest.TestCase):
 
     def test_replacement_job_does_not_bypass_unknown_canvas_journal(self):
         self.only_role()
-        self.cli.unknown_command = 'xyq.role.updateDescription'
-        self.cli.unknown_field = 'appearance'
+        self.cli.unknown_command = 'xyq.role.updateAppearance'
+        self.cli.unknown_field = None
         def runner(project, manifest, check_control, progress):
             return backend.sync_assets(project, self.cli, manifest['session'], progress,
                                        decisions=manifest['options']['decisions'])

@@ -52,8 +52,32 @@ class WorkflowCLI:
             initial = value["initialData"]
             if initial.get("nodeName", initial.get("name")) in self.ignore_create_names:
                 return {}
-            c.nodes(self.doc)[node_id] = {"type": c.KINDS[value["nodeKind"]], **value["topLeft"]}
+            c.nodes(self.doc)[node_id] = {"id": node_id, "type": c.KINDS[value["nodeKind"]], **value["topLeft"]}
+            if value["nodeKind"] in ("role", "scene"):
+                c.nodes(self.doc)[node_id]["data"] = {"name": "未命名角色" if value["nodeKind"] == "role" else "未命名场景"}
             self.doc["assets"][node_id] = {"content": copy.deepcopy(value["initialData"])}
+            return {}
+        if name in ("xyq.role.updateDescription", "xyq.scene.updateDescription"):
+            data = c.content(self.doc, value["nodeId"])
+            field = value["field"]
+            if field in ("characterName", "sceneName"):
+                data.setdefault("basicInfo", {})["name"] = value["value"]
+                c.nodes(self.doc)[value["nodeId"]].setdefault("data", {})["name"] = value["value"]
+            elif field in ("appearanceName", "sceneViewName"):
+                data.setdefault("basicInfo", {})["appearanceName"] = value["value"]
+            else:
+                data.setdefault("appearanceInfo", {})["description"] = value["value"]
+            return {}
+        if name == "xyq.role.updateAppearance":
+            data = c.content(self.doc, value["nodeId"])
+            patch = value["patch"]
+            if "generationPrompt" in patch:
+                data.setdefault("generation", {})["prompt"] = patch["generationPrompt"]
+            if "mainImage" in patch:
+                data.setdefault("appearanceInfo", {}).update(copy.deepcopy(patch["mainImage"]))
+            return {}
+        if name == "update_asset":
+            self.doc["assets"][value["assetId"]]["content"].update(copy.deepcopy(value["contentPatch"]))
             return {}
         if name == "update_node_data":
             c.content(self.doc, value["id"]).update(copy.deepcopy(value["patch"]))

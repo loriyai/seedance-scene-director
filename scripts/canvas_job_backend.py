@@ -64,7 +64,8 @@ def observation(doc, node_id):
             "basic_name": data.get("basicInfo", {}).get("name", ""),
             "view": data.get("basicInfo", {}).get("appearanceName", ""),
             "description": description, "media": appearance,
-            "source_infos": copy.deepcopy(data.get("sourceInfos", {}))}
+            "source_infos": copy.deepcopy(data.get("sourceInfos", {})),
+            "generation": copy.deepcopy(data.get("generation") or {})}
 
 
 def after_observation(before, value):
@@ -76,15 +77,21 @@ def after_observation(before, value):
         result["view"] = value["value"]
     elif field in ("appearance", "description"):
         result["description"] = value["value"]
+    if "generationPrompt" in value.get("patch", {}):
+        result.setdefault("generation", {})["prompt"] = value["patch"]["generationPrompt"]
+    patch = value.get("contentPatch", {})
+    if "generation" in patch:
+        result["generation"] = copy.deepcopy(patch["generation"])
     return result
 
 
-def pristine_initialization(doc, node_id, kind, name):
+def pristine_initialization(doc, node_id, kind, name, expected_prompt=None):
     current = observation(doc, node_id)
     factory_name = "未命名角色" if kind == "role" else "未命名场景"
     return (current["name"] in (name, factory_name) and current["basic_name"] in (name, factory_name)
             and not current["view"] and not current["description"] and not c.ready_image(doc, node_id)
-            and not current["media"].get("candidatePippitAssetIds") and not current["source_infos"])
+            and not current["media"].get("candidatePippitAssetIds") and not current["source_infos"]
+            and current["generation"].get("prompt", "") in ("", expected_prompt))
 
 
 def missing_business_rejection(entry):
@@ -120,11 +127,14 @@ def recover_asset_rejection(project, cli, operation_id, apply=False, fingerprint
     earlier = state["journal"][:state["journal"].index(entry)]
     creation = next((e for e in reversed(earlier) if e.get("command") == "create_biz_node"
                      and e.get("input", {}).get("id") == node_id), None)
-    expected_initial = c.initial_data({"kind": "scene", "name": mapping["name"]})
+    created_initial = (creation or {}).get("input", {}).get("initialData", {})
+    created_prompt = created_initial.get("generation", {}).get("prompt")
+    expected_initial = c.initial_data({"kind": "scene", "name": mapping["name"], "image_prompt": created_prompt or ""})
     legacy_initial = {key: value for key, value in expected_initial.items() if key != "generation"}
+    legacy_defaults = {**legacy_initial, "generation": copy.deepcopy(c.ASSET_IMAGE_DEFAULTS)}
     d.require(creation and creation.get("status") in ("acknowledged", "verified")
               and creation["input"].get("nodeKind") == "scene"
-              and creation["input"].get("initialData") in (expected_initial, legacy_initial),
+              and creation["input"].get("initialData") in (expected_initial, legacy_initial, legacy_defaults),
               "缺少同一原ID的已确认创建记录")
     relevant = [e for e in state["journal"] if e is not entry
                 and any(t.get("node_id") == node_id for t in e.get("targets", []))]
@@ -132,8 +142,11 @@ def recover_asset_rejection(project, cli, operation_id, apply=False, fingerprint
               "原节点还有其他未知操作，不能恢复")
     d.require(business_ready(doc, node_id, "scene"), "原业务资产尚未就绪，未修改日志")
     current = observation(doc, node_id)
-    d.require(pristine_initialization(doc, node_id, "scene", mapping["name"]),
+    d.require(pristine_initialization(doc, node_id, "scene", mapping["name"], created_prompt),
               "原节点已有其他内容或人工修改，不能自动恢复")
+    if created_initial.get("generation"):
+        d.require(c.content(doc, node_id).get("generation") == created_initial["generation"],
+                  "原场景生成字段在创建后已变化，不能自动修复旧日志")
     result = {"status": "recoverable", "operation_id": operation_id, "key": key, "node_id": node_id,
               "fingerprint": c.fingerprint(doc, node_id), "remote_write": False}
     if apply:
@@ -191,26 +204,15 @@ class ControlledCLI(c.CLI):
 
 
 def asset_items(session):
-    source = {row["id"]: row for category in ("characters", "scene_assets", "props")
-              for row in session["ledger"][category]}
-    result = c.desired_assets(session)
-    for item in result:
-        prompt = source[item["key"]].get("image_prompt")
-        d.require(isinstance(prompt, str) and prompt.strip(), "资产缺少已定稿的image_prompt：" + item["key"])
-        item["description"] = prompt
-    return result
+    items = c.desired_assets(session)
+    for item in items:
+        d.require(isinstance(item.get("image_prompt"), str) and item["image_prompt"].strip(),
+                  "资产缺少已定稿的image_prompt：" + item["key"])
+    return items
 
 
 def asset_targets(item, node_id):
-    targets = [{"action": "node_kind", "node_id": node_id, "kind": item["kind"]}]
-    if item["kind"] in ("role", "scene"):
-        targets += [{"action": "rename", "node_id": node_id, "value": item["name"]},
-                    {"action": "field", "node_id": node_id, "value": ""},
-                    {"action": "description", "node_id": node_id, "value": item["description"]}]
-    else:
-        targets += [{"action": "patch", "node_id": node_id, "patch": {"name": item["name"], "caption": item["name"]}},
-                    {"action": "prompt", "node_id": node_id, "value": item["description"]}]
-    return targets
+    return c.asset_targets(item, node_id)
 
 
 def acknowledge(project, cli, state, command, value, targets, baseline=None):
@@ -263,7 +265,8 @@ def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
                            and e.get("input", {}).get("nodeId") == node_id]
         if (mapping.get("stage") == "writing" and mapping.get("kind") in ("role", "scene")
                 and creation and not business_writes and node_id in c.nodes(doc)
-                and not pristine_initialization(doc, node_id, mapping["kind"], mapping["name"])):
+                and not pristine_initialization(doc, node_id, mapping["kind"], mapping["name"],
+                    next((i.get("image_prompt") for i in items if i["key"] == key), None))):
             c.fail("CONCURRENT_EDIT", "原新建资产在初始化前已有其他内容，停止覆盖。", key=key, node_id=node_id)
         rejected = next((e for e in reversed(state["journal"]) if e.get("status") == "rejected"
                          and not e.get("resolved_by")
@@ -308,7 +311,7 @@ def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
             node_ids[item["key"]] = node_id
             state["mappings"][item["key"]] = {**state["mappings"].get(item["key"], {}), "node_id": node_id,
                 "kind": item["kind"], "name": item["name"], "stage": "ready", "appearance_name": "",
-                "description_hash": c.digest(item["description"])}
+                "prompt_hash": c.digest(item["image_prompt"]), "asset_contract": c.ASSET_CONTRACT}
         else:
             pending.append(item)
     c.save(project, state)
@@ -331,11 +334,11 @@ def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
                 c.fail("CONCURRENT_EDIT", "本组新建前出现同名节点，请重新核对。", key=item["key"])
             if node_id:
                 data = c.content(fresh, node_id)
-                current = data.get("appearanceInfo", {}).get("description", "") if item["kind"] in ("role", "scene") else c.prompt_of(fresh, node_id)
+                current = c.prompt_of(fresh, node_id)
                 mapping = state["mappings"].get(item["key"], {})
                 approved = decisions.get(item["key"], {}).get("overwrite_fingerprint") == c.fingerprint(fresh, node_id)
-                if current and current != item["description"] and not approved:
-                    c.fail("CONCURRENT_EDIT", "资产已有不同描述，需明确选择后修改。", key=item["key"], node_id=node_id)
+                if current and current != item["image_prompt"] and not approved:
+                    c.fail("CONCURRENT_EDIT", "资产已有不同生成提示词，需明确选择后修改。", key=item["key"], node_id=node_id)
                 view = data.get("basicInfo", {}).get("appearanceName", "")
                 if view and mapping.get("stage") == "ready" and not approved:
                     c.fail("CONCURRENT_EDIT", "资产形象/视图名称已改变。", key=item["key"], node_id=node_id)
@@ -366,31 +369,14 @@ def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
             if item["kind"] in ("role", "scene"):
                 if is_new:
                     doc = wait_business_ready(project, cli, state, node_id, item["kind"])
-                    data = c.content(doc, node_id)
-                    if not pristine_initialization(doc, node_id, item["kind"], item["name"]):
+                    if not pristine_initialization(doc, node_id, item["kind"], item["name"], item.get("image_prompt")):
                         c.fail("CONCURRENT_EDIT", "新建资产在初始化前已有其他内容，停止覆盖。", key=item["key"], node_id=node_id)
                 baseline = observation(doc, node_id)
-                command = "xyq." + item["kind"] + ".updateDescription"
-                if is_new or c.name_of(doc, node_id) != item["name"] or data.get("basicInfo", {}).get("name") != item["name"]:
-                    baseline = asset_update(project, cli, state, command,
-                                {"nodeId": node_id, "assetId": node_id, "field": "characterName" if item["kind"] == "role" else "sceneName", "value": item["name"]},
-                                [{"action": "rename", "node_id": node_id, "value": item["name"]}], baseline)
-                if not is_new and data.get("basicInfo", {}).get("appearanceName") != "":
-                    baseline = asset_update(project, cli, state, command,
-                                {"nodeId": node_id, "assetId": node_id, "field": "appearanceName" if item["kind"] == "role" else "sceneViewName", "value": ""},
-                                [{"action": "field", "node_id": node_id, "value": ""}], baseline)
-                if is_new or data.get("appearanceInfo", {}).get("description") != item["description"]:
-                    baseline = asset_update(project, cli, state, command,
-                                {"nodeId": node_id, "assetId": node_id, "field": "appearance" if item["kind"] == "role" else "description", "value": item["description"]},
-                                [{"action": "description", "node_id": node_id, "value": item["description"]}], baseline)
+                for command, value, targets in c.asset_initialization_steps(doc, item, node_id, force_name=is_new):
+                    baseline = asset_update(project, cli, state, command, value, targets, baseline)
             else:
-                patch = {"name": item["name"], "caption": item["name"]}
-                if is_new or not all(data.get(k) == v for k, v in patch.items()):
-                    acknowledge(project, cli, state, "update_node_data", {"id": node_id, "patch": patch},
-                                [{"action": "patch", "node_id": node_id, "patch": patch}])
-                if is_new or not c.target_satisfied(doc, {"action": "prompt", "node_id": node_id, "value": item["description"]}):
-                    acknowledge(project, cli, state, "xyq.generation.update_prompt", {"nodeId": node_id, "prompt": item["description"]},
-                                [{"action": "prompt", "node_id": node_id, "value": item["description"]}])
+                for command, value, targets in c.asset_initialization_steps(doc, item, node_id):
+                    acknowledge(project, cli, state, command, value, targets)
             item["node_id"] = node_id
         # All fields for every node are checked together; no sampling or skipped fields.
         check_boundary(cli)
@@ -402,7 +388,7 @@ def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
                        asset_targets(item, node_id) + ([c.asset_settings_target(node_id)] if item["verify_image_defaults"] else [])):
                 c.fail("READBACK_FAILED", "资产节点最终字段未全部通过核对。", key=item["key"], node_id=node_id)
             mapping = state["mappings"][item["key"]]
-            mapping.update(stage="ready", name=item["name"], appearance_name="", description_hash=c.digest(item["description"]))
+            mapping.update(stage="ready", name=item["name"], appearance_name="", prompt_hash=c.digest(item["image_prompt"]), asset_contract=c.ASSET_CONTRACT)
             completed.append(item["key"])
             node_ids[item["key"]] = node_id
         c.save(project, state)

@@ -7,7 +7,7 @@ const vm = require("vm");
 
 const source = fs.readFileSync(path.join(__dirname, "ensure-cli.js"), "utf8");
 const requiredSemantic = [
-  "get_snapshot", "get_permissions", "create_biz_node", "update_node_data", "delete_nodes", "delete_edges",
+  "get_snapshot", "get_permissions", "create_biz_node", "update_node_data", "update_asset", "delete_nodes", "delete_edges",
   "xyq.generation.update_prompt", "xyq.role.updateDescription",
   "xyq.scene.updateDescription", "xyq.role.updateAppearance",
 ];
@@ -15,7 +15,7 @@ const cliDir = path.resolve("cli-capability-fixture");
 const cliPath = path.join(cliDir, `pippit-tool-cli${process.platform === "win32" ? ".exe" : ""}`);
 const entry = path.resolve(path.dirname(cliPath), "../scripts/run.js");
 
-function fixture(catalogNames) {
+function fixture(catalogNames, promptContract = true, teamFlag = true) {
   const calls = [];
   const messages = [];
   const fakeFs = {
@@ -34,9 +34,12 @@ function fixture(catalogNames) {
       throw error;
     }
     if (args.length === 1 && args[0] === "--version") return Buffer.from("1.0.38");
-    if (args.includes("--help")) return Buffer.from("supported");
+    if (args.includes("--help")) return Buffer.from(teamFlag ? "supported --team-id ID" : "supported");
     if (args.slice(-3).join(" ") === "canvas command list") {
       return Buffer.from(JSON.stringify({ commands: catalogNames.map((name) => ({ name })) }));
+    }
+    if (args.slice(-4).join(" ") === "canvas command schema xyq.role.updateAppearance") {
+      return Buffer.from(JSON.stringify({input_schema: {properties: {patch: {properties: promptContract ? {generationPrompt: {}} : {}}, expected: {properties: {generationPrompt: {}}}}}}));
     }
     throw new Error("unexpected mock command: " + args.join(" "));
   };
@@ -69,7 +72,7 @@ runCase("complete canvas command catalog", () => {
   const normal = fixture(requiredSemantic);
   assert.strictEqual(normal.ensureCLI({ canvas: true }).cli_path, cliPath);
   const probes = normal.calls.filter((call) => call.args.includes("--help")).map((call) => call.args.slice(0, -1).join(" "));
-  assert.deepStrictEqual(probes, ["status", "login", "canvas get", "canvas allocate", "canvas upload"]);
+  assert.deepStrictEqual(probes, ["status", "login", "canvas get", "canvas allocate", "canvas upload", "space list"]);
   assert(!normal.calls.some((call) => call.args.includes("install")));
 });
 
@@ -86,4 +89,13 @@ runCase("base authentication without canvas commands", () => {
   assert.strictEqual(base.ensureCLI().cli_path, cliPath);
   assert.deepStrictEqual(base.calls.filter((call) => call.args.includes("--help")).map((call) => call.args.slice(0, -1).join(" ")), ["status", "login"]);
 });
+
+
+runCase("missing independent role prompt schema", () => {
+  assert.throws(() => fixture(requiredSemantic, false).ensureCLI({ canvas: true }));
+});
+runCase("missing team-id flag", () => {
+  assert.throws(() => fixture(requiredSemantic, true, false).ensureCLI({ canvas: true }));
+});
+
 console.log(`CLI capability regression checks passed (${passedCases} cases, offline mock).`);

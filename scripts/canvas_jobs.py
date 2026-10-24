@@ -188,7 +188,8 @@ def enqueue(project, kind, request_id=None, ids=None, folder=None, decisions=Non
         options["image_target_count"] = sum(not options["decisions"].get(item["key"], {}).get("skip") for item in matched)
     scope = input_scope(session, kind, selected)
     input_digest = c.digest(scope)
-    identity = c.digest({"binding": binding, "kind": kind, "input_digest": input_digest, "options": options})
+    identity = c.digest({"binding": binding, "kind": kind, "input_digest": input_digest, "options": options,
+                         "asset_contract": c.ASSET_CONTRACT})
     job_id = "job-" + identity[:32]
     with metadata_lock(project):
         path = directory(project) / (job_id + ".json")
@@ -206,7 +207,7 @@ def enqueue(project, kind, request_id=None, ids=None, folder=None, decisions=Non
             supersedes = [j["job_id"] for j in previous_jobs if j["kind"] == kind and j["binding"] == binding
                           and j["options"]["ids"] == selected and j["options"].get("folder") == options.get("folder")
                           and job_state(project, j)["status"] != "completed"]
-            job = {"schema": 1, "job_id": job_id, "created_at": time.time_ns(), "kind": kind,
+            job = {"schema": 1, "asset_contract": c.ASSET_CONTRACT, "job_id": job_id, "created_at": time.time_ns(), "kind": kind,
                    "binding": binding, "input_digest": input_digest, "options": options,
                    "dependencies": dependencies, "supersedes": supersedes, "session": copy.deepcopy(session)}
             job["manifest_digest"] = c.digest(job)
@@ -222,6 +223,8 @@ def enqueue(project, kind, request_id=None, ids=None, folder=None, decisions=Non
 def validate_job(project, job):
     payload = {k: v for k, v in job.items() if k != "manifest_digest"}
     d.require(c.digest(payload) == job["manifest_digest"], "任务JSON被修改，请重新提交任务")
+    d.require(job.get("asset_contract") == c.ASSET_CONTRACT,
+              "任务冻结的画布字段契约与当前版本不同；保留原任务和暂停状态，请核对后重新提交，不执行旧任务。")
     d.require(c.read_state(project).get("binding") == job["binding"], "画布绑定已变化，停止旧任务")
     session = d.load(Path(project))
     d.require(c.digest(input_scope(session, job["kind"], job["options"]["ids"])) == job["input_digest"],

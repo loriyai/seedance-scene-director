@@ -54,7 +54,7 @@ python <skill>/scripts/canvas_jobs.py recover-assets --project <project> --opera
 
 资产定稿且用户同意传输后，提交assets任务并立即进入剧本范围选择。后台脚本新建、核对、记录ID；Codex可同时用本地定稿台账生成分镜。同步进程不修改`session.json`的phase、分镜编号或历史范围。
 
-资产的`completed`表示名称、类型、空形象/视角名、完整image_prompt及ID映射均已核验；新建节点还须核对[资产图片默认参数](canvas.md#资产与视频节点)。角色/场景图片提示词写入appearanceInfo.description，道具写入generation.prompt。空图片节点允许完成，图片就绪另列。成功计数只包括已核验节点，不能把queued/running、已申请ID或单步ACK当完成。
+资产的`completed`表示名称、类型、空形象/视角名、完整image_prompt及ID映射均已核验；新建节点还须核对[资产图片默认参数](canvas.md#资产与视频节点)。提示词按[资产字段契约](canvas.md#资产与视频节点)核验generation.prompt，描述一致不能代替；回执记录generation-prompt-v2及prompt_hash，旧description_hash不作为提示词证据。空图片节点允许完成，图片就绪另列。成功计数只包括已核验节点，不能把queued/running、已申请ID或单步ACK当完成。
 
 `status.image_choice_available=true`时，在当前分镜交付/交互边界提示“是否上传本地图片到对应资产节点？1.是 2.暂不上传”，不打断正在起草的分镜，也不以补图阻塞分镜或视频空节点。收到选择后调用image-choice：1记录upload_pending并询问目录，已有目录直接提交images；2记录跳过。同一完成任务的菜单不重复询问。需要切换phase时由前台director执行，后台完成事件不能覆盖当前交互位置。
 
@@ -75,11 +75,11 @@ python <skill>/scripts/canvas_jobs.py recover-assets --project <project> --opera
 
 ## 持久化与正确性
 
-- `canvas/jobs/job-<摘要>.json`：绑定、冻结session输入、所选单元与版本、请求选项、依赖任务及内容摘要。稳定CHAR/SET/PROP/分镜ID沿用，不创建易漂移的临时序号。
+- `canvas/jobs/job-<摘要>.json`：绑定（含已确认team_id）、资产字段契约版本、冻结session输入、所选单元与版本、请求选项、依赖任务及内容摘要。稳定CHAR/SET/PROP/分镜ID沿用，不创建易漂移的临时序号。
 - 同名`.state.json`：worker独占的进度、已核验计数、节点映射和结果。完整映射和逐操作日志继续保存在`canvas/state.json`，视频完成回执仍保存在`canvas/video-write-receipts/`。
 - `control.json`：暂停、图片菜单选择、按event_id保存的已报告记录与按job_id保存的视频后续入口状态；`worker.json`：进程状态；`events.json`：带稳定事件ID、目标绑定和桌面通知尝试结果的completed与needs_attention事件，完成每任务一次，相同失败内容去重；`worker.log`：后台运行错误。读取旧事件只补足返回视图，不迁移冻结任务或重发系统通知。
 
-追加新范围不使已有资产任务失效。来源、资产台账、风格、目标画布、所选分镜或待上传图片变动时，旧任务停止，重新提交当前内容；不得继续写旧版本。输入文件与进度文件分离，Codex不改正在执行的任务JSON。
+追加新范围不使已有资产任务失效。任务字段契约与当前版本不一致时停止，保留原JSON、日志与暂停状态，核对后重新提交当前契约的任务；不自动升级冻结任务或按旧description目标继续写入。来源、资产台账、风格、目标画布、所选分镜或待上传图片变动时，旧任务停止，重新提交当前内容；不得继续写旧版本。输入文件与进度文件分离，Codex不改正在执行的任务JSON。
 
 同一账号与画布只有一个后台writer，使用跨进程OS锁并复用原画布操作锁。不同项目绑定同一画布时第二个worker停止，不得启动多个worker并发写入同一画布。worker正在写入时不得另行使用canvas.py修改或上传；需要精确编辑或删除时先暂停队列，确认当前已发送请求的结果并保存日志后，再按原接口执行。
 

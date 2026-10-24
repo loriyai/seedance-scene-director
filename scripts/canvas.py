@@ -24,6 +24,7 @@ NODE_ASSET_TAG = re.compile(r"<node-asset\b[^>]*>([^<]*)</node-asset>")
 VIDEO_READBACK_ATTEMPTS = 3
 VIDEO_READBACK_DELAY = 0.5
 ASSET_IMAGE_DEFAULTS = {"resolution": "2K", "effort": "high", "ratio": "16:9"}
+ASSET_CONTRACT = "generation-prompt-v2"
 
 
 class CanvasError(ValueError):
@@ -81,6 +82,20 @@ class CLI:
         self.directory.mkdir(parents=True, exist_ok=True)
         config = self.directory / "connection.json"
         self.config = d.read_json(config) if config.exists() else {}
+        self.binding = None
+
+    def use_binding(self, binding):
+        if binding:
+            if binding.get("team_id") is None:
+                fail("SPACE_REQUIRED", "旧画布绑定缺少空间信息；请用bind重新核对同一目标，不自动使用当前默认空间。")
+            normalize_team_id(binding["team_id"])
+        self.binding = copy.deepcopy(binding)
+
+    def space_args(self):
+        binding = self.binding or read_state(self.project).get("binding")
+        if not binding or binding.get("team_id") is None:
+            fail("SPACE_REQUIRED", "画布操作需要已核对的空间绑定；请先bind。")
+        return ["--team-id", normalize_team_id(binding["team_id"])]
 
     def setup(self, node=None):
         node = node or self.config.get("node_path") or shutil.which("node")
@@ -88,16 +103,19 @@ class CLI:
             fail("NODE_REQUIRED", "需要Node.js 16或更高版本，请提供可用Node.js路径。")
         result = run_json([node, Path(__file__).with_name("ensure-cli.js"), "--canvas"], self.project, 300)
         self.config = {"node_path": str(Path(node).resolve()), "cli_path": result["cli_path"],
-                       "canvas_entry": result["canvas_entry"], "version": result.get("version")}
+                       "canvas_entry": result["canvas_entry"], "version": result.get("version"), "canvas_contract": ASSET_CONTRACT}
         d.write_json(self.directory / "connection.json", self.config)
         return {"status": "configured", "version": self.config["version"]}
 
     def ready(self):
-        if not all(Path(self.config.get(k, "__missing__")).is_file() for k in ("node_path", "cli_path", "canvas_entry")):
+        if (self.config.get("canvas_contract") != ASSET_CONTRACT or
+                not all(Path(self.config.get(k, "__missing__")).is_file() for k in ("node_path", "cli_path", "canvas_entry"))):
             self.setup()
 
     def native(self, *args, timeout=120):
         self.ready()
+        if args and args[0] == "canvas" and "--team-id" not in args:
+            args = (*args, *self.space_args())
         return run_json([self.config["cli_path"], *args], self.project, timeout)
 
     def auth(self, login=False, force=False):
@@ -120,11 +138,13 @@ class CLI:
 
     def command(self, canvas_id, name, value=None):
         self.ready()
+        binding = self.binding or read_state(self.project).get("binding") or {}
+        d.require(binding.get("canvas_id") == canvas_id, "命令目标与当前绑定画布不一致")
         with tempfile.TemporaryDirectory(prefix="command-", dir=self.directory) as temporary:
             path = Path(temporary) / "input.json"
             d.write_json(path, value or {})
             result = run_json([self.config["node_path"], self.config["canvas_entry"], "canvas", "command", "run",
-                               name, "--canvas-id", canvas_id, "--file", path], self.project)
+                               name, "--canvas-id", canvas_id, *self.space_args(), "--file", path], self.project)
         if result.get("ok") is not True:
             fail("CLI_ERROR", "画布命令没有确认成功。")
         return result.get("data", {})
@@ -202,12 +222,19 @@ def project_lock(project):
         path.unlink(missing_ok=True)
 
 
-def parse_target(target, cli):
+def normalize_team_id(value):
+    d.require(isinstance(value, str) and re.fullmatch(r"[0-9]+", value)
+              and int(value) <= 9223372036854775807, "空间ID须为0或int64范围内的正整数字符串")
+    return str(int(value))
+
+
+def parse_target(target, cli, resolve=True):
     if not target.startswith("https://"):
         d.require(re.fullmatch(r"[A-Za-z0-9_-]+", target), "画布ID格式非法")
         return {"canvas_id": target, "project_id": None, "url": None}
     parsed = urlparse(target)
-    d.require(parsed.hostname == "xyq.jianying.com" and parsed.port in (None, 443)
+    d.require((parsed.hostname, parsed.path) in (("xyq.jianying.com", "/novel/detail/canvas"),
+                                               ("www.xiaoyunque.com", "/project")) and parsed.port in (None, 443)
               and not parsed.username and not parsed.password, "请提供小云雀官方画布链接")
     query = parse_qs(parsed.query)
     def one(key):
@@ -215,7 +242,7 @@ def parse_target(target, cli):
         d.require(len(values) <= 1, "画布链接含重复参数")
         return values[0] if values else None
     canvas_id, project_id, overview = one("canvasId"), one("projectId"), one("overviewPippitAssetId")
-    if not canvas_id and overview:
+    if not canvas_id and overview and resolve:
         raw = cli.native("canvas", "get", "--asset-id", overview)
         candidates = set()
         def walk(value, depth=0):
@@ -239,12 +266,35 @@ def parse_target(target, cli):
         if len(candidates) != 1:
             fail("CANVAS_ID_REQUIRED", "该链接未能唯一解析画布ID，请提供CLI画布ID或含canvasId的链接。")
         canvas_id = candidates.pop()
-    d.require(isinstance(canvas_id, str) and re.fullmatch(r"[A-Za-z0-9_-]+", canvas_id), "链接缺少有效画布ID")
+    d.require((isinstance(canvas_id, str) and re.fullmatch(r"[A-Za-z0-9_-]+", canvas_id))
+              or (not resolve and isinstance(overview, str) and re.fullmatch(r"[A-Za-z0-9_-]+", overview)), "链接缺少有效画布ID")
     # Persist only routing parameters; drop tokens or unrelated URL parameters.
     params = {"projectId": project_id} if project_id else {}
     params.update({"overviewPippitAssetId": overview} if overview else {"canvasId": canvas_id})
     return {"canvas_id": canvas_id, "project_id": project_id, "overview_id": overview,
-            "url": "https://xyq.jianying.com/novel/detail/canvas?" + urlencode(params)}
+            "space_hint": "team" if parsed.hostname == "www.xiaoyunque.com" else "personal",
+            "url": "https://" + parsed.hostname + parsed.path + "?" + urlencode(params)}
+
+
+def binding_space(cli, target, previous, account_id, explicit=None):
+    """Choose one candidate, then bind() verifies it; never probe a list of teams."""
+    same = previous and previous.get("canvas_id") == target.get("canvas_id") and previous.get("account_id") == account_id
+    if explicit is not None:
+        return normalize_team_id(explicit), "explicit"
+    if same and previous.get("team_id") is not None:
+        return normalize_team_id(previous["team_id"]), "saved_binding"
+    spaces = cli.native("space", "list")
+    teams = [row for row in spaces.get("spaces", []) if row.get("team_id") not in (None, "0")]
+    if target.get("space_hint") == "personal":
+        return "0", "url_candidate"
+    if target.get("space_hint") == "team":
+        if len(teams) == 1:
+            return normalize_team_id(teams[0]["team_id"]), "url_and_single_team_candidate"
+        fail("SPACE_REQUIRED", "链接提示团队空间，但不能唯一确定团队；请按space list结果传--team-id。", teams=teams)
+    current = spaces.get("current") or {}
+    if current.get("team_id") is not None:
+        return normalize_team_id(current["team_id"]), "current_space_candidate"
+    fail("SPACE_REQUIRED", "无法确定本次画布空间；请传--team-id。", teams=teams)
 
 
 def document(cli, binding):
@@ -287,22 +337,39 @@ def fingerprint(doc, node_id):
     return digest({"node": nodes(doc).get(node_id), "asset": doc["assets"].get(node_id)})
 
 
-def bind(project, cli, target, switch=False):
+def bind(project, cli, target, switch=False, team_id=None):
     account = cli.auth()
     state = read_state(project)
-    binding = dict(parse_target(target, cli), account_id=account["identity"])
     previous = state.get("binding")
+    parsed = parse_target(target, cli, resolve=False)
+    selected, evidence = binding_space(cli, parsed, previous, account["identity"], team_id)
+    binding = dict(parsed, account_id=account["identity"], team_id=selected)
+    if hasattr(cli, "use_binding"):
+        cli.use_binding(binding)
+    if not parsed.get("canvas_id"):
+        binding.update(parse_target(target, cli))
+        if hasattr(cli, "use_binding"):
+            cli.use_binding(binding)
+    binding["space_evidence"] = evidence
     if previous and previous != binding:
-        same = all(previous.get(k) == binding.get(k) for k in ("canvas_id", "account_id"))
+        same = all(previous.get(k) == binding.get(k) for k in ("canvas_id", "account_id")) and previous.get("team_id", selected) == selected
         if not same and not switch:
             fail("SWITCH_REQUIRED", "已有画布绑定；仅在用户明确要求切换后使用switch。", binding=previous)
         if not same:
             d.write_json(Path(project) / "canvas" / ("archive-" + uuid.uuid4().hex + ".json"), state)
             state = blank_state()
-    permissions = cli.command(binding["canvas_id"], "get_permissions")
-    d.require(permissions.get("canvasId") == binding["canvas_id"] and permissions.get("readOnly") is False,
-              "不能编辑该画布")
-    document(cli, binding)
+    try:
+        permissions = cli.command(binding["canvas_id"], "get_permissions")
+        d.require(permissions.get("canvasId") == binding["canvas_id"] and permissions.get("readOnly") is False,
+                  "不能编辑该画布")
+        document(cli, binding)
+    except (ValueError, OSError, KeyError) as exc:
+        if hasattr(cli, "use_binding"):
+            cli.binding = None
+        fail("SPACE_LOOKUP_FAILED", "候选空间无法核验指定画布；未切换绑定、未尝试其他空间，请核对目标或传--team-id。",
+             team_id=selected, cause=safe_message(exc))
+    if hasattr(cli, "use_binding"):
+        cli.use_binding(binding)
     state["binding"] = binding
     save(project, state)
     return {"status": "bound", "binding": binding}
@@ -315,6 +382,8 @@ def connected(project, cli):
     account = cli.auth()
     if account["identity"] != state["binding"]["account_id"]:
         fail("ACCOUNT_CHANGED", "CLI账号与绑定账号不同；请恢复原账号或明确切换画布绑定。")
+    if hasattr(cli, "use_binding"):
+        cli.use_binding(state["binding"])
     return state, document(cli, state["binding"])
 
 
@@ -432,11 +501,11 @@ def target_satisfied(doc, target):
     if node_id not in nodes(doc):
         return False
     if action == "create":
-        if target["kind"] == "video":
+        if target["kind"] in ("video", "role", "scene"):
             # Legacy video create journals predate the explicit rename step.
             # The exact allocated ID and kind confirm creation; the final
             # video receipt owns name/duration/prompt acceptance.
-            return kind_of(nodes(doc)[node_id]) == "video"
+            return kind_of(nodes(doc)[node_id]) == target["kind"]
         return kind_of(nodes(doc)[node_id]) == target["kind"] and content(doc, node_id).get("name", content(doc, node_id).get("nodeName")) == target["name"]
     if action == "node_kind":
         return kind_of(nodes(doc)[node_id]) == target["kind"]
@@ -467,7 +536,10 @@ def target_satisfied(doc, target):
     if action == "description":
         return content(doc, node_id).get("appearanceInfo", {}).get("description") == target["value"]
     if action == "main_image":
-        return media.selected_image(doc, node_id) == target["value"] and ready_image(doc, node_id)
+        data = content(doc, node_id)
+        info = data.get("appearanceInfo", {}) if kind_of(nodes(doc)[node_id]) in ("role", "scene") else data
+        return (media.selected_image(doc, node_id) == target["value"] and ready_image(doc, node_id)
+                and (not target.get("media_asset_id") or info.get("assetId") == target["media_asset_id"]))
     return False
 
 
@@ -738,7 +810,7 @@ def desired_assets(session):
     for item in result:
         prompt = source[item["key"]].get("image_prompt")
         if isinstance(prompt, str) and prompt.strip():
-            item["description"] = prompt
+            item["image_prompt"] = prompt
     return result
 
 
@@ -1100,6 +1172,7 @@ def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, pre
     positions = layout_positions(doc, plan)
     for item in plan:
         key, node_id = item["key"], item.get("node_id")
+        initialized = False
         if context is not None:
             context["active"] = {"key": key, "name": item["name"], "kind": item["kind"], "node_id": node_id}
         if item["resolution"] == "create":
@@ -1134,6 +1207,7 @@ def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, pre
             summary["adopted" if item["resolution"] == "adopted" else "reused"].append(key)
         if state["mappings"].get(key, {}).get("stage") == "allocated" and not preview:
             doc = initialize_asset_prompt(project, cli, state, doc, item, node_id)
+            initialized = True
             if context is not None:
                 context["doc"] = doc
         if item["resolution"] != "mapped" or state["mappings"][key].get("stage") != "ready":
@@ -1143,6 +1217,8 @@ def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, pre
                 state["mappings"][key]["appearance_name"] = content(doc, node_id).get("basicInfo", {}).get("appearanceName", "")
             if not preview:
                 save(project, state)
+        if initialized and item.get("image_prompt"):
+            state["mappings"][key].update(prompt_hash=digest(item["image_prompt"]), asset_contract=ASSET_CONTRACT)
     if not preview:
         save(project, state)
     if context is not None:
@@ -1311,6 +1387,9 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
                     changes.append("name")
             if mapping.get("stage") == "ready" and "prompt" in item and digest(prompt_of(doc, node_id)) != mapping.get("prompt_hash") and prompt_of(doc, node_id) != item["prompt"]:
                 changes.append("prompt")
+            if (mapping.get("stage") == "ready" and item.get("image_prompt")
+                    and prompt_of(doc, node_id) not in ("", item["image_prompt"])):
+                changes.append("image_prompt")
             if item["kind"] in ("role", "scene") and mapping.get("stage") == "ready":
                 current_view = content(doc, node_id).get("basicInfo", {}).get("appearanceName")
                 if current_view != mapping.get("appearance_name", "") and current_view != "":
@@ -1420,8 +1499,12 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
                 continue
         updated += fingerprint(doc, node_id) != before
         mapping = state["mappings"][key]
-        if item["kind"] in ("role", "scene", "image") and mapping.get("stage") == "allocated":
-            doc = initialize_asset_prompt(project, cli, state, doc, item, node_id)
+        if (item["kind"] in ("role", "scene", "image") and
+                (mapping.get("stage") == "allocated" or kind == "assets")):
+            approved = decisions.get(key, {}).get("overwrite_fingerprint") == before
+            doc = initialize_asset_prompt(project, cli, state, doc, item, node_id, allow_overwrite=approved)
+            if item.get("image_prompt"):
+                mapping.update(prompt_hash=digest(item["image_prompt"]), asset_contract=ASSET_CONTRACT)
             context["doc"] = doc
         mapping["stage"] = "ready"
         mapping.pop("initialization_fingerprint", None)
@@ -1482,7 +1565,8 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
 def initial_data(item):
     if item["kind"] in ("role", "scene"):
         return {"nodeName": item["name"], "basicInfo": {"name": item["name"], "appearanceName": ""},
-                "generation": copy.deepcopy(ASSET_IMAGE_DEFAULTS)}
+                "generation": {**copy.deepcopy(ASSET_IMAGE_DEFAULTS),
+                               "prompt": item.get("image_prompt", "") if item["kind"] == "scene" else ""}}
     return {"name": item["name"], "caption": item["name"], **({"title": item["name"]} if item["kind"] == "video" else {}),
             **({"generation": copy.deepcopy(ASSET_IMAGE_DEFAULTS)} if item["kind"] == "image" else
                {"generation": copy.deepcopy(item["settings"])} if item.get("settings") else {})}
@@ -1501,38 +1585,90 @@ def pending_asset_settings(state, node_id):
         value = entry.get("input", {})
         if entry.get("command") == "create_biz_node" and value.get("id") == node_id:
             if (value.get("nodeKind") in ("role", "scene", "image")
-                    and value.get("initialData", {}).get("generation") == ASSET_IMAGE_DEFAULTS):
+                    and all(value.get("initialData", {}).get("generation", {}).get(k) == v for k, v in ASSET_IMAGE_DEFAULTS.items())):
                 return [asset_settings_target(node_id)]
             break
     return []
 
 
-def initialize_asset_prompt(project, cli, state, doc, item, node_id):
+def asset_prompt_change(doc, node_id, kind, prompt):
+    """Authoritative per-kind prompt writer; descriptions are independent fields."""
+    if kind == "role":
+        return ("xyq.role.updateAppearance", {"nodeId": node_id, "assetId": node_id,
+                "expected": {"generationPrompt": content(doc, node_id).get("generation", {}).get("prompt")},
+                "patch": {"generationPrompt": prompt}},
+                [{"action": "prompt_text", "node_id": node_id, "value": prompt}])
+    if kind == "scene":
+        generation = {**copy.deepcopy(content(doc, node_id).get("generation") or {}), "prompt": prompt}
+        raw = doc["assets"][node_id]["content"]
+        patch = {"data": {**copy.deepcopy(raw["data"]), "generation": generation}} if isinstance(raw.get("data"), dict) else {"generation": generation}
+        return ("update_asset", {"assetId": node_id, "contentPatch": patch},
+                [{"action": "prompt_text", "node_id": node_id, "value": prompt},
+                 {"action": "generation_settings", "node_id": node_id, "value": generation}])
+    d.require(kind in ("image", "video"), "该节点没有已支持的生图提示词写入接口")
+    return ("xyq.generation.update_prompt", {"nodeId": node_id, "prompt": prompt},
+            [{"action": "prompt", "node_id": node_id, "value": prompt}])
+
+
+def asset_targets(item, node_id):
+    targets = [{"action": "node_kind", "node_id": node_id, "kind": item["kind"]}]
+    if item["kind"] in ("role", "scene"):
+        targets += [{"action": "rename", "node_id": node_id, "value": item["name"]},
+                    {"action": "field", "node_id": node_id, "value": ""}]
+    else:
+        targets += [{"action": "patch", "node_id": node_id, "patch": {"name": item["name"], "caption": item["name"]}}]
+    if item.get("image_prompt"):
+        targets.append({"action": "prompt" if item["kind"] == "image" else "prompt_text", "node_id": node_id, "value": item["image_prompt"]})
+    return targets
+
+
+def asset_initialization_steps(doc, item, node_id, force_name=False):
+    """Shared initialization for direct, queued and video-preparation creation."""
+    kind, name = item["kind"], item["name"]
+    data = content(doc, node_id)
+    steps = []
+    if kind in ("role", "scene"):
+        command = "xyq." + kind + ".updateDescription"
+        if force_name or name_of(doc, node_id) != name or data.get("basicInfo", {}).get("name") != name:
+            steps.append((command, {"nodeId": node_id, "assetId": node_id,
+                "field": "characterName" if kind == "role" else "sceneName", "value": name},
+                [{"action": "rename", "node_id": node_id, "value": name}]))
+        if data.get("basicInfo", {}).get("appearanceName") != "":
+            steps.append((command, {"nodeId": node_id, "assetId": node_id,
+                "field": "appearanceName" if kind == "role" else "sceneViewName", "value": ""},
+                [{"action": "field", "node_id": node_id, "value": ""}]))
+    elif not all(data.get(k) == v for k, v in {"name": name, "caption": name}.items()):
+        patch = {"name": name, "caption": name}
+        steps.append(("update_node_data", {"id": node_id, "patch": patch},
+                      [{"action": "patch", "node_id": node_id, "patch": patch}]))
+    prompt = item.get("image_prompt")
+    if prompt and not target_satisfied(doc, {"action": "prompt" if kind == "image" else "prompt_text", "node_id": node_id, "value": prompt}):
+        steps.append(asset_prompt_change(doc, node_id, kind, prompt))
+    return steps
+
+
+def initialize_asset_prompt(project, cli, state, doc, item, node_id, allow_overwrite=False):
     """Finish a new asset on its saved ID; preserve adopted/ready assets elsewhere."""
     for target in pending_asset_settings(state, node_id):
         if not target_satisfied(doc, target):
             fail("READBACK_FAILED", "新建资产图片默认参数回读不一致。", node_id=node_id)
-    prompt = item.get("description")
-    if not prompt:
-        return doc  # Historical ledgers may predate image design.
-    role_scene = item["kind"] in ("role", "scene")
-    current = (content(doc, node_id).get("appearanceInfo", {}).get("description", "")
-               if role_scene else prompt_of(doc, node_id))
-    if current and current != prompt:
+    if item["kind"] in ("role", "scene"):
+        from canvas_job_backend import wait_business_ready
+        doc = wait_business_ready(project, cli, state, node_id, item["kind"], doc)
+    prompt = item.get("image_prompt")
+    current = prompt_of(doc, node_id)
+    if prompt and current and current != prompt and not allow_overwrite:
         fail("CONCURRENT_EDIT", "新建资产已有不同图片提示词，停止覆盖。", node_id=node_id)
-    if current != prompt:
-        if role_scene:
-            doc = write_verified(project, cli, state, "xyq." + item["kind"] + ".updateDescription",
-                                 {"nodeId": node_id, "assetId": node_id,
-                                  "field": "appearance" if item["kind"] == "role" else "description", "value": prompt},
-                                 [{"action": "description", "node_id": node_id, "value": prompt}])
-        else:
-            doc = write_verified(project, cli, state, "xyq.generation.update_prompt",
-                                 {"nodeId": node_id, "prompt": prompt},
-                                 [{"action": "prompt", "node_id": node_id, "value": prompt}])
+    for command, value, targets in asset_initialization_steps(doc, item, node_id):
+        fresh = document(cli, state["binding"])
+        if fingerprint(fresh, node_id) != fingerprint(doc, node_id):
+            fail("CONCURRENT_EDIT", "资产初始化期间节点发生变化，停止覆盖。", node_id=node_id)
+        doc = write_verified(project, cli, state, command, value, targets)
     for target in pending_asset_settings(state, node_id):
         if not target_satisfied(doc, target):
             fail("READBACK_FAILED", "提示词写入后资产图片默认参数回读不一致。", node_id=node_id)
+    if not all(target_satisfied(doc, target) for target in asset_targets(item, node_id)):
+        fail("READBACK_FAILED", "资产名称、类型、形象/视角及生成提示词未全部通过回读。", node_id=node_id)
     return doc
 
 
@@ -1637,7 +1773,7 @@ def manage(project, cli, action, request, preview=False):
                 d.require(field != "appearanceName" or kind == "role", "appearanceName仅适用于角色")
                 d.require(field != "sceneViewName" or kind == "scene", "sceneViewName仅适用于场景")
                 d.require(field != "description" or kind in ("role", "scene", "text"), "该节点不支持description")
-                d.require(field != "prompt" or kind in ("image", "video"), "该节点不支持此生成提示词接口")
+                d.require(field != "prompt" or kind in ("role", "scene", "image", "video"), "该节点不支持此生成提示词接口")
     if preview:
         return {"status": "planned", "node_ids": selected, "dependents": effects,
                 "fingerprints": {i: fingerprint(doc, i) for i in selected}}
@@ -1674,8 +1810,8 @@ def manage(project, cli, action, request, preview=False):
                 if field == "name":
                     doc = set_name(project, cli, state, doc, node_id, value)
                 elif field == "prompt":
-                    doc = write_verified(project, cli, state, "xyq.generation.update_prompt", {"nodeId": node_id, "prompt": value},
-                                         [{"action": "prompt", "node_id": node_id, "value": value}])
+                    kind = kind_of(nodes(doc)[node_id])
+                    doc = write_verified(project, cli, state, *asset_prompt_change(doc, node_id, kind, value))
                 elif field in ("appearanceName", "sceneViewName"):
                     kind = kind_of(nodes(doc)[node_id])
                     doc = write_verified(project, cli, state, "xyq." + kind + ".updateDescription",
@@ -1738,6 +1874,7 @@ def main():
     parser.add_argument("--login", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--target")
+    parser.add_argument("--team-id", help="首次绑定时明确空间；0为个人，后续从绑定自动沿用")
     parser.add_argument("--switch", action="store_true")
     parser.add_argument("--request-id")
     parser.add_argument("--ids", nargs="+")
@@ -1759,7 +1896,7 @@ def main():
                 result = {"status": "authenticated", "account_id": auth["identity"]}
             elif args.command == "bind":
                 d.require(args.target, "绑定画布需要--target")
-                result = bind(args.project, cli, args.target, args.switch)
+                result = bind(args.project, cli, args.target, args.switch, args.team_id)
             elif args.command in ("assets", "videos", "references"):
                 result = sync(args.project, cli, "assets" if args.command == "assets" else "videos",
                               args.request_id, args.ids, d.read_json(args.decisions) if args.decisions else None,

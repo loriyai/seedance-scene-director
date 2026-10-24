@@ -156,25 +156,55 @@ def observed_string(value, keys):
                 return found
 
 
+def upload_key(state, sha):
+    c = api()
+    binding = state.get("binding") or {}
+    return c.digest([binding.get("account_id"), binding.get("team_id"), sha])
+
+
+def queried_image_id(asset, expected_pid):
+    c = api()
+    pid = next((asset[k] for k in ("PippitAssetID", "pippit_asset_id", "pippitAssetId") if asset.get(k)), None)
+    if pid != expected_pid:
+        c.fail("INVALID_MEDIA_IDENTITY", "素材查询返回的Pippit ID与上传ID不一致。")
+    native_type = asset.get("AssetType", asset.get("asset_type"))
+    if native_type is not None and (type(native_type) is not int or native_type != 1):
+        c.fail("INVALID_MEDIA_IDENTITY", "上传目标不是图片素材，不能使用视频预览图作为主图身份。")
+    sections = [asset[k] for k in ("Image", "image") if isinstance(asset.get(k), dict)]
+    if len(sections) != 1:
+        return None
+    ids = [sections[0][k] for k in ("asset_id", "assetId", "AssetID") if sections[0].get(k)]
+    if len(ids) > 1:
+        c.fail("INVALID_MEDIA_IDENTITY", "图片素材含重复的云媒体ID字段。")
+    value = ids[0] if ids else None
+    if value is not None and (not isinstance(value, str) or value == expected_pid):
+        c.fail("INVALID_MEDIA_IDENTITY", "云媒体ID不是有效的独立字符串ID。")
+    return value
+
+
 def uploaded_asset(project, cli, state, item):
     c = api()
     uploads = state.setdefault("uploads", {})
     sha = item["file_hash"]
-    entry = uploads.get(sha)
+    key = upload_key(state, sha)
+    if sha in uploads and key not in uploads:
+        c.fail("UPLOAD_SCOPE_REQUIRED", "旧上传缓存未记录空间；保留原素材ID，先核对归属与上传结果，不重复上传。", file_hash=sha)
+    entry = uploads.get(key)
     if entry and entry.get("status") in ("pending", "uncertain") and not entry.get("pippit_asset_id"):
         c.fail("UNCERTAIN_UPLOAD", "上次图片上传结果不明；先核对个人素材库，不重复上传。", file_hash=sha, path=entry["path"])
     if not entry:
-        entry = uploads[sha] = {"status": "pending", "path": item["path"]}
+        entry = uploads[key] = {"status": "pending", "path": item["path"], "file_hash": sha,
+                                "account_id": state["binding"].get("account_id"), "team_id": state["binding"].get("team_id")}
         c.save(project, state)
         try:
             result = cli.native("canvas", "upload", "--path", item["path"], "--timeout", "45s", "--poll-interval", "1s", timeout=60)
             pid = result.get("pippit_asset_id") or result.get("locator", {}).get("pippit_asset_id")
             if not isinstance(pid, str) or not pid:
                 c.fail("UNCERTAIN_UPLOAD", "上传没有返回真实素材ID，请核对个人素材库。")
-            source_id = result.get("locator", {}).get("source_id") or result.get("asset_id")
+            source_id = result.get("source_id") or result.get("locator", {}).get("source_id") or result.get("asset_id")
             entry.update(pippit_asset_id=pid, status="ready" if result.get("state") == "ready" else "processing")
             if isinstance(source_id, str) and source_id:
-                entry["asset_id"] = source_id
+                entry["source_id"] = source_id
             c.save(project, state)
         except (ValueError, OSError) as exc:
             entry["status"] = "uncertain"
@@ -189,7 +219,13 @@ def uploaded_asset(project, cli, state, item):
         return None
     source_id = observed_string(assets[0], ("SourceID", "source_id", "sourceId"))
     if source_id:
-        entry["asset_id"] = source_id
+        entry["source_id"] = source_id
+    media_id = queried_image_id(assets[0], entry["pippit_asset_id"])
+    if not media_id:
+        entry["status"] = "processing"
+        c.save(project, state)
+        return None
+    entry["media_asset_id"] = media_id
     entry["status"] = "ready"
     c.save(project, state)
     return entry
@@ -198,14 +234,18 @@ def uploaded_asset(project, cli, state, item):
 def bind_image(project, cli, state, doc, item, uploaded):
     c = api()
     node_id, pid = item["node_id"], uploaded["pippit_asset_id"]
-    main = {"pippitAssetId": pid, "assetId": uploaded.get("asset_id", ""), "imageSource": 2, "uploadPath": "optimized"}
+    media_id = uploaded.get("media_asset_id")
+    if not isinstance(media_id, str) or not media_id or media_id == pid:
+        c.fail("INVALID_MEDIA_IDENTITY", "尚未核实真实云媒体ID，不能绑定主图。")
+    target = {"action": "main_image", "node_id": node_id, "value": pid, "media_asset_id": media_id, "file_hash": item["file_hash"]}
+    main = {"pippitAssetId": pid, "assetId": media_id, "imageSource": 2, "uploadPath": "optimized"}
     if item["kind"] == "role":
         previous = c.content(doc, node_id).get("appearanceInfo") or {}
         return c.write_verified(project, cli, state, "xyq.role.updateAppearance",
                                 {"nodeId": node_id, "assetId": node_id, "expected": {"mainImage": {
                                     k: previous[k] for k in ("assetId", "pippitAssetId") if k in previous}},
                                  "patch": {"mainImage": main}},
-                                [{"action": "main_image", "node_id": node_id, "value": pid, "file_hash": item["file_hash"]}])
+                                 [target])
     if item["kind"] == "scene":
         data = c.content(doc, node_id)
         info = copy.deepcopy(data.get("appearanceInfo") or {})
@@ -220,10 +260,10 @@ def bind_image(project, cli, state, doc, item, uploaded):
                         "order": sources.get(pid, {}).get("order", len(sources))}
         patch = {"appearanceInfo": info, "sourceInfos": sources}
     else:
-        patch = {"source": "uploaded", "pippitAssetId": pid, "uploadPath": "optimized", "assetId": uploaded.get("asset_id", "")}
+        patch = {"source": "uploaded", "pippitAssetId": pid, "uploadPath": "optimized", "assetId": media_id}
     return c.write_verified(project, cli, state, "update_node_data", {"id": node_id, "patch": patch},
                             [{"action": "patch", "node_id": node_id, "patch": patch},
-                             {"action": "main_image", "node_id": node_id, "value": pid, "file_hash": item["file_hash"]}])
+                              target])
 
 
 def refresh_references(project, cli, session, changed):
@@ -274,7 +314,7 @@ def images(project, cli, folder, decisions=None, preview=False):
         pid = selected_image(doc, nid)
         previous = mapping.get("image") or {}
         # Resume a verified bind interrupted before the mapping was saved.
-        upload = state.get("uploads", {}).get(item["file_hash"], {})
+        upload = state.get("uploads", {}).get(upload_key(state, item["file_hash"]), {})
         if previous.get("file_hash") != item["file_hash"] and pid and pid == upload.get("pippit_asset_id") and any(
                 entry["status"] == "verified" and any(t.get("action") == "main_image" and t.get("node_id") == nid
                     and t.get("file_hash") == item["file_hash"] and t.get("value") == pid for t in entry["targets"])

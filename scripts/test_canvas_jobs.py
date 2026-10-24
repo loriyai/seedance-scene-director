@@ -104,6 +104,29 @@ class CanvasJobChecks(unittest.TestCase):
         self.assertTrue(jobs.status(self.project)['paused'])
         self.assertEqual(jobs.status(self.project)['events'], [])
 
+    def test_old_field_contract_never_dispatches_after_explicit_resume(self):
+        queued = self.enqueue()
+        path = self.manifest_path(queued)
+        job = jobs.read(path)
+        job.pop('asset_contract')
+        job['manifest_digest'] = c.digest({k: v for k, v in job.items() if k != 'manifest_digest'})
+        d.write_json(path, job)
+        calls = []
+        jobs.run_worker(self.project, runner=self.successful_runner(calls))
+        self.assertEqual(calls, [])
+        self.assertEqual(self.job_status(queued), 'needs_attention')
+
+    def test_space_change_invalidates_frozen_job_before_dispatch(self):
+        self.state['binding']['team_id'] = '12'
+        c.save(self.project, self.state)
+        queued = self.enqueue()
+        self.state['binding']['team_id'] = '34'
+        c.save(self.project, self.state)
+        calls = []
+        jobs.run_worker(self.project, runner=self.successful_runner(calls))
+        self.assertEqual(calls, [])
+        self.assertEqual(self.job_status(queued), 'needs_attention')
+
     def test_same_request_and_payload_reuses_one_immutable_manifest(self):
         first = self.enqueue(request_id='same-request')
         original = self.manifest_path(first).read_bytes()

@@ -9,13 +9,17 @@
 ```text
 python <skill>/scripts/canvas.py setup --project <project> [--node <node绝对路径>]
 python <skill>/scripts/canvas.py auth --project <project> --login
-python <skill>/scripts/canvas.py bind --project <project> --target <画布链接或真实画布ID>
+python <skill>/scripts/canvas.py bind --project <project> --target <画布链接或真实画布ID> [--team-id <空间ID>]
 python <skill>/scripts/canvas.py status --project <project>
 ```
 
-`setup`检测现有官方CLI及本Skill实际调用的命令，缺少时用包内`ensure-cli.js`安装到官方CLI缓存；不每次安装或升级。必要原生命令为status/login、canvas get/allocate/upload；必要语义命令覆盖快照、权限、节点创建/更新/删除、精确删除引用边的delete_edges（create_edge仅历史黑幕模式需要，不作为新流程安装前提）、提示词写入、角色/场景描述及角色主图更新。create_checkpoint只在权限支持时使用，保持可选；不探测本Skill不调用的模型列表/描述、生图、生视频、超分、擦字幕、积分、query-result、logout或canvas create/apply。`auth --login`先检查status，已有登录不重复打开授权页。首次提示用户完成浏览器授权；CLI自行保存安全凭据。配置文件只保存CLI/Node路径、版本和公开账号标识，禁止保存密钥、完整status、认证环境变量或浏览器存储。CLI报401/403时先判断账号/权限；仅确认浏览器凭据过期或撤销后使用`auth --login --force`，不将force作为常规操作。
+`setup`检测现有官方CLI及本Skill实际调用的命令，缺少时用包内`ensure-cli.js`安装到官方CLI缓存；不每次安装或升级。必要原生命令为status/login、canvas get/allocate/upload及space list；canvas get必须支持--team-id。必要语义命令覆盖快照、权限、节点创建/更新/删除（含update_asset）、精确删除引用边的delete_edges（create_edge仅历史黑幕模式需要，不作为新流程安装前提）、提示词写入、角色/场景描述及角色主图更新。还须核实角色updateAppearance的patch.generationPrompt与expected.generationPrompt字段；不能只凭命令名存在认定支持。create_checkpoint只在权限支持时使用，保持可选；不探测本Skill不调用的模型列表/描述、生图、生视频、超分、擦字幕、积分、query-result、logout或canvas create/apply。`auth --login`先检查status，已有登录不重复打开授权页。首次提示用户完成浏览器授权；CLI自行保存安全凭据。配置文件只保存CLI/Node路径、版本和公开账号标识，禁止保存密钥、完整status、认证环境变量或浏览器存储。CLI报401/403时先判断账号/权限；仅确认浏览器凭据过期或撤销后使用`auth --login --force`，不将force作为常规操作。
 
-链接支持`https://xyq.jianying.com/novel/detail/canvas?projectId=...&canvasId=...`，以及含`overviewPippitAssetId`的链接。后者通过官方CLI读取overview解析实际canvas ID，不能把overview或project ID直接当canvas ID；无法唯一解析时请用户提供实际画布ID。所有远端ID保持字符串。绑定校验个人canvas类型与编辑权限；没有指定目标时询问画布链接，不自行新建画布。
+链接支持两种已核实的官方格式：`https://xyq.jianying.com/novel/detail/canvas?...`与`https://www.xiaoyunque.com/project?...`，严格校验域名、路径及唯一ID参数。前者常见于个人画布，后者常见于团队画布，只作为候选线索，不作归属证明。overviewPippitAssetId须在选定空间后通过官方CLI解析实际canvas ID，不能把overview或project ID当成canvas ID。所有远端ID及TeamID保持字符串。
+
+绑定先复用同账号、同画布已保存的team_id；首次绑定可用`--team-id`明确指定（个人为`0`）。没有明确值时，旧格式链接选择个人候选，新格式链接结合`space list`在只有一个团队时选择该团队候选；裸ID沿用CLI当前空间作为候选。只读核对该候选下的画布身份及编辑权限，通过后保存account_id/canvas_id/team_id和空间选择依据；不从查询响应回显的team_id反推归属。多个团队不能唯一确定时返回SPACE_REQUIRED及选项，失败返回SPACE_LOOKUP_FAILED，不遍历团队、不回退个人、不修改CLI全局默认空间。已绑定画布后续不重复选择。
+
+CLI的原生查询、分配、上传与语义查询、创建、编辑、删除、检查点及回读由同一入口自动附加已绑定--team-id，不由各业务分支猜测参数。新进程恢复也使用该绑定。旧绑定缺少空间时，先对同一目标重新执行bind并核对必要信息，保留节点映射；不得静默采用当前默认空间。绑定验证失败不覆盖原绑定。
 
 明确切换目标后用`bind ... --switch`，原绑定及映射归档。当前有效连接保存在`canvas/connection.json`，绑定、节点映射、操作日志及待同步项保存在`canvas/state.json`。每次实际操作核对当前CLI账号，账号变化先恢复或重新绑定，不跨账号复用映射。
 
@@ -27,7 +31,15 @@ python <skill>/scripts/canvas.py status --project <project>
 
 新建角色role、场景scene及道具image节点时，统一通过`create_biz_node.initialData.generation`设置图片默认参数：`resolution: "2K"`（清晰度2K）、`effort: "high"`（推理强度高）、`ratio: "16:9"`（比例16:9）。这三项属于节点图片配置，不写成提示词文字，也不套用到video节点。资产批量任务、直接assets入口及videos流程补建资产共用这套创建参数；创建后逐项回读，不以创建ACK代替参数验收。
 
-新建节点同时完成对应台账资产的完整`image_prompt`写入：角色与场景通过各自的`updateDescription`写入`appearanceInfo.description`，道具通过`xyq.generation.update_prompt`写入`generation.prompt`。视频准备中自动补建的资产也须完成此步骤。名称、类型、图片参数、提示词及真实ID均通过核验后才计为初始化完成。所有操作仅配置节点，不触发图片或视频生成。
+资产的完整`image_prompt`始终以`content.generation.prompt`为验收字段，与外观/资料描述独立。按节点类型使用以下契约：
+
+| 节点 | 写入入口 | 保留要求 |
+| --- | --- | --- |
+| 角色role | `xyq.role.updateAppearance`的`patch.generationPrompt`；`expected.generationPrompt`使用刚读到的原值 | 保留外观描述、主图及generation其他配置，不用普通图片/视频提示词接口写角色 |
+| 场景scene | 新建时使用`create_biz_node.initialData.generation.prompt`；已有节点由`update_asset`写入从最新快照完整合并的generation | 保留其他生成字段和包装层，不提交仅含prompt的浅层generation对象，不虚构scene.updateAppearance |
+| 道具image | `xyq.generation.update_prompt` | 保留当前生成配置与引用 |
+
+角色`updateDescription(field=appearance)`与场景`updateDescription(field=description)`只用于明确的描述编辑，不能代替生图提示词写入。三条资产入口——后台assets、直接assets、videos补建——共用canvas.py的资产初始化步骤与验收。创建后完成显示名/basicInfo.name、空形象/视角名和正确提示词回读；SDK工厂默认显示名不是最终名称。仅新建/未完成初始化节点检查上述默认图片参数，ready或采用节点的人工配置保持。所有操作仅配置节点，不触发生成。
 
 默认参数仅用于新建节点及按原ID续接本版本未完成的初始化。已完成或复用节点保留当前模型、比例、清晰度、推理强度、图片与其他配置；不因Skill升级改写既有节点。历史创建日志没有这些参数时按原证据续接，不把新默认值追加为历史恢复门槛。
 
@@ -37,7 +49,7 @@ python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind videos 
 python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind videos --ids 场景1-分镜1 场景1-分镜2 --start
 ```
 
-`assets`后台任务冻结session绑定台账，创建role/scene/image业务节点并写入完整image_prompt；角色/场景写入appearanceInfo.description，道具写入generation.prompt。只有最终字段与ID映射全部核验才算完成。仅需图片的角色使用台账完整name；visual_mode为prompt_only的群像不建节点、不匹配上传图片、不列为缺图，场景使用scene_assets[].name及SET ID，每个SET仅一个节点（包括有证据的时间版本和布置版本），SC heading不参与资产建节点，道具使用主name；角色/场景同时设置节点显示名和basicInfo.name，basicInfo.appearanceName为空。视频普通业务节点的name/title/caption逐字使用对应已提交单元display_name，例如 `A01-场景3-分镜2`；无新名称的旧单元继续使用原ID，不附加时长、镜头标签或布景名称。完整提示词直接由当前有效单元按其输出版本渲染写入generation.prompt，保留固定抬头、视频风格、换行和人物/场景前缀；不调用生成命令。
+`assets`后台任务冻结session绑定台账，创建role/scene/image业务节点并写入完整image_prompt；各节点按本节字段契约写入generation.prompt，描述不作为提示词验收。只有最终字段与ID映射全部核验才算完成。仅需图片的角色使用台账完整name；visual_mode为prompt_only的群像不建节点、不匹配上传图片、不列为缺图，场景使用scene_assets[].name及SET ID，每个SET仅一个节点（包括有证据的时间版本和布置版本），SC heading不参与资产建节点，道具使用主name；角色/场景同时设置节点显示名和basicInfo.name，basicInfo.appearanceName为空。视频普通业务节点的name/title/caption逐字使用对应已提交单元display_name，例如 `A01-场景3-分镜2`；无新名称的旧单元继续使用原ID，不附加时长、镜头标签或布景名称。完整提示词直接由当前有效单元按其输出版本渲染写入generation.prompt，保留固定抬头、视频风格、换行和人物/场景前缀；不调用生成命令。
 
 显式执行`videos`时，先全量读取目标画布一次，用同一份节点索引逐项核对当前台账全部需图片的角色、布景和主要道具，不只核对本批分镜所用资产，不比较节点总数。已保存的真实ID仍在当前画布且完整名称、类型一致时复用，保留该节点当前主图和形象/视角；无映射或原ID已不存在时，按完整name+kind查找，唯一候选自动复用并保存映射，没有候选自动补建对应role/scene/image空节点并立即保存CLI真实ID。有多个候选或已绑定资产改名/类型变化时，列入待处理，不自动选择候选或覆盖冲突字段；其余合法项可继续。画布额外节点保留，不改名、不删除。复用阶段1资产传输已保存的ID，不额外按名称重新寻找有效映射；恢复时沿用已确认进度，不重复创建。新增节点更新本次内存索引，开始时一次全量盘点不代替每次写后的回读。
 
@@ -105,6 +117,8 @@ python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind images 
 
 上传完成自动刷新已有映射且涉及这些资产的视频节点引用，不新建视频节点、不生成视频。用户也可在画布中手动添加图片并选主图，随后明确要求运行`references`刷新和校验；不承诺补图后所有媒体引用会自行刷新。后续新建视频节点默认使用真实节点引用。待刷新资产保存于pending_image_references；图片已成功但提示词冲突时保留图片和待处理项，按用户选择继续`references`。缺少图片只记录，不撤销已有正式节点引用；没有映射的图片资产保留文字@并报告；历史edge-only-v1黑幕仅报告引用待处理，不能补回黑幕文字，旧单元继续兼容原标记。`status`返回待刷新资产和未完成上传，恢复时先核对。
 
+素材身份分别保存pippit_asset_id、source_id和media_asset_id；上传响应的旧asset_id属于source/workspace ID，不能写入节点媒体assetId。再次查询素材时核对同一Pippit ID、图片类型及Image.asset_id；云媒体ID未就绪保持processing，只沿同一ID续查，不重新上传。主图回读同时核对Pippit ID、云媒体ID与选择状态。上传缓存按账号、已绑定TeamID和文件hash隔离；旧无空间缓存保留并提示核对，不自动当成新上传重试。
+
 ## 节点引用与黑幕
 
 ```text
@@ -122,6 +136,7 @@ python <skill>/scripts/canvas.py references --project <project> --request-id <�
 
 结束后写出检查TXT：缺图片部分列资产完整name、类型、真实节点ID与所涉及分镜；黑幕视频素材待补独立列节点ID与相关单元；引用失败部分列分镜编号、资产名称和具体原因，含未映射、候选冲突、节点失效或引用回读失败。只确认节点结构时明确媒体待补，不标为媒体已就绪。用户可照TXT手动上传，或明确授权后提供匹配图片目录，按`images`上传并刷新`references`；黑幕视频素材另行补充到已记录节点。未授权不扫描本地文件、不上传、不生成媒体。
 
+
 ## 指定节点修改与批量删除
 
 ```text
@@ -138,7 +153,7 @@ python <skill>/scripts/canvas.py delete --project <project> --request <删除.js
 }
 ```
 
-`changes`仅支持name、prompt、description、appearanceName、sceneViewName。name适用于角色/场景/图片/视频/音频/文字；prompt适用于图片/视频；description适用于角色/场景/文字；后两项分别适用于角色/场景，空字符串表示清空。通用patch只更新请求字段，嵌套对象从当前值合并，不覆盖其他字段。其他节点/字段先用官方`canvas command describe/schema`核实支持后执行精确命令并回读，不自造字段。
+`changes`仅支持name、prompt、description、appearanceName、sceneViewName。name适用于角色/场景/图片/视频/音频/文字；prompt适用于角色/场景/图片/视频，按上述各自接口路由；description适用于角色/场景/文字；后两项分别适用于角色/场景，空字符串表示清空。通用patch只更新请求字段，嵌套对象从当前值合并，不覆盖其他字段。其他节点/字段先用官方`canvas command describe/schema`核实支持后执行精确命令并回读，不自造字段。
 
 删除请求使用targets，无changes。后台先preview，将查询确定的目标转换为确切ID并将fingerprints原样带回执行；执行阶段拒绝类型/名称筛选及缺项摘要，摘要键必须完整覆盖本次尚存在的确切目标，不得包含请求范围外ID。幂等续接时，日志已确认删除的ID沿用日志，可附旧摘要或省略该摘要；不额外增加用户审批。删除前使用与回读相同的正式标签解析器，检查含属性标签、reference连线及其他结构化引用；额外影响返回dependents，让用户选择保留、改删范围或接受影响。只有明确接受后才把本次返回的完整dependents数组写入`accepted_dependents`，不可自动填。节点变化会停止。修改/删除前保存本地before快照，CLI支持浏览器检查点时额外创建；不自动恢复整画布。删除已映射节点同时清除其本地映射，保留历史日志；重复删除确切ID时，日志已确认删除的目标计入already_deleted，仅继续其余目标。
 

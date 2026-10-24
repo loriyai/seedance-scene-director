@@ -10,10 +10,10 @@ const REQUIRED_COMMANDS = [
   "status", "login",
 ];
 const REQUIRED_CANVAS_NATIVE_COMMANDS = [
-  "canvas get", "canvas allocate", "canvas upload",
+  "canvas get", "canvas allocate", "canvas upload", "space list",
 ];
 const REQUIRED_CANVAS_COMMANDS = [
-  "get_snapshot", "get_permissions", "create_biz_node", "update_node_data", "delete_nodes", "delete_edges",
+  "get_snapshot", "get_permissions", "create_biz_node", "update_node_data", "update_asset", "delete_nodes", "delete_edges",
   "xyq.generation.update_prompt", "xyq.role.updateDescription",
   "xyq.scene.updateDescription", "xyq.role.updateAppearance",
 ];
@@ -91,7 +91,12 @@ function ensureCLI({ canvas = false } = {}) {
     }
     for (const command of commands) {
       try {
-        run(cliPath, [...command, "--help"], `检查 ${command.join(" ")} 命令`, true);
+        const help = run(cliPath, [...command, "--help"], `检查 ${command.join(" ")} 命令`, true).toString();
+        if (canvas && command.join(" ") === "canvas get" && !/(?:^|\s)--team-id(?:[=\s,]|$)/m.test(help)) {
+          const failure = new Error("CLI 缺少 --team-id 参数。");
+          failure.missingCommand = "canvas get --team-id";
+          throw failure;
+        }
       } catch (err) {
         if (Number.isInteger(err.exitStatus) && err.exitStatus !== 0) {
           err.missingCommand = command.join(" ");
@@ -109,6 +114,11 @@ function ensureCLI({ canvas = false } = {}) {
         if (!Array.isArray(catalog.commands) || !REQUIRED_CANVAS_COMMANDS.every(
           (name) => catalog.commands.some((command) => command.name === name),
         )) throw new Error("Canvas 命令目录不完整");
+        const role = JSON.parse(run(process.execPath, [entry, "canvas", "command", "schema", "xyq.role.updateAppearance"], "检查角色提示词契约", true));
+        if (!role.input_schema?.properties?.patch?.properties?.generationPrompt
+            || !role.input_schema?.properties?.expected?.properties?.generationPrompt) {
+          throw new Error("角色提示词独立字段契约不可用");
+        }
       } catch (err) {
         // Runtime timeouts are execution failures; do not repeatedly install to mask them.
         if (err.exitStatus === null) throw err;
