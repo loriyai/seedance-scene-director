@@ -88,7 +88,7 @@ class TextDeliveryIntegration(unittest.TestCase):
                 f'场景：@{{{set_id}}}；时间：白天；天气：未明示；',
                 '人物站位：@{CHAR0001}在画面左侧。',
                 f'·00秒-04秒[镜头1-{label}]：（@{{CHAR0001}}的中景；转场：硬切）'
-                f'侧面固定机位，人物与门框保持清晰；{action}音效：衣料轻响。'])
+                f'相机向右横移，人物与门框保持清晰；{action}音效：衣料轻响。'])
             if record['kind'] == 'dialogue':
                 rows.append(f'声音[{record["id"]},0.2-2.8]：@{{CHAR0001}}说：“{record["text"]}”')
             rows.append('')
@@ -140,7 +140,7 @@ class TextDeliveryIntegration(unittest.TestCase):
                          ['SC0001', 'SC0002'])
         self.assertEqual([row['units'] for row in stats['same_scene_adjacent_candidates']],
                          [['SC0001/u01', 'SC0001/u02'], ['SC0002/u03', 'SC0002/u04']])
-        self.assertEqual(stats['camera_wording']['by_shot_duration_seconds']['4']['fixed'], 4)
+        self.assertEqual(stats['camera_wording']['by_shot_duration_seconds']['4']['moving'], 4)
         self.assertEqual(self.snapshot(), before)
         preview = self.project / 'preview.txt'
         result = self.cli('storyboard_text_delivery.py', 'preview', '--project', self.project,
@@ -359,7 +359,7 @@ class TextDeliveryIntegration(unittest.TestCase):
             '侧面固定机位；@{CHAR0001}把@{PROP0001}放在桌上。音效：杯底轻响。',
             f'声音[{records[1]["id"]},0.2-2.8]：@{{CHAR0001}}说：“{records[1]["text"]}”',
             '·04秒-08秒[镜头2-走廊]：（@{CHAR0001}的中景；转场：硬切）'
-            '侧面固定机位；@{CHAR0001}走到@{SET0002}尽头。音效：脚步声。',
+            '相机向右横移；@{CHAR0001}走到@{SET0002}尽头。音效：脚步声。',
             f'声音[{records[3]["id"]},4.2-6.8]：@{{CHAR0001}}说：“{records[3]["text"]}”'])
         draft = self.write_draft('cross-scene.txt', text)
         span = [0, self.state['length']]

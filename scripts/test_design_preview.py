@@ -118,7 +118,9 @@ class DesignPreviewTests(unittest.TestCase):
         next(record for record in new_mask_and_prop["designs"] if record["asset_id"] == "PROP0001")["materials_palette"] = "深红色织物"
         revised = preview.preview_design(complete, new_mask_and_prop, self.style, ["CHAR0002"])
         masked = next(record for record in revised["previews"] if record["asset_id"] == "CHAR0002")
-        self.assertIn("深红色织物", masked["image_prompt"])
+        self.assertNotIn("深红色织物", masked["image_prompt"])
+        self.assertIn("@猪猪头套 ", masked["image_prompt"])
+        self.assertIn("深红色织物", next(row for row in revised["previews"] if row["asset_id"] == "PROP0001")["image_prompt"])
 
     def test_stale_source_facts_style_anchor_and_prompt_cannot_be_reused(self):
         complete = design.apply_design(self.data, self.payload, self.style)

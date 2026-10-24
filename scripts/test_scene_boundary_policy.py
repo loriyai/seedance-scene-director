@@ -135,6 +135,39 @@ class SceneBoundaryPolicyTests(unittest.TestCase):
         self.assertEqual(report["boundary_items"], [])
         self.assertEqual(report["status"], "passed")
 
+    def test_merged_road_scene_reports_internal_move_and_late_location_speech(self):
+        self.fixture(["小车停在路口等灯。", "灯变绿，小车向前行驶。",
+                      "阿明准备通过前方弯道，一辆车撞了过来。", "阿明打电话：速来青石街。"],
+                     [("路口", 1, 4)])
+        report = review.make_report(self.work, {})
+        risk = report["internal_boundary_risks"][0]
+        self.assertEqual(risk["scene_number"], 1)
+        self.assertEqual([(s["kind"], s["paragraph"]) for s in risk["signals"]],
+                         [("movement", 3), ("current_location_speech", 4)])
+        for signal in risk["signals"]:
+            a, b = signal["range"]
+            self.assertEqual(signal["source_text"][a:b], signal["evidence"])
+        self.assertFalse(risk["blocking"])
+        self.assertEqual(risk["semantic_review"], "not_performed")
+        self.assertEqual(report["counts"]["scene_boundary"], 0)
+        self.assertEqual(len(report["scenes"]), 1)  # No automatic split or approval.
+
+    def test_stationary_vehicle_views_do_not_create_internal_location_risk(self):
+        self.fixture(["汽车停在门口。", "阿明坐入汽车。", "阿明转头看后排。"],
+                     [("门口", 1, 3)])
+        self.assertEqual(review.make_report(self.work, {})["internal_boundary_risks"], [])
+
+    def test_internal_risk_scan_obeys_sample_and_recomputes_with_cached_scenes(self):
+        self.fixture(["小车停在门口。", "阿明看向车窗。", "小车停在路口。",
+                      "小车驶入青石街。"], [("门口", 1, 2), ("路口", 3, 4)])
+        full = review.make_report(self.work, {})
+        cached = review.make_report(self.work, {}, previous=full, scope="sample", scene_numbers=[2])
+        self.assertEqual(cached["counts"]["reused_scenes"], 1)
+        self.assertEqual([r["scene_number"] for r in cached["internal_boundary_risks"]], [2])
+        self.assertEqual(cached["internal_boundary_risks"][0]["signals"][0]["paragraph"], 4)
+        self.assertEqual(review.make_report(self.work, {}, scope="sample", scene_numbers=[1])
+                         ["internal_boundary_risks"], [])
+
     def test_early_risks_are_bound_to_source_without_automatic_assets_or_approval(self):
         self.fixture(["老头乐停在酒吧门口。", "阿明戴上头套。"], [("酒吧门口", 1, 2)])
         records = [self.record()]

@@ -30,7 +30,7 @@ def digest(value):
     return d.sha(d.packed(value))
 
 
-def prepare(project, draft, span=None, replace_ids=None):
+def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True):
     project, draft = Path(project).resolve(), Path(draft).resolve()
     state = d.load(project)
     d.require(state.get('style_hash'), '请先保存本项目风格')
@@ -72,12 +72,22 @@ def prepare(project, draft, span=None, replace_ids=None):
     for unit in units:
         unit.update(style=style, output_format=POLICY,
                     header_policy=d.HEADER_POLICY, black_reference_mode=d.BLACK_REFERENCE_MODE)
+    camera = text_core.camera_constraints(units, *text_core.camera_context(state, units, replace_ids))
+    if check_camera:
+        require_camera_constraints(camera)
+    info['camera_constraints'] = camera
+    info['warnings'].extend(camera['warnings'])
     binding = {'draft_sha256': hashlib.sha256(draft_bytes).hexdigest(),
                'context_sha256': context_hash(state)}
     info = {**info, **binding, 'scenes': selected, 'span': actual_span,
             'semantic_review': 'not_performed',
             'history': d.range_review(state, actual_span) if not replace_ids else None}
     return state, units, info
+
+
+def require_camera_constraints(report):
+    d.require(not report['errors'], '摄影约束：' + '; '.join(
+        f'{row["unit"]}/镜头{row["shot"]}：{row["kind"]}' for row in report['errors']))
 
 
 def verify_review(report, info):
@@ -191,7 +201,7 @@ def commit(project, draft, request_id, review, output, span=None,
            replace_ids=None, range_confirmation=None):
     project = Path(project).resolve()
     d.require(isinstance(request_id, str) and request_id.strip(), 'request_id不能为空')
-    state, units, info = prepare(project, draft, span, replace_ids)
+    state, units, info = prepare(project, draft, span, replace_ids, check_camera=False)
     mode = 'replace' if replace_ids else 'append'
     request_hash = digest({'policy': POLICY, 'draft_sha256': info['draft_sha256'],
                            'mode': mode, 'replace_ids': replace_ids or [], 'span': info['span']})
@@ -211,6 +221,7 @@ def commit(project, draft, request_id, review, output, span=None,
         else:
             d.atomic_text(target, rendered)
         return {'status': 'already_committed', 'output': str(target), **d.receipt_summary(previous_receipt)}
+    require_camera_constraints(info['camera_constraints'])
     final_review = verify_review(d.read_json(review), info)
     if mode == 'append' and info['history']['issues']:
         d.require(range_confirmation == info['history']['confirmation_token'],

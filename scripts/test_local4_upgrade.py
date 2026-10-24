@@ -242,6 +242,9 @@ class StagingAndNamingTests(unittest.TestCase):
     def test_full_new_workflow_validation_requires_current_render_review(self):
         state=self.fixture.state;request=self.fixture.request()
         for u in request['units']:
+            for shot in u['shots'][1::2]:
+                shot.update(camera='相机向窗边横移',
+                    purpose='移动取景呈现人物与窗边的位置关系。')
             u.update(style='3D国漫',workflow_policy=ag.POLICY,action_plan=[])
             # This fixture tests staging after the silent action plan is ready.
             approve_fictional_audio(state,u,'虚构样例中站起看窗按原文呈现，没有对白或额外需要登记的动作时间窗。')

@@ -122,6 +122,9 @@ class SingleWarningSourceTests(unittest.TestCase):
                                   'speaker': '陈默', 'voice': '说'}]
         self.state['length'] = 6
         u = fixture.unit([0, 6])
+        for shot in u['shots'][1::2]:
+            shot.update(camera='相机向窗边横移',
+                        purpose='移动取景呈现人物与窗边的位置关系。')
         part = {'text': '请你稍等片刻。', 'start': 0, 'end': 1, 'pause': .34}
         u.update(workflow_policy=ag.POLICY, style='3D国漫', action_plan=[],
                  dialogue_layout='semantic-v2', voice_direction='event-inheritance-v1',

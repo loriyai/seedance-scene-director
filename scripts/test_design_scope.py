@@ -58,7 +58,8 @@ class DesignScopeTests(unittest.TestCase):
             if char.get("appearance_variant"):
                 prompt = char["image_prompt"]
                 self.assertIn("正面全身", prompt)
-                self.assertIn(prop["structure"], prompt)
+                self.assertNotIn(prop["structure"], prompt)
+                self.assertIn("@猪猪头套 ", prompt)
                 self.assertNotIn("左前方微俯三分之四视角", prompt)
                 self.assertNotIn("无人物、手部", prompt)
                 self.assertNotIn("只展示一个外形样本", prompt)
@@ -100,7 +101,8 @@ class DesignScopeTests(unittest.TestCase):
         self.data["props"][0]["visual_facts"] = [fact]
         result = self.compile()
         self.assertEqual(result["props"][0]["visual_facts"], [fact])
-        self.assertIn(fact["text"], result["characters"][1]["image_prompt"])
+        self.assertNotIn(fact["text"], result["characters"][1]["image_prompt"])
+        self.assertIn(fact, design.asset_facts(result, "characters", result["characters"][1]))
 
     def test_reading_historical_mixed_design_never_rewrites_or_migrates_it(self):
         _, _, _, prop = self.mask()
@@ -126,7 +128,9 @@ class DesignScopeTests(unittest.TestCase):
         for old, new in zip(before["characters"], after["characters"]):
             if new.get("appearance_variant"):
                 self.assertNotEqual(old["image_design_digest"], new["image_design_digest"])
-                self.assertIn("粉色短绒", new["image_prompt"])
+                self.assertNotIn("粉色短绒", new["image_prompt"])
+                self.assertEqual(old["image_prompt"], new["image_prompt"])
+        self.assertIn("粉色短绒", after["props"][0]["image_prompt"])
 
 
 if __name__ == "__main__":

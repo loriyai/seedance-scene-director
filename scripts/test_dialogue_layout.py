@@ -69,7 +69,7 @@ class DialogueLayoutChecks(unittest.TestCase):
     def test_repeated_punctuation_is_one_pause(self):
         self.assertEqual(dl.pause_seconds('好！'),dl.pause_seconds('好！！'))
         self.assertEqual(dl.pause_seconds('真的？'),dl.pause_seconds('真的？！'))
-        self.assertAlmostEqual(dl.pause_seconds('妈妈妈妈！我看到猪猪侠了！！'),.4)
+        self.assertAlmostEqual(dl.pause_seconds('妈妈妈妈！我看到猪猪侠了！！'),.35)
 
     def test_long_quote_once_and_exact_continuation_links(self):
         text='我会把事情的来龙去脉完整告诉你，请你先听我说完，这关系到你之后每一步选择。'

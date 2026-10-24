@@ -17,7 +17,7 @@ REQUIRED_FILES = (
     'references/storyboard-rules.md', 'references/storyboard-workflow.md',
     'references/storyboard-text-format.md', 'references/execution-contract.md',
     'references/rule-domains.md', 'assets/fixed-header.txt',
-    'assets/fixed-header-visual-v2.txt', 'scripts/director.py',
+    'assets/fixed-header-visual-v2.txt', 'assets/fixed-header-visual-v3.txt', 'scripts/director.py',
     'scripts/review_gate.py', 'scripts/scene_review.py', 'scripts/creative_rules.py',
     'scripts/authoring_gates.py', 'scripts/storyboard_assembly.py',
     'scripts/shot_dependencies.py', 'scripts/continuity.py', 'scripts/draft_revision.py',

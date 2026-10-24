@@ -243,7 +243,7 @@ class StoryboardTextTests(unittest.TestCase):
         self.assertEqual(first['scene_ids'], last['scene_ids'])
         self.assertEqual(st.observations(self.state, [first, last])['same_scene_adjacent_candidates'], [])
 
-    def test_fixed_and_moving_are_both_accepted_at_every_shot_duration(self):
+    def test_historical_structural_parse_retains_every_camera_wording_and_duration(self):
         for wording, label in (('固定机位', 'fixed'), ('镜头向右平移', 'moving'), ('窗框清晰', 'unknown')):
             with self.subTest(wording=wording):
                 draft = self.action_draft([1, 2, 3, 4, 5, 6]).replace('镜头向右平移', wording)

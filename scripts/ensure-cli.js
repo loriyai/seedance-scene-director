@@ -13,7 +13,7 @@ const REQUIRED_CANVAS_NATIVE_COMMANDS = [
   "canvas get", "canvas allocate", "canvas upload", "space list",
 ];
 const REQUIRED_CANVAS_COMMANDS = [
-  "get_snapshot", "get_permissions", "create_biz_node", "update_node_data", "update_asset", "delete_nodes", "delete_edges",
+  "get_snapshot", "get_permissions", "create_biz_node", "create_edge", "update_node_data", "update_asset", "delete_nodes", "delete_edges",
   "xyq.generation.update_prompt", "xyq.role.updateDescription",
   "xyq.scene.updateDescription", "xyq.role.updateAppearance",
 ];
@@ -118,6 +118,11 @@ function ensureCLI({ canvas = false } = {}) {
         if (!role.input_schema?.properties?.patch?.properties?.generationPrompt
             || !role.input_schema?.properties?.expected?.properties?.generationPrompt) {
           throw new Error("角色提示词独立字段契约不可用");
+        }
+        const generation = role.input_schema.properties.patch.properties.generation;
+        const object = generation?.anyOf?.find((branch) => branch.type === "object");
+        if (!object?.properties?.references || !role.input_schema.properties.expected.properties.generation) {
+          throw new Error("角色派生图片生成配置与引用契约不可用");
         }
       } catch (err) {
         // Runtime timeouts are execution failures; do not repeatedly install to mask them.

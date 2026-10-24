@@ -356,18 +356,29 @@ def _camera_wording(shot):
     Only the first clause after the framing bracket is eligible. Actor clauses,
     dialogue and sound never supply camera terms. Unrecognized wording is fine.
     """
-    match = SHOT.fullmatch(shot.get("text", ""))
-    if match is None:
+    if "camera" in shot:
+        value = shot.get("camera", "")
+    else:
+        match = SHOT.fullmatch(shot.get("text", ""))
+        if match is None:
+            return "unknown"
+        value = match.group(7)
+    return _camera_clause_wording(value)
+
+
+def _camera_clause_wording(value):
+    if not isinstance(value, str):
         return "unknown"
-    clause = re.split(r"[，,；;。.!！？?\r\n]", match.group(7), maxsplit=1)[0].strip()
+    clause = re.split(r"[，,；;。.!！？?\r\n]", value, maxsplit=1)[0].strip()
     clause = re.split(r"@\{|[“”]|他说|她说|说话|声音", clause, maxsplit=1)[0]
     fixed = r"固定|锁定"
-    moving = r"平移|推近|拉远|跟移|跟拍|跟随|环绕|摇摄|摇镜|移镜|升降|上摇|下摇|左摇|右摇|推进|后拉|横移|后退|拉开|靠近|转摇"
+    moving = r"平移|推近|拉远|跟移|跟拍|跟随|环绕|摇摄|摇镜|移镜|升降|上摇|下摇|左摇|右摇|推进|后拉|横移|后退|拉开|靠近|转摇|转动|转向|俯转|仰转|短移|上移|下移|侧移"
     # Spatial wording may precede an explicit camera noun. Read its predicate,
     # never a motion word later in the photographed actor/object description.
     camera = re.search(r"镜头|摄影机|相机|机位", clause)
     if camera:
         prefix, tail = clause[:camera.start()], clause[camera.end():]
+        tail = re.sub(r"^(?:随后|然后|接着)", "", tail)
         if re.search(r"记录|拍摄|捕捉|展示|呈现|说|喊|叫|念", prefix):
             return "unknown"
         if re.match(r"(?:记录|拍摄|捕捉|展示|呈现|人物|演员|角色|主角)", tail):
@@ -395,6 +406,85 @@ def _camera_wording(shot):
     if re.match(position + rf"(?:{moving})", clause):
         return "moving"
     return "unknown"
+
+
+def camera_constraints(units, before=None, after=None):
+    """Check explicit new-authoring constraints; never approve film semantics.
+
+    Reading/rendering persisted units does not call this gate. Ambiguous prose
+    remains a review target; words about actor motion or focus cannot clear it.
+    Neighbouring historical shots are checked only at the selected boundary.
+    """
+    rows = []
+    for unit, selected in ([(before, False)] if before else []) + [(u, True) for u in units] + ([(after, False)] if after else []):
+        shots = unit.get("shots", [])
+        indices = range(len(shots)) if selected else ([len(shots) - 1] if unit is before else [0])
+        for index in indices:
+            if not shots:
+                continue
+            shot = shots[index]
+            if not isinstance(shot, dict):
+                continue
+            label = _camera_wording(shot)
+            # The leading clause is intentionally conservative. An explicitly
+            # named later camera move makes an initial fixed pose inconclusive.
+            if label == "fixed":
+                match = SHOT.fullmatch(shot.get("text", ""))
+                prose = shot.get("camera", match.group(7) if match else "")
+                clauses = re.split(r"[，,；;。.!！？?\r\n]", prose)[1:]
+                later = [clause.strip() for clause in clauses
+                         if re.match(r"\s*(?:相机|摄影机|镜头|机位|随后|然后|接着)", clause)]
+                if any(_camera_clause_wording('相机' + clause if re.match(r'随后|然后|接着', clause) else clause)
+                       in ("moving", "mixed_or_unclear") for clause in later):
+                    label = "mixed_or_unclear"
+            duration = (shot['end'] - shot['start'] if all(type(shot.get(key)) in (int, float) for key in ('start', 'end')) else 0)
+            rows.append({"unit": unit.get("id", unit.get("draft_key", "当前单元")),
+                         "shot": index + 1, "duration": duration,
+                         "camera_wording": label, "selected": selected})
+    errors, pending = [], []
+    for row in rows:
+        if not row['selected']:
+            continue
+        context = {key: row[key] for key in ('unit', 'shot', 'duration', 'camera_wording')}
+        if 5 <= row['duration'] <= 6 and row['camera_wording'] == 'fixed':
+            errors.append({"code": "LONG_SHOT_FIXED", "kind": "5～6秒镜头不得全程固定；须设计有观看作用的相机位移或转向", **context})
+        elif row['camera_wording'] in ('unknown', 'mixed_or_unclear'):
+            pending.append({"code": "CAMERA_SEMANTIC_REVIEW", "kind": "完整摄影描述须由独立场级审阅核实实际运动、镜长及相邻约束；词面未判定不代表合格", **context})
+    for left, right in zip(rows, rows[1:]):
+        if not (left['selected'] or right['selected']):
+            continue
+        if left['camera_wording'] == right['camera_wording'] == 'fixed':
+            errors.append({"code": "ADJACENT_FIXED", "kind": "叙事上相邻两镜不得均为固定机位", "unit": right['unit'],
+                           "shot": right['shot'], "previous_unit": left['unit'], "previous_shot": left['shot']})
+        elif not (left['selected'] and right['selected']) and any(row['camera_wording'] in ('unknown', 'mixed_or_unclear') for row in (left, right)):
+            pending.append({"code": "CAMERA_BOUNDARY_REVIEW", "kind": "选定范围与既有镜头的相邻摄影关系需独立场级核实，不改写范围外历史", "unit": right['unit'],
+                            "shot": right['shot'], "previous_unit": left['unit'], "previous_shot": left['shot']})
+    return {"status": "failed" if errors else "needs_semantic_review" if pending else "explicit_constraints_checked",
+            "errors": errors, "warnings": pending, "semantic_review": "not_performed"}
+
+
+def camera_context(state, units, replace_ids=None):
+    """Resolve actual adjacent persisted units without rewriting outside scope."""
+    stored = state.get('units', [])
+    if replace_ids:
+        indices = [i for i, unit in enumerate(stored) if unit.get('id') in replace_ids]
+        if indices:
+            first_old, last_old = stored[min(indices)], stored[max(indices)]
+            before = next((u for u in stored if u.get('id') == first_old.get('predecessor')), None)
+            if before is None and first_old.get('predecessor') is None:
+                before = next((u for u in reversed(stored[:min(indices)])
+                               if u.get('span', [None, None])[1] == first_old.get('span', [None])[0]), None)
+            after = next((u for u in stored[max(indices) + 1:]
+                          if u.get('predecessor') == last_old.get('id')), None)
+            if after is None and max(indices) + 1 < len(stored):
+                candidate = stored[max(indices) + 1]
+                if (candidate.get('span', [None])[0] == last_old.get('span', [None, None])[1]
+                        and candidate.get('batch_id') == last_old.get('batch_id')):
+                    after = candidate
+            return before, after
+    first = units[0].get('span', [None])[0] if units else None
+    before = next((unit for unit in reversed(stored) if unit.get('span', [None, None])[1] == first), None)
+    return before, None
 
 
 def observations(state, units):
@@ -458,7 +548,9 @@ def render_unit(state, unit, reference_text=None):
     d.validate_style(style)
     title = unit.get("display_name") or unit.get("id")
     _require(isinstance(title, str) and title and not any(c in title for c in "\r\n"), "渲染前须分配单元id/display_name")
-    header = d.fixed_header(d.HEADER_POLICY)
+    # scene-text-v1 originally rendered visual-only-v2 even for unmarked input.
+    # New authoring sets an explicit policy; old receipts retain that old default.
+    header = d.fixed_header(unit.get("header_policy", "visual-only-v2"))
     people = "，".join(asset(cid) for cid in authored["character_ids"]) or "无"
     lines = [f'{title}（时长：{authored["duration"]}秒）', style + ";" + header[0], header[1],
              "人物：" + people + "；",

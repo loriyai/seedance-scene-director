@@ -79,6 +79,8 @@ def after_observation(before, value):
         result["description"] = value["value"]
     if "generationPrompt" in value.get("patch", {}):
         result.setdefault("generation", {})["prompt"] = value["patch"]["generationPrompt"]
+    if "generation" in value.get("patch", {}):
+        result["generation"] = copy.deepcopy(value["patch"]["generation"])
     patch = value.get("contentPatch", {})
     if "generation" in patch:
         result["generation"] = copy.deepcopy(patch["generation"])
@@ -251,6 +253,7 @@ def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
     decisions = decisions or {}
     items = asset_items(session)
     state, doc = c.connected(project, cli)
+    items = [c.resolve_asset_image_item(item, state, doc) for item in items]
     # A confirmed canvas node may not yet expose its backing business asset.
     for key, mapping in state["mappings"].items():
         node_id, kind = mapping.get("node_id"), mapping.get("kind")
@@ -317,7 +320,9 @@ def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
     c.save(project, state)
     progress({"completed": len(completed), "total": len(items), "node_ids": node_ids})
     if not pending:
-        return {"status": "synced", "count": len(items), "created": 0, "reused": len(completed)}
+        doc = c.sync_asset_image_references(project, cli, session, state, doc, {i["key"] for i in items})
+        return {"status": "synced", "count": len(items), "created": 0, "reused": len(completed),
+                "image_inputs": c.asset_image_input_status(state, {i["key"] for i in items})}
     c.checkpoint(project, cli, state, "seedance asset job")
     positions = c.layout_positions(doc, pending)
     created = 0
@@ -372,6 +377,7 @@ def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
                     if not pristine_initialization(doc, node_id, item["kind"], item["name"], item.get("image_prompt")):
                         c.fail("CONCURRENT_EDIT", "新建资产在初始化前已有其他内容，停止覆盖。", key=item["key"], node_id=node_id)
                 baseline = observation(doc, node_id)
+                item.update(c.resolve_asset_image_item(item, state, doc))
                 for command, value, targets in c.asset_initialization_steps(doc, item, node_id, force_name=is_new):
                     baseline = asset_update(project, cli, state, command, value, targets, baseline)
             else:
@@ -393,7 +399,9 @@ def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
             node_ids[item["key"]] = node_id
         c.save(project, state)
         progress({"completed": len(completed), "total": len(items), "node_ids": copy.deepcopy(node_ids)})
-    return {"status": "synced", "count": len(items), "created": created, "reused": len(items) - created}
+    doc = c.sync_asset_image_references(project, cli, session, state, doc, {i["key"] for i in items})
+    return {"status": "synced", "count": len(items), "created": created, "reused": len(items) - created,
+            "image_inputs": c.asset_image_input_status(state, {i["key"] for i in items})}
 
 
 def run_job(project, manifest, check_control, progress):

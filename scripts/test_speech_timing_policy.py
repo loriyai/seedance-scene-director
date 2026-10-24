@@ -20,11 +20,11 @@ class SpeechTimingPolicyChecks(unittest.TestCase):
 
     def test_all_consumers_share_the_new_ranges(self):
         self.assertEqual(dl.SPEEDS, {'常速': (4.8, 5.4), '快节奏': (4.8, 6.0),
-                                    '情绪慢速': (3.8, 4.4)})
+                                    '情绪慢速': (4.0, 4.8)})
         for module in (director, audit, preflight):
             self.assertIs(module.SPEEDS, dl.SPEEDS)
-        self.assertEqual(dl.PAUSE_RANGES, {'comma': (.1, .2), 'sentence': (.1, .3)})
-        self.assertAlmostEqual(dl.estimate('甲。', 51), 10.2)
+        self.assertEqual(dl.PAUSE_RANGES, {'comma': (.1, .2), 'sentence': (.1, .25)})
+        self.assertAlmostEqual(dl.estimate('甲。', 51), 10.175)
 
     def test_overlapping_rate_is_valid_for_both_selected_bands(self):
         for speed in ('常速', '快节奏'):
@@ -46,15 +46,15 @@ class SpeechTimingPolicyChecks(unittest.TestCase):
         self.assertEqual(warnings[0]['rate'], 6.0)
 
     def test_mixed_punctuation_is_one_pause_and_special_marks_stay_distinct(self):
-        self.assertEqual(dl.pause_seconds('甲，、乙？！'), .35)
-        self.assertEqual(dl.pause_seconds('甲？！……'), .2)
+        self.assertEqual(dl.pause_seconds('甲，、乙？！'), .325)
+        self.assertEqual(dl.pause_seconds('甲？！……'), .175)
         self.assertEqual(dl.pause_seconds('甲……'), dl.SEMANTIC_PAUSE_ESTIMATE)
         self.assertEqual(dl.pause_seconds('甲；乙：'), 2 * dl.SEMANTIC_PAUSE_ESTIMATE)
-        self.assertEqual(dl.pause_seconds('甲。乙。'), .4)
+        self.assertEqual(dl.pause_seconds('甲。乙。'), .35)
 
     def test_gap_thresholds_use_boundary_kind_without_reclassifying_ellipsis(self):
-        for ending, gap, expect_warning in (('，', .21, True), ('。', .31, True),
-                                             ('，', .2, False), ('。', .3, False),
+        for ending, gap, expect_warning in (('，', .21, True), ('。', .26, True),
+                                             ('，', .2, False), ('。', .25, False),
                                              ('……', .6, False)):
             with self.subTest(ending=ending, gap=gap):
                 unit = self.unit(units=10, net=2, pause=gap)

@@ -1,6 +1,6 @@
 """Expose shot review targets without claiming to infer filmable space.
 
-Diagnostics prompt review, never impose camera movement or rewrite shots.
+Diagnostics prompt review; explicit current constraints do not rewrite shots.
 """
 import copy
 import re
@@ -106,9 +106,9 @@ def targets(state, request, *, cue_policy=CUE_POLICY):
                           and type(shot.get('end')) is int
                           and 1 <= shot['end'] - shot['start'] <= 6)
             if legal_shot:
-                cues.append('1至6秒摄影选择：按观看重点、动作路径、信息揭示及剪辑承接比较固定与运动；'
-                            '不因短默认固定、不因长强制运动；缺少选择须待补，不得由程序回填。'
-                            '结合相邻镜头复核摄影是否服务当前观看任务，动静分布仅用于定位复核，不设比例。')
+                cues.append('1至6秒摄影选择：1至4秒按观看重点、动作路径和信息揭示比较固定与运动；'
+                            '5至6秒不得全程固定，须有实际观看作用的相机位移或转向；移焦与主体动作不算。'
+                            '相邻两镜不得均固定；缺少选择须待补，不得由程序回填，也不得以无意义微移或拖慢表演规避。')
             if '固定' in camera:
                 if (cue_policy == LEGACY_CUE_POLICY
                         and unit.get('review_dependencies', {}).get('policy') in ('shot-dependencies-v2', 'shot-dependencies-v3')
@@ -117,7 +117,7 @@ def targets(state, request, *, cue_policy=CUE_POLICY):
                     cues.append('4至6秒镜头含固定描述：核对是否仅为实际运镜后的短暂稳定落点；整镜固定不合格，须有服务观看重点的相机位移或转向，移焦与主体动作不算。')
                 elif current_cues:
                     cues.append('固定镜头：核对稳定观察的具体作用、信息读清所需时长和切点；'
-                                '有依据时保留，不因时长自动接受或否决，也不为增加运动数量而修改。')
+                                '仅1至4秒可全程固定，并须满足相邻约束；5至6秒须调整有效摄影或镜长。')
                 else:
                     cues.append('固定镜头：核对原有动作或保持的用途、信息读清所需时长和切点；不要求补运镜。')
             if any(text in camera for text in ('移', '推', '拉', '跟', '升', '降', '摇', '环绕')):

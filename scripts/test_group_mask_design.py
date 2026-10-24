@@ -5,6 +5,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from test_asset_visual_design import fixture, design
@@ -244,10 +245,16 @@ class GroupMaskDesignTests(unittest.TestCase):
         self.assertEqual(len(wearers), 2)
         for item in wearers:
             self.assertEqual(item["image_format"]["covering_prop_asset_id"], prop["id"])
+            base_id = item["appearance_variant"]["base_asset_id"]
+            base = next(value for value in result["characters"] if value["id"] == base_id)
+            self.assertEqual(design.image_reference_asset_ids(item), [base_id, prop["id"]])
+            self.assertIn(f"@{base['name']} ", item["image_prompt"])
+            self.assertIn(f"@{prop['name']} ", item["image_prompt"])
             for field in ("structure", "materials_palette", "scale", "state"):
-                self.assertIn(prop_design[field], item["image_prompt"])
+                self.assertNotIn(prop_design[field], item["image_prompt"])
+            self.assertNotIn(base["visual_design"]["styling"], item["image_prompt"])
             self.assertNotIn("粉色软质猪头头套", item["image_prompt"])
-        self.assertIn("深青布长衫", wearers[1]["image_prompt"])
+        self.assertNotIn("深青布长衫", wearers[1]["image_prompt"])
         self.assertNotIn("深青布长衫", wearers[0]["image_prompt"])
 
     def test_linked_prop_rejects_duplicate_freeform_mask_appearance(self):
@@ -273,9 +280,11 @@ class GroupMaskDesignTests(unittest.TestCase):
         revised = design.apply_design(result, self.payload, "古装写实")
         for item in revised["characters"]:
             if item["id"] in before:
-                self.assertIn("绿色短绒表层", item["image_prompt"])
+                self.assertNotIn("绿色短绒表层", item["image_prompt"])
                 self.assertNotIn("蓝色短绒表层", item["image_prompt"])
-                self.assertNotEqual(before[item["id"]][0], item["image_prompt"])
+                self.assertEqual(before[item["id"]][0], item["image_prompt"])
+                self.assertNotEqual(before[item["id"]][1], item["visual_design"]["source_context_digest"])
+        self.assertIn("绿色短绒表层", revised["props"][0]["image_prompt"])
 
     def test_linked_prop_fact_edit_invalidates_wearer_source_facts(self):
         _, _, prop, _ = self.linked_mask()
@@ -287,7 +296,138 @@ class GroupMaskDesignTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "原文外观事实已改变"):
             design.validate_visual_design(result)
         revised = design.apply_design(result, self.payload, "古装写实")
-        self.assertIn("左耳有原文明示的缺口", revised["characters"][1]["image_prompt"])
+        self.assertNotIn("左耳有原文明示的缺口", revised["characters"][1]["image_prompt"])
+        self.assertIn("左耳有原文明示的缺口", revised["props"][0]["image_prompt"])
+
+    def wardrobe(self):
+        base = self.data["characters"][0]
+        base["appearance"] = {"identity": "陈默", "incarnation": "第一世"}
+        item = copy.deepcopy(base)
+        item.update(id="CHAR0002", name="陈默-第一世-蓝外套", visual_facts=[])
+        self.data["characters"].append(item)
+        record = copy.deepcopy(self.payload["designs"][0])
+        record.update(asset_id=item["id"], styling="蓝色短外套，深灰布裤和布鞋",
+                      image_reference={"base_asset_id": base["id"],
+                                       "changes": ["将上衣替换为蓝色短外套"],
+                                       "preserve": ["面容、发型、体型及下装"]})
+        self.payload["designs"].append(record)
+        return item, record
+
+    def test_wardrobe_reference_uses_only_delta_and_preserves_backend_design(self):
+        _, record = self.wardrobe()
+        result = self.compile()
+        base, derived = result["characters"]
+        prompt = derived["image_prompt"]
+        self.assertEqual(design.image_reference_asset_ids(derived), [base["id"]])
+        self.assertIn(f"@{base['name']} ", prompt)
+        self.assertIn("将上衣替换为蓝色短外套", prompt)
+        self.assertNotIn(record["styling"], prompt)
+        self.assertNotIn(self.payload["identity_anchors"][0]["face"], prompt)
+        self.assertEqual(derived["visual_design"]["styling"], record["styling"])
+        design.validate_visual_design(result)
+
+    def test_reference_can_include_explicit_prop_for_non_mask_change(self):
+        _, record = self.wardrobe()
+        record["image_reference"]["prop_asset_ids"] = ["PROP0001"]
+        record["image_reference"]["changes"] = ["将既有令牌固定在腰侧，保留原有衣装"]
+        result = self.compile()
+        derived = result["characters"][1]
+        self.assertEqual(design.image_reference_asset_ids(derived), ["CHAR0001", "PROP0001"])
+        self.assertIn("@青铜令牌 ", derived["image_prompt"])
+        self.assertNotIn("佩戴 @青铜令牌", derived["image_prompt"])
+
+    def test_reference_rejects_self_cycle_missing_base_and_foreign_body(self):
+        _, record = self.wardrobe()
+        record["image_reference"]["base_asset_id"] = "CHAR0002"
+        with self.assertRaisesRegex(ValueError, "自引用"):
+            self.compile()
+        record["image_reference"]["base_asset_id"] = "CHAR9999"
+        with self.assertRaisesRegex(ValueError, "缺少现用基础"):
+            self.compile()
+        record["image_reference"]["base_asset_id"] = "CHAR0001"
+        self.payload["designs"][0]["image_reference"] = {
+            "base_asset_id": "CHAR0002", "changes": ["将外套恢复灰色"], "preserve": ["同一身体"]}
+        with self.assertRaisesRegex(ValueError, "循环"):
+            self.compile()
+        self.payload["designs"][0].pop("image_reference")
+        self.data["characters"][1]["appearance"]["incarnation"] = "第二世"
+        with self.assertRaisesRegex(ValueError, "跨身份或世次"):
+            self.compile()
+
+    def test_reference_contract_rejects_unknown_missing_and_forged_dependencies(self):
+        self.linked_mask()
+        derived = self.compile()["characters"][1]
+        for mutation in ("unknown", "missing", "forged"):
+            changed = copy.deepcopy(derived)
+            if mutation == "unknown":
+                changed["image_format"]["reference_policy"] = "unknown-policy"
+            elif mutation == "missing":
+                changed["image_format"].pop("reference_policy")
+            else:
+                changed["image_format"]["reference_asset_ids"] = ["CHAR0001"]
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                design.image_reference_asset_ids(changed)
+
+    def test_base_design_change_invalidates_dependent_even_when_reference_text_stays_same(self):
+        self.wardrobe()
+        result = self.compile()
+        derived = result["characters"][1]
+        before = derived["visual_design"]["source_context_digest"]
+        result["characters"][0]["visual_design"]["styling"] += "，袖口窄边"
+        self.assertNotEqual(before, design.source_context_digest(result, "characters", derived))
+        with self.assertRaisesRegex(ValueError, "共享资产依赖已变化"):
+            design.apply_design(result, {"designs": [dict(self.payload["designs"][0], styling="灰色窄袖布衣")]},
+                                "古装写实", patch=True)
+
+    def test_historical_v2_mask_replays_without_reference_migration(self):
+        self.linked_mask()
+        with patch.object(design, "prepare_image_reference"), patch.object(design, "validate_authored_reference_roots"):
+            historical = self.compile()
+        before = copy.deepcopy(historical)
+        mask = historical["characters"][1]
+        self.assertNotIn("reference_policy", mask["image_format"])
+        self.assertIn("蓝色短绒表层", mask["image_prompt"])
+        design.validate_visual_design(historical)
+        self.assertEqual(design.image_reference_asset_ids(mask), [])
+        self.assertEqual(historical, before)
+        set_design = copy.deepcopy(next(value for value in self.payload["designs"] if value["asset_id"] == "SET0001"))
+        set_design["lighting"] = "窗侧自然日光，桌面明亮"
+        unrelated = design.apply_design(historical, {"designs": [set_design]}, "古装写实", patch=True)
+        self.assertEqual(unrelated["characters"], historical["characters"])
+        migrated = design.apply_design(historical, self.payload, "古装写实")
+        self.assertEqual(design.image_reference_asset_ids(migrated["characters"][1]), ["CHAR0001", "PROP0001"])
+        self.assertEqual(historical, before)
+
+    def test_wardrobe_preview_closes_base_and_prop_and_matches_formal_compile(self):
+        import design_preview
+        _, record = self.wardrobe()
+        record["image_reference"]["prop_asset_ids"] = ["PROP0001"]
+        payload = copy.deepcopy(self.payload)
+        payload["designs"] = [value for value in payload["designs"] if value["asset_id"] != "SET0001"]
+        preview = design_preview.preview_design(self.data, payload, "古装写实", ["CHAR0002"])
+        self.assertEqual(preview["dependency_asset_ids"], ["CHAR0001", "CHAR0002", "PROP0001"])
+        derived = next(value for value in preview["previews"] if value["asset_id"] == "CHAR0002")
+        formal = self.compile()["characters"][1]
+        self.assertEqual(derived["image_prompt"], formal["image_prompt"])
+        self.assertEqual(derived["image_format"], formal["image_format"])
+
+    def test_reference_chain_is_order_independent_and_tracks_transitive_base(self):
+        item, record = self.wardrobe()
+        child = copy.deepcopy(item)
+        child.update(id="CHAR0003", name="陈默-第一世-蓝外套束发")
+        child_design = copy.deepcopy(record)
+        child_design.update(asset_id="CHAR0003", appearance_overrides={"hair": "黑发改束高髻"},
+                            variant_differences=["本版只改变发髻"])
+        child_design["image_reference"].update(base_asset_id="CHAR0002", changes=["黑发改束高髻"], preserve=["蓝色短外套及同一身体"])
+        self.data["characters"].insert(0, child)
+        self.payload["designs"].insert(0, child_design)
+        result = self.compile()
+        derived = result["characters"][0]
+        self.assertEqual(design.image_reference_asset_ids(derived), ["CHAR0002"])
+        before = derived["visual_design"]["source_context_digest"]
+        root = next(value for value in result["characters"] if value["id"] == "CHAR0001")
+        root["visual_design"]["styling"] += "，袖口窄边"
+        self.assertNotEqual(before, design.source_context_digest(result, "characters", derived))
 
     def test_recompile_requires_current_source_facts_and_group_design(self):
         self.group()

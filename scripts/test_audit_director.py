@@ -348,7 +348,7 @@ class AuditDirectorChecks(unittest.TestCase):
         warnings = d.validate_unit(self.state, unit, [0, 9])
         self.assertEqual(warnings[0]['kind'], '估计净语速超档')
         timing = warnings[0]['text_estimate']
-        self.assertEqual(timing['source_pause_seconds'], .2)
+        self.assertEqual(timing['source_pause_seconds'], .175)
         self.assertEqual(timing['registered_pause_seconds'], .2)
         self.assertEqual(timing['min_seconds'], 1.867)
 
@@ -371,8 +371,8 @@ class AuditDialogueChecks(unittest.TestCase):
         return unit, {'L1': [first, {'text': '是为了告诉大家我们一定能成功', 'start': 3, 'end': 6}]}
 
     def test_mixed_contiguous_punctuation_counts_one_highest_pause(self):
-        for text, expected in [('真的？！……', .2), ('等一下……？', .2), ('真的，！', .2),
-                               ('等一下，……', .26), ('好，，', .15), ('等等……', .26), ('好！好！', .4)]:
+        for text, expected in [('真的？！……', .175), ('等一下……？', .175), ('真的，！', .175),
+                               ('等一下，……', .26), ('好，，', .15), ('等等……', .26), ('好！好！', .35)]:
             with self.subTest(text=text):
                 self.assertEqual(dl.pause_seconds(text), expected)
 

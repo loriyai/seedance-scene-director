@@ -7,7 +7,7 @@ const vm = require("vm");
 
 const source = fs.readFileSync(path.join(__dirname, "ensure-cli.js"), "utf8");
 const requiredSemantic = [
-  "get_snapshot", "get_permissions", "create_biz_node", "update_node_data", "update_asset", "delete_nodes", "delete_edges",
+  "get_snapshot", "get_permissions", "create_biz_node", "create_edge", "update_node_data", "update_asset", "delete_nodes", "delete_edges",
   "xyq.generation.update_prompt", "xyq.role.updateDescription",
   "xyq.scene.updateDescription", "xyq.role.updateAppearance",
 ];
@@ -15,7 +15,7 @@ const cliDir = path.resolve("cli-capability-fixture");
 const cliPath = path.join(cliDir, `pippit-tool-cli${process.platform === "win32" ? ".exe" : ""}`);
 const entry = path.resolve(path.dirname(cliPath), "../scripts/run.js");
 
-function fixture(catalogNames, promptContract = true, teamFlag = true) {
+function fixture(catalogNames, promptContract = true, teamFlag = true, referenceContract = true) {
   const calls = [];
   const messages = [];
   const fakeFs = {
@@ -39,7 +39,9 @@ function fixture(catalogNames, promptContract = true, teamFlag = true) {
       return Buffer.from(JSON.stringify({ commands: catalogNames.map((name) => ({ name })) }));
     }
     if (args.slice(-4).join(" ") === "canvas command schema xyq.role.updateAppearance") {
-      return Buffer.from(JSON.stringify({input_schema: {properties: {patch: {properties: promptContract ? {generationPrompt: {}} : {}}, expected: {properties: {generationPrompt: {}}}}}}));
+      return Buffer.from(JSON.stringify({input_schema: {properties: {patch: {properties: promptContract ? {
+        generationPrompt: {}, generation: {anyOf: [{type: "object", properties: referenceContract ? {references: {type: "array"}} : {}}]}
+      } : {}}, expected: {properties: {generationPrompt: {}, generation: {}}}}}}));
     }
     throw new Error("unexpected mock command: " + args.join(" "));
   };
@@ -96,6 +98,9 @@ runCase("missing independent role prompt schema", () => {
 });
 runCase("missing team-id flag", () => {
   assert.throws(() => fixture(requiredSemantic, true, false).ensureCLI({ canvas: true }));
+});
+runCase("missing role reference generation contract", () => {
+  assert.throws(() => fixture(requiredSemantic, true, true, false).ensureCLI({ canvas: true }));
 });
 
 console.log(`CLI capability regression checks passed (${passedCases} cases, offline mock).`);

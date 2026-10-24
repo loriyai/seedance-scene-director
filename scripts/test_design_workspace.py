@@ -397,7 +397,8 @@ class DesignWorkspaceTests(unittest.TestCase):
         self.assertEqual(workspace.group_spec(baseline, plan, "mask")["read_only_asset_ids"], ["CHAR0001", "PROP0001"])
         submission = self.submission(baseline, plan, "mask", [payload["designs"][1]])
         report = workspace.verify_group(baseline, plan, "mask", submission)
-        self.assertIn("粉色短绒", report["previews"][0]["image_prompt"])
+        self.assertNotIn("粉色短绒", report["previews"][0]["image_prompt"])
+        self.assertIn("@猪猪头套 ", report["previews"][0]["image_prompt"])
         merged = workspace.merge(baseline, plan, [submission, self.submission(baseline, plan, "set", [payload["designs"][2]])])
         self.assertEqual(design.apply_design(data, merged, self.style), design.apply_design(data, payload, self.style))
 

@@ -142,13 +142,18 @@ def _assignments(data, anchors, assignments, version):
             require(assignments.get(base) == assignments.get(item["id"]), f"{item['id']}佩戴版本须共用基础身份锚点")
 
 
-def _dependencies(data, assignments):
+def _dependencies(data, assignments, records=None):
     """Hard image dependencies plus peer closure and immutable LOC facts."""
     catalog, ids = _catalog(data), _image_ids(data)
     hard, peers, locations = {aid: set() for aid in ids}, {aid: set() for aid in ids}, {}
     for aid in sorted(ids):
         category, item = catalog[aid]
         if category == "characters":
+            value = (records or {}).get(aid, item.get("visual_design", {}))
+            for dep in design.reference_design_ids(item, value):
+                expected = "characters" if dep.startswith("CHAR") else "props"
+                require(dep in ids and catalog[dep][0] == expected, f"{aid}缺少图片派生依赖：{dep}")
+                hard[aid].add(dep)
             variant = item.get("appearance_variant", {})
             for key in ("base_asset_id", "prop_asset_id"):
                 if variant.get(key):
@@ -232,7 +237,7 @@ def _compile(data, records, anchors, assignments, version, style, frozen=None):
                   visual_style={"text": style, "digest": design.fingerprint(style)})
     catalog, ids = _catalog(result), _image_ids(result)
     require(set(records) <= ids, f"设计包含未知/非图片资产：{sorted(set(records) - ids)}")
-    hard, _, _ = _dependencies(result, assignments)
+    hard, _, _ = _dependencies(result, assignments, records)
     for aid in records:
         require(hard[aid] <= set(records), f"{aid}缺少已提供的设计依赖：{sorted(hard[aid] - set(records))}")
     # SET references only consume explicitly frozen records, never another
@@ -258,6 +263,9 @@ def _compile(data, records, anchors, assignments, version, style, frozen=None):
             if base.get("appearance_overrides"):
                 value.setdefault("variant_differences", copy.deepcopy(base.get("variant_differences", [])))
         item["visual_design"] = records[aid]
+        design.prepare_image_reference(item, records[aid], version)
+    design.validate_image_references(result, records)
+    design.validate_authored_reference_roots(result, records)
     previews = []
     for aid in sorted(records):
         category, item = catalog[aid]
@@ -273,7 +281,7 @@ def _compile(data, records, anchors, assignments, version, style, frozen=None):
 
 
 def _freeze_records(data, records, anchors, assignments, version, style):
-    hard, _, _ = _dependencies(data, assignments)
+    hard, _, _ = _dependencies(data, assignments, records)
     catalog, compiled, remaining = _catalog(data), {}, copy.deepcopy(records)
     require(set(remaining) <= _image_ids(data), "共享设计包含未知/非图片资产")
     while remaining:
@@ -381,7 +389,7 @@ def validate_baseline(baseline, require_files=False):
 
 def _group_dependencies(baseline, owned):
     data, shared = baseline["ledger"], baseline["shared_designs"]
-    hard, peers, locations = _dependencies(data, baseline["identity_assignments"])
+    hard, peers, locations = _dependencies(data, baseline["identity_assignments"], shared)
     catalog, closure = _catalog(data), set(owned)
     pending = list(owned)
     while pending:

@@ -81,6 +81,10 @@ class PerformanceDirectionChecks(unittest.TestCase):
 
     def test_speed_changes_use_event_source_and_still_trigger_timing_review(self):
         unit = self.sample()
+        # Five units/second is within normal delivery but exceeds emotional slow.
+        unit['audio'][0]['end'] = .94
+        dl.attach(unit)
+        self.assertFalse(any(w['kind'] == '估计净语速超档' for w in self.validate(unit)))
         unit['shots'][0]['dialogue_parts'][0]['delivery'] = {'volume': '轻声'}
         unit['audio'][0]['speed'] = '情绪慢速'
         rendered = self.render(unit)

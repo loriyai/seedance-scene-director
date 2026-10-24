@@ -75,6 +75,12 @@ def check_record(category, aid, record, version="gpt-image-2-v2"):
     for field in PHYSICAL_FIELDS[category]:
         if field in record:
             check_text(record[field], f"{aid}.{field}")
+    if "image_reference" in record:
+        reference = record["image_reference"]
+        if not isinstance(reference, dict):
+            raise ValueError(f"{aid}.image_reference须为对象")
+        for field in ("changes", "preserve"):
+            check_text(reference.get(field, []), f"{aid}.image_reference.{field}")
     # Layout basis is rendered only for composite product images; IDs still
     # have no visual meaning, while legitimate composition text is allowed.
     if record.get("product_layout") == "multiple_objects":

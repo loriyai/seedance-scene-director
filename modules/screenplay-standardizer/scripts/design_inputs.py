@@ -77,9 +77,10 @@ def project_inputs(data, shared, asset_ids):
         if category == "locations":
             continue
         variant = item.get("appearance_variant", {})
-        base = variant.get("base_asset_id")
-        targets = {aid} | ({base} if base else set())
         current_design = authored.get(aid, item.get("visual_design", {}))
+        image_dependencies = design.reference_design_ids(item, current_design)
+        base = image_dependencies[0] if image_dependencies else variant.get("base_asset_id")
+        targets = {aid} | ({base} if base else set())
         anchor = assignments.get(aid, current_design.get("identity_anchor_id"))
         facts = copy.deepcopy(design.asset_facts(data, category, item))
         absorbed = [{"candidate_id": candidate["id"],
@@ -99,6 +100,7 @@ def project_inputs(data, shared, asset_ids):
             "scene_refs": [{"scene_id": scene["id"], "source_range": scene["source_range"]}
                            for scene in data["scenes"] if scene["id"] in scene_ids],
             "inheritance": {"base_asset_id": base, "prop_asset_id": variant.get("prop_asset_id"),
+                            "image_reference_asset_ids": image_dependencies,
                             "location_id": item.get("location_id"), "parent_id": item.get("parent_id"),
                             "identity_anchor_id": anchor},
             "shared_design_sha256": design.fingerprint(current_design) if current_design else None,

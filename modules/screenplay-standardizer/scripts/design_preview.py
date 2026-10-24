@@ -56,6 +56,8 @@ def _closure(data, catalog, requested, authored):
         # whereas the explicit SET parent graph is checked separately below.
         needed.add(aid)
         if category == "characters":
+            for dependency in design.reference_design_ids(item, authored.get(aid, item.get("visual_design", {}))):
+                add(dependency, f"{aid}:image_reference")
             variant = item.get("appearance_variant", {})
             if variant:
                 base_id = variant.get("base_asset_id")
@@ -181,6 +183,12 @@ def preview_design(data, payload, style_text, asset_ids, input_hashes=None):
         if base_design.get("appearance_overrides"):
             value.setdefault("variant_differences", copy.deepcopy(base_design.get("variant_differences", [])))
     # Check same-body identity and anchor ownership against the full inventory.
+    for aid in sorted(image_ids):
+        if modes[aid] == "authored":
+            category, item = current[aid]
+            design.prepare_image_reference(item, item["visual_design"], version)
+    design.validate_image_references(result, image_ids)
+    design.validate_authored_reference_roots(result, authored)
     identities, owners = {}, {}
     for item in design.visual_assets(result, "characters"):
         if version == design.DESIGN_VERSION and design.is_group(item):

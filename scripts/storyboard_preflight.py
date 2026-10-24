@@ -512,6 +512,17 @@ def preflight(state, request):
         warnings.extend(dict(item, unit=key) for item in uw)
         units.append({"unit": key, "status": "failed" if ue else "passed", "audio": audio,
                       "identity": identity, "reference_closure": references, "readiness": readiness})
+    # New opt-in authoring checks explicit camera constraints. Stored receipt
+    # reading/rendering never runs this gate; unresolved wording stays visible
+    # to the existing independent scene review rather than being auto-approved.
+    authored = [unit for unit in request['units'] if isinstance(unit, dict)
+                and unit.get('workflow_policy') == POLICY and unit.get('shots')]
+    if authored:
+        from storyboard_text import camera_constraints, camera_context
+        replace_ids = [u.get('id') for u in authored] if request.get('mode') == 'replace' else None
+        camera = camera_constraints(authored, *camera_context(state, authored, replace_ids))
+        errors.extend(camera['errors'])
+        warnings.extend(camera['warnings'])
     return _report(errors, warnings, policy=POLICY, units=units)
 
 

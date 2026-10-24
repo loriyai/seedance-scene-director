@@ -20,6 +20,7 @@ GROUP_POLICY = "visual-continuity-v2"
 LEGACY_DESIGN_VERSION = "gpt-image-2-v1"
 DESIGN_VERSION = "gpt-image-2-v2"
 DESIGN_VERSIONS = (LEGACY_DESIGN_VERSION, DESIGN_VERSION)
+IMAGE_REFERENCE_POLICY = "asset-image-reference-v1"
 ASSET_CATEGORIES = ("characters", "scene_assets", "props")
 FURNITURE = re.compile(r"(?:桌|床|椅|柜|沙发|茶几|凳)(?:子|铺)?$")
 DAILY_ITEMS = {"锅", "碗", "瓢", "盆", "锅碗瓢盆", "筷子", "餐具", "水杯", "杯子", "手机", "雨伞", "香烟", "茶杯", "盘子", "勺子"}
@@ -60,6 +61,158 @@ def nonempty(value, label):
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def reference_design_ids(item, design=None):
+    """Ordered author dependencies, independent of node/media availability."""
+    design = item.get("visual_design", {}) if design is None else design
+    if not isinstance(design, dict):
+        raise ValueError(f"{item['id']}图片设计须为对象")
+    reference = design.get("image_reference")
+    if reference is None:
+        return []
+    if (not isinstance(reference, dict) or not {"base_asset_id", "changes", "preserve"} <= set(reference)
+            or set(reference) - {"base_asset_id", "changes", "preserve", "prop_asset_ids"}):
+        raise ValueError(f"{item['id']} image_reference须含base_asset_id、changes、preserve")
+    base_id = reference.get("base_asset_id")
+    if not isinstance(base_id, str) or not re.fullmatch(r"CHAR\d{4,}", base_id) or base_id == item["id"]:
+        raise ValueError(f"{item['id']}图片基础引用无效或自引用")
+    for key in ("changes", "preserve"):
+        values = reference.get(key)
+        if not isinstance(values, list) or not values:
+            raise ValueError(f"{item['id']} image_reference.{key}须为非空文字数组")
+        for value in values:
+            nonempty(value, f"{item['id']} image_reference.{key}")
+    variant = item.get("appearance_variant", {})
+    if variant and base_id != variant.get("base_asset_id"):
+        raise ValueError(f"{item['id']}图片基础引用必须与已审佩戴基础一致")
+    props = reference.get("prop_asset_ids", [])
+    if (not isinstance(props, list) or any(not isinstance(pid, str) or not re.fullmatch(r"PROP\d{4,}", pid) for pid in props)
+            or len(props) != len(set(props))):
+        raise ValueError(f"{item['id']} prop_asset_ids须为唯一PROP图片资产ID数组")
+    ids = [base_id, *props]
+    if variant.get("prop_asset_id") is not None:
+        prop_id = variant["prop_asset_id"]
+        if not isinstance(prop_id, str) or not re.fullmatch(r"PROP\d{4,}", prop_id):
+            raise ValueError(f"{item['id']}关联道具引用无效")
+        if prop_id not in ids:
+            ids.append(prop_id)
+    return ids
+
+
+def image_reference_asset_ids(item):
+    """Read only the compiled contract; old independent prompts stay old."""
+    form = item.get("image_format", {})
+    if not isinstance(form, dict):
+        raise ValueError(f"{item['id']}图片引用编译合同须为对象")
+    policy = form.get("reference_policy")
+    if policy is None:
+        if "reference_asset_ids" in form or item.get("visual_design", {}).get("image_reference") is not None:
+            raise ValueError(f"{item['id']}图片引用编译合同缺失")
+        return []
+    if policy != IMAGE_REFERENCE_POLICY:
+        raise ValueError(f"{item['id']}不支持的图片引用协议：{policy}")
+    ids = reference_design_ids(item)
+    if not ids or form.get("reference_asset_ids") != ids:
+        raise ValueError(f"{item['id']}图片引用与已审设计依赖不一致")
+    return ids
+
+
+def prepare_image_reference(item, design, version):
+    """Materialize only newly authored wearable references, never old renders."""
+    variant = item.get("appearance_variant")
+    if not variant or version != DESIGN_VERSION:
+        return
+    reference = copy.deepcopy(design.get("image_reference", {}))
+    if reference and reference.get("base_asset_id") != variant.get("base_asset_id"):
+        raise ValueError(f"{item['id']}图片基础引用必须与已审佩戴基础一致")
+    covering = design.get("covering")
+    # The existing wearable fields remain the sole owner of fit/coverage.
+    changes = ([covering.get("fit"), covering.get("coverage")] if isinstance(covering, dict)
+               else [covering])
+    reference.update(base_asset_id=variant.get("base_asset_id"), changes=changes)
+    reference.setdefault("preserve", ["基础图中未变化的身份、体型和衣装"])
+    design["image_reference"] = reference
+
+
+def validate_image_references(data, asset_ids=None):
+    catalog = {item["id"]: (category, item) for category in ASSET_CATEGORIES
+               for item in visual_assets(data, category)}
+    selected = set(asset_ids) if asset_ids is not None else set(catalog)
+    visiting, checked = set(), set()
+
+    def visit(aid):
+        if aid in visiting:
+            raise ValueError(f"{aid}图片基础引用存在循环")
+        if aid in checked:
+            return
+        visiting.add(aid)
+        category, item = catalog[aid]
+        value = item.get("visual_design", {})
+        ids = reference_design_ids(item, value)
+        if ids:
+            if category != "characters" or is_group(item) or data.get("image_design_version") != DESIGN_VERSION:
+                raise ValueError(f"{aid}图片派生仅用于v2独立角色")
+            if ids[0] not in catalog or catalog[ids[0]][0] != "characters":
+                raise ValueError(f"{aid}缺少现用基础角色图片资产：{ids[0]}")
+            base = catalog[ids[0]][1]
+            if is_group(base) or base.get("visual_design", {}).get("identity_anchor_id") != value.get("identity_anchor_id"):
+                raise ValueError(f"{aid}图片基础必须为同一身体的独立角色锚点")
+            own_body, base_body = item.get("appearance"), base.get("appearance")
+            if own_body and base_body and any(own_body.get(k) != base_body.get(k) for k in ("identity", "incarnation")):
+                raise ValueError(f"{aid}图片基础不可跨身份或世次的实际身体")
+            if item.get("asset_type") != base.get("asset_type") or item.get("species") != base.get("species"):
+                raise ValueError(f"{aid}图片基础不可跨身体类型或物种")
+            visit(ids[0])
+            for prop_id in ids[1:]:
+                if prop_id not in catalog or catalog[prop_id][0] != "props":
+                    raise ValueError(f"{aid}缺少关联道具图片资产：{prop_id}")
+        visiting.remove(aid)
+        checked.add(aid)
+
+    for aid in sorted(selected):
+        if aid in catalog:
+            visit(aid)
+
+
+def validate_authored_reference_roots(data, authored_ids):
+    """A newly authored same-body family has one explicit image foundation."""
+    if data.get("image_design_version") != DESIGN_VERSION:
+        return
+    families = {}
+    for item in visual_assets(data, "characters"):
+        value = item.get("visual_design", {})
+        if not is_group(item) and value.get("identity_anchor_id"):
+            families.setdefault(value["identity_anchor_id"], []).append(item)
+    authored_ids = set(authored_ids)
+    for family in families.values():
+        if len(family) < 2 or not any(item["id"] in authored_ids for item in family):
+            continue
+        roots = [item["id"] for item in family if not reference_design_ids(item)]
+        if len(roots) != 1:
+            raise ValueError(f"同一身体多形象须明确一个基础图片，其余填写image_reference；独立基础：{roots}")
+
+
+def image_reference_context(data, item, visiting=None):
+    """Bind the actual author dependency chain without generated-hash order."""
+    visiting = set() if visiting is None else set(visiting)
+    if item["id"] in visiting:
+        raise ValueError(f"{item['id']}图片基础引用存在循环")
+    visiting.add(item["id"])
+    catalog = {value["id"]: value for category in ASSET_CATEGORIES for value in data.get(category, [])}
+    dependencies = []
+    for aid in reference_design_ids(item):
+        if aid not in catalog:
+            raise ValueError(f"{item['id']}图片引用依赖不存在：{aid}")
+        value = catalog[aid]
+        author = {key: copy.deepcopy(child) for key, child in value.get("visual_design", {}).items()
+                  if key not in ("source_fact_digest", "source_context_digest")}
+        record = {key: copy.deepcopy(value.get(key)) for key in
+                  ("id", "name", "appearance", "appearance_variant", "visual_facts", "asset_type", "species")}
+        record["visual_design"] = author
+        record["dependencies"] = image_reference_context(data, value, visiting)
+        dependencies.append(record)
+    return dependencies
 
 
 def is_speaking_ensemble(item):
@@ -334,6 +487,8 @@ def source_context_digest(data, category, item):
               "source_name": item.get("source_name"), "appearance": item.get("appearance"),
               "visible_uses": item.get("visible_uses"), "variant": item.get("variant"),
               "parent_id": item.get("parent_id"), "location_id": item.get("location_id")}
+    if item.get("visual_design", {}).get("image_reference") is not None:
+        record["image_reference_dependencies"] = image_reference_context(data, item)
     if "appearance_variant" in item:
         record["appearance_variant"] = copy.deepcopy(item["appearance_variant"])
         base = next((character for character in data["characters"]
@@ -567,6 +722,10 @@ def validate_design_record(category, item, design, anchors, version=DESIGN_VERSI
     if not isinstance(design, dict) or design.get("attribution") != "制作设计":
         raise ValueError(f"{label}视觉设计须独立标注制作设计")
     design_scope.validate_presentation(category, design, version)
+    if "image_reference" in design:
+        if category != "characters" or version != DESIGN_VERSION or is_group(item):
+            raise ValueError(f"{label}图片派生仅用于v2独立角色")
+        reference_design_ids(item, design)
     nonempty(design.get("basis"), f"{label}设计依据")
     if design.get("reviewed_source_facts") is not True:
         raise ValueError(f"{label}设计作者须审阅原文明示约束并声明 reviewed_source_facts=true")
@@ -682,8 +841,42 @@ def compile_group_prompt(common, design):
     return prompt, form
 
 
+def compile_reference_prompt(data, item, design, style):
+    ids = reference_design_ids(item, design)
+    catalog = {value["id"]: value for category in ASSET_CATEGORIES for value in data.get(category, [])}
+    base = catalog[ids[0]]
+    style_end = "" if style.endswith(("。", "！", "？", ".", "!", "?")) else "。"
+    reference = design["image_reference"]
+    common = f"统一视觉风格：{style}{style_end}以 @{base['name']} 为基础图片，呈现同一角色本版变化完成后的形象。"
+    if len(ids) > 1:
+        refs = "、".join(f"@{catalog[aid]['name']} " for aid in ids[1:])
+        relation = "佩戴" if design.get("covering") and len(ids) == 2 else "本版变化所用物件参考"
+        common += f"{relation} {refs}，沿用所引用道具图片的形制、材质及配色。"
+    common += "本版仅改变：" + "；".join(reference["changes"]) + "。保留：" + "；".join(reference["preserve"]) + "。"
+    form = {"model": "gpt-image-2", "aspect_ratio": "16:9", "background": "pure_white",
+            "reference_policy": IMAGE_REFERENCE_POLICY, "reference_asset_ids": ids}
+    if design.get("covering"):
+        layout = MASKED_CHARACTER_LAYOUT
+        form.update(layout="left_1/3_covered_head_right_2/3_front_side90_back_full_body",
+                    covering_state="worn_in_every_view")
+        if item.get("appearance_variant", {}).get("prop_asset_id"):
+            form["covering_prop_asset_id"] = item["appearance_variant"]["prop_asset_id"]
+    elif item.get("asset_type") == "animal":
+        layout = ANIMAL_LAYOUT
+        form.update(layout="left_1/3_animal_head_right_2/3_front_side90_back_complete_body",
+                    subject_kind="animal", species=item["species"])
+    else:
+        layout = CHARACTER_LAYOUT
+        form["layout"] = "left_1/3_large_front_face_right_2/3_front_side90_back_full_body"
+    prompt = common + layout + "各视图只呈现本版完成状态，保持未改变部分与基础图片一致。使用符合主体结构的自然静态姿态、柔和均匀棚拍光；不绘变化过程、前后对照、额外角色、说明文字、标签、水印或签名。"
+    return prompt, form
+
+
 def compile_prompt(data, category, item, design, anchors):
     style = nonempty(data["visual_style"].get("text"), "视觉风格")
+    if category == "characters" and design.get("image_reference") is not None:
+        validate_image_references(data, [item["id"]])
+        return compile_reference_prompt(data, item, design, style)
     facts = source_constraints(data, category, item)
     hard = ("必须保持的可见特征：" + "；".join(facts) + "。这些特征优先于以下补充描述。") if facts else ""
     style_end = "" if style.endswith(("。", ".", "！", "!", "？", "?")) else "。"
@@ -777,6 +970,7 @@ def validate_design_item(data, category, item, anchors, version):
     prompt, form = compile_prompt(data, category, item, design, anchors)
     if item.get("image_prompt") != prompt or item.get("image_format") != form:
         raise ValueError(f"{item['id']}生图提示词或版式与台账设计不一致，请重新运行design")
+    image_reference_asset_ids(item)
 
 
 def design_review_status(data):
@@ -800,7 +994,7 @@ def design_review_status(data):
                 result["reusable_asset_ids"].append(item["id"])
             except (ValueError, KeyError, TypeError, StopIteration) as exc:
                 result["review_required"].append({"asset_id": item["id"], "reason": str(exc)})
-    for validator in (validate_shared_identity, validate_variant_inheritance):
+    for validator in (validate_shared_identity, validate_variant_inheritance, validate_image_references):
         try:
             validator(data)
         except (ValueError, KeyError, TypeError) as exc:
@@ -830,6 +1024,7 @@ def validate_visual_design(data):
             validate_design_item(data, category, item, anchors, version)
     validate_shared_identity(data)
     validate_variant_inheritance(data)
+    validate_image_references(data)
 
 
 def apply_design(data, payload, style_text, *, patch=False, paragraphs=None):
@@ -913,6 +1108,8 @@ def apply_design(data, payload, style_text, *, patch=False, paragraphs=None):
     for category in ASSET_CATEGORIES:
         for item in visual_assets(result, category):
             design = designs[item["id"]]
+            if item["id"] in changed_ids:
+                prepare_image_reference(item, design, version)
             validate_design_record(category, item, design, anchors, version)
             item["visual_design"] = design
     # All author designs are installed before any dependent CHAR is compiled;
@@ -920,6 +1117,8 @@ def apply_design(data, payload, style_text, *, patch=False, paragraphs=None):
     # New writes check physical fields and their inherited context. Historical
     # validate/render does not retrofit a new scope gate or rewrite old prompts.
     design_scope.check_context(result)
+    validate_image_references(result)
+    validate_authored_reference_roots(result, changed_ids)
     for category in ASSET_CATEGORIES:
         for item in visual_assets(result, category):
             design = item["visual_design"]

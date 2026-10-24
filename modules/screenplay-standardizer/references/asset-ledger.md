@@ -287,6 +287,8 @@ python scripts/asset_ledger.py variants <standard-script.txt> <source.json> <led
 
 `variants`完整列出已有和新增佩戴资产。已有ID不能改绑另一个人物；重复应用同一base/label可复用原ID，显式新ID不能占用现用或废弃ID。佩戴类型为`headgear`或`face_covering`。程序生成的`appearance_variant`保留base_asset_id、label、kind、design_basis和当前source_digest，source_entry及source_speaker逐字继承基础人物。该基础资产确定原身份、体型与服装，不能借佩戴换脸、换世次或换衣；确有服装变化时先关联正确的服装基础资产。可以用`prop_asset_id`关联已存在的同款头套/面罩道具，供佩戴、拿取和摘戴共用设计；道具实体数量与持有人仍由prop_occurrences及连续性分别保存，三个同款头套不能因此变成同一个实物。
 
+形象启用与图片派生分别管理：`appearance_variant`决定已审佩戴资产和剧情使用区间，不扩充为任意换装事件接口。同一身体的换装或其他已成立状态差异，在既有CHAR设计的`visual_design.image_reference`中登记基础图片来源、允许变化和保持项；不能借图片引用创建角色、改变启用区间或跨身份/世次借用另一身体。佩戴版的基础及道具依赖沿已有appearance_variant建立，普通派生由作者显式选择，不从名称猜测。引用必须指向现用图片资产且无自引用或循环，基础和道具变更只使实际依赖者待复核。作者字段、差异编译与历史兼容统一见[图片设计](../../../references/asset-image-design.md#身份锚点与造型差异)，不在台账另存一份完整提示词规则。
+
 `scenes.character_ids`始终逐项对应原人物行，不能把基础和佩戴版本同时追加为两个人。独立的`character_appearances`数组登记本场合法形象及其初始状态、切换链；切换引用本场连续原文段落，event_id不重复，from/to依次衔接。同场无摘戴动作但已佩戴出场时，initial_asset_id直接用佩戴版本，initial_evidence说明本场状态，transitions可为空；不能用后文戴上事件证明前文已佩戴。程序检查引文、链条与摘要，原文是否真的证明该人物佩戴、最初状态以及参考必要性仍由作者核实。
 
 分镜continuity中基础与佩戴版本属于同一个entity，其asset_ids列出本单元会使用的合法版本，以asset_id状态切换，不单独登记为两个人。初始形象按本单元之前已发生的事件继承，不能提前引用后文版本；changes的evidence使用对应事件完整动作引文，使其能在本场标准正文唯一定位。来源边界不能截断该切换动作证据；换镜不是重复佩戴的理由。未选范围之外的事件不需要在本单元重演。形象动作发生镜中可同时引用切换前后两图，后续镜头只使用当前形象。

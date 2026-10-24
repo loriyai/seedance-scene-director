@@ -21,8 +21,9 @@ import continuity
 import batch_naming
 import audio_sources
 HEADER_SHA = "8001822afdf324cbbfa3eb284b2a03ccbde084b2e70fa66763a26b5c738e5962"
-HEADER_POLICY = "visual-only-v2"
-VISUAL_HEADER_SHA = "8001822afdf324cbbfa3eb284b2a03ccbde084b2e70fa66763a26b5c738e5962"
+HEADER_POLICY = "visual-only-v3"
+VISUAL_V2_HEADER_SHA = "8001822afdf324cbbfa3eb284b2a03ccbde084b2e70fa66763a26b5c738e5962"
+VISUAL_HEADER_SHA = "c6ecdb84bfe5f33e7d8b33f7d8d55c4e51548ca55bd18bc1e6f2ec1c89592dd4"
 STYLES = {"1": "3D国风动漫,暗黑武侠/超写实仙侠风格", "2": "3D国风动漫，眷思量风格，东方奇幻唯美风格"}
 SPEEDS = dialogue_layout.SPEEDS
 FRAMINGS = {"大远景", "大全景", "远景", "全景", "中景", "中近景", "近景", "特写"}
@@ -509,9 +510,11 @@ def milliseconds(value):
 
 def fixed_header(policy=None):
     # Unmarked stored units retain their original header on every re-export.
-    require(policy in (None, HEADER_POLICY), "未知的固定抬头版本")
-    filename, expected = (("fixed-header-visual-v2.txt", VISUAL_HEADER_SHA)
-                          if policy == HEADER_POLICY else ("fixed-header.txt", HEADER_SHA))
+    versions = {None: ("fixed-header.txt", HEADER_SHA),
+                "visual-only-v2": ("fixed-header-visual-v2.txt", VISUAL_V2_HEADER_SHA),
+                HEADER_POLICY: ("fixed-header-visual-v3.txt", VISUAL_HEADER_SHA)}
+    require(policy in versions, "未知的固定抬头版本")
+    filename, expected = versions[policy]
     text = (ROOT / "assets" / filename).read_text(encoding="utf-8-sig").strip()
     require(sha(text) == expected, "固定抬头被修改；请恢复对应版本常量")
     return text.splitlines()

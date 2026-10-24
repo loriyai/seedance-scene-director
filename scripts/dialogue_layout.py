@@ -7,8 +7,8 @@ VOICE_POLICY = 'event-inheritance-v1'
 SPEECH_RENDER_POLICY = 'explicit-cues-v1'
 # One numerical source for the legacy text-estimate consumers. These are
 # diagnostic ranges, not playback controls or mandatory speaking instructions.
-SPEEDS = {'常速': (4.8, 5.4), '快节奏': (4.8, 6.0), '情绪慢速': (3.8, 4.4)}
-PAUSE_RANGES = {'comma': (.1, .2), 'sentence': (.1, .3)}
+SPEEDS = {'常速': (4.8, 5.4), '快节奏': (4.8, 6.0), '情绪慢速': (4.0, 4.8)}
+PAUSE_RANGES = {'comma': (.1, .2), 'sentence': (.1, .25)}
 DEFAULT_RATE = sum(SPEEDS['常速']) / 2
 # Ellipses, dashes, colons and semicolons need contextual interpretation. This
 # fallback only weights an estimate; an explicitly registered pause replaces it.

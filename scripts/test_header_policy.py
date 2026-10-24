@@ -30,8 +30,11 @@ class HeaderPolicyTests(unittest.TestCase):
         self.assertEqual(self.unit, original)
         self.assertIn(self.unit['style'] + ';' + new_lines[0], current)
         self.assertIn('composed and graceful movements', legacy)
-        for phrase in ('composed and graceful movements', 'natural blinking',
-                       'Subtle micro-expressions', 'breathing chest movement',
+        self.assertEqual(new_lines[0], old_lines[0].replace('Subtle micro-expressions, ', '').replace(', composed and graceful movements;', ';'))
+        self.assertEqual(d.fixed_header('visual-only-v2'), old_lines)
+        for phrase in ('Subtle micro-expressions', 'composed and graceful movements'):
+            self.assertNotIn(phrase, current)
+        for phrase in ('natural blinking', 'breathing chest movement',
                        'clothing fluttering gently in the wind'):
             self.assertIn(phrase, current)
 
@@ -52,7 +55,8 @@ class HeaderPolicyTests(unittest.TestCase):
         folder = self.harness.project / 'header-assets'
         (folder / 'assets').mkdir(parents=True)
         for policy, filename in ((None, 'fixed-header.txt'),
-                                 (d.HEADER_POLICY, 'fixed-header-visual-v2.txt')):
+                                 ('visual-only-v2', 'fixed-header-visual-v2.txt'),
+                                 (d.HEADER_POLICY, 'fixed-header-visual-v3.txt')):
             path = folder / 'assets' / filename
             path.write_text('\n'.join(d.fixed_header(policy)), encoding='utf-8')
             with patch.object(d, 'ROOT', folder):

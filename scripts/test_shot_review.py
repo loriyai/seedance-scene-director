@@ -61,7 +61,7 @@ class ShotReviewChecks(unittest.TestCase):
                 target = shot_review.targets(self.state, self.request)[0]
                 with self.subTest(duration=duration, camera=camera):
                     self.assertTrue(any('1至6秒摄影选择' in cue for cue in target['review_cues']))
-                    self.assertFalse(any('整镜固定不合格' in cue for cue in target['review_cues']))
+                    self.assertTrue(any('5至6秒不得全程固定' in cue for cue in target['review_cues']))
                     self.assertEqual(target['status'], 'pending')
                     self.assertEqual(target['basis'], '')
                     self.assertEqual(target['shot']['camera'], camera)
@@ -75,7 +75,7 @@ class ShotReviewChecks(unittest.TestCase):
         legacy = shot_review.targets(self.state, self.request,
                                      cue_policy=shot_review.LEGACY_CUE_POLICY)[0]['review_cues']
         self.assertTrue(any('1至6秒摄影选择' in cue for cue in current))
-        self.assertFalse(any('整镜固定不合格' in cue for cue in current))
+        self.assertTrue(any('5至6秒不得全程固定' in cue for cue in current))
         self.assertEqual(legacy, ['4至6秒镜头含固定描述：核对是否仅为实际运镜后的短暂稳定落点；整镜固定不合格，须有服务观看重点的相机位移或转向，移焦与主体动作不算。'])
 
     def test_global_pass_cannot_replace_missing_or_pending_shot_review(self):

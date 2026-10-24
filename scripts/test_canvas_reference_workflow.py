@@ -71,6 +71,9 @@ class WorkflowCLI:
         if name == "xyq.role.updateAppearance":
             data = c.content(self.doc, value["nodeId"])
             patch = value["patch"]
+            if "generation" in patch:
+                if "generation" not in value.get("expected", {}) or value["expected"]["generation"] == data.get("generation"):
+                    data["generation"] = copy.deepcopy(patch["generation"])
             if "generationPrompt" in patch:
                 data.setdefault("generation", {})["prompt"] = patch["generationPrompt"]
             if "mainImage" in patch:

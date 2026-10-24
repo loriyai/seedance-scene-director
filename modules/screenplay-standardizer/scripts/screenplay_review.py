@@ -25,6 +25,16 @@ MOBILE_INTERIOR = re.compile(r"(?:车内|车厢(?:内)?|驾驶室|驾驶舱|机�
                              r"(?:老头乐|汽车|轿车|房车|客车|巴士|公交车|出租车|列车|火车|地铁)内)$")
 BOUNDARY_REASONS = {"explicit_transition", "time_change", "location_change",
                     "event_discontinuity", "independent_vehicle_space"}
+# Diagnostic only: locate source evidence inside an existing scene, including
+# late location speech. Never infer a destination/current position or split.
+LOCATION_WORD = (r"(?:弯道|弯路|路口|街道|街|道路|公路|巷|桥|广场|车站|机场|"
+                 r"医院|学校|房间|院|门口|楼|泳池|池边|岸边)")
+INTERNAL_MOVEMENT = re.compile(
+    r"(?:驶离|驶入|驶出|开进|开出|转入|抵达|到达|来到|走进|走出|进入|离开|通过)"
+    r"[^。！？\n]{0,16}" + LOCATION_WORD)
+CURRENT_LOCATION_SPEECH = re.compile(
+    r"(?:速来|快来|赶来|我(?:现在|就)?在|我们(?:现在|就)?在|当前位置[：:])"
+    r"[^。！？\n，,；;]{0,18}(?:" + LOCATION_WORD + r"|这里|这儿|此处)")
 
 
 def compact(value):
@@ -722,6 +732,33 @@ def boundary_review(paragraphs, all_paths, selected_numbers, decisions):
     return items, fingerprints
 
 
+def internal_boundary_risks(paragraphs, paths, ranges):
+    """Return nonblocking source signals; a human must judge narrative space."""
+    risks = []
+    for (number, path), (start, end) in zip(paths, ranges):
+        signals = []
+        for paragraph in range(start, end + 1):
+            text = paragraphs[paragraph - 1]
+            for kind, pattern in (("movement", INTERNAL_MOVEMENT),
+                                  ("current_location_speech", CURRENT_LOCATION_SPEECH)):
+                # The first source paragraph may establish this scene's place.
+                if kind == "movement" and paragraph == start:
+                    continue
+                for match in pattern.finditer(text):
+                    signals.append({"kind": kind, "paragraph": paragraph,
+                                    "source_text": text, "range": list(match.span()),
+                                    "evidence": match.group(),
+                                    "context_before": paragraphs[max(start - 1, paragraph - 3):paragraph - 1],
+                                    "context_after": paragraphs[paragraph:min(end, paragraph + 2)]})
+        if signals:
+            risks.append({"scene_number": number, "file": path.name,
+                          "source_range": [start, end], "signals": signals,
+                          "risk_scan": "heuristic_not_complete", "blocking": False,
+                          "semantic_review": "not_performed",
+                          "action": "回查场内主要地点及后文当前地点回指；区分所在、目的地与提及。连续事件不证明同场，位移也不自动要求拆场。"})
+    return risks
+
+
 def make_report(workdir, decisions, previous=None, scope="full", scene_numbers=None):
     if (not isinstance(decisions, dict) or not isinstance(decisions.get("paragraphs", {}), dict)
             or not isinstance(decisions.get("boundaries", {}), dict)
@@ -770,6 +807,7 @@ def make_report(workdir, decisions, previous=None, scope="full", scene_numbers=N
             "coverage_complete": scope == "full", "reviewed_scene_numbers": [n for n, _ in paths],
             "source_paragraph_count": len(paragraphs), "fingerprint": fingerprint, "decision_digest": decision_digest,
             "boundary_policy": BOUNDARY_POLICY, "boundary_items": boundaries, "boundary_drafts": boundary_drafts,
+            "internal_boundary_risks": internal_boundary_risks(paragraphs, paths, ranges),
             "counts": {"missing": missing, "extra": extra, "speaker": speaker, "reused_scenes": reused,
                        "scene_boundary": boundary_pending,
                        "format_hints": sum(part["status"] in ("格式提示", "人工确认纯提示", "纯标点", "转场标题")
@@ -800,6 +838,7 @@ def main():
         args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         counts = report["counts"]
         print(f"逐场复核：漏文 {counts['missing']}，额外文字 {counts['extra']}，台词待处理 {counts['speaker']}，复用未改场景 {counts['reused_scenes']}；报告：{args.report}")
+        print(f"场内地点风险 {len(report['internal_boundary_risks'])} 场（有限词表提示，须结合原文作语义判断；机械通过不代表场界正确）")
         if report["status"] == "needs_review":
             raise ValueError("逐场复核未通过，请修正逐场稿或补全有效的人工确认")
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:

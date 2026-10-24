@@ -13,7 +13,7 @@ python <skill>/scripts/canvas.py bind --project <project> --target <画布链接
 python <skill>/scripts/canvas.py status --project <project>
 ```
 
-`setup`检测现有官方CLI及本Skill实际调用的命令，缺少时用包内`ensure-cli.js`安装到官方CLI缓存；不每次安装或升级。必要原生命令为status/login、canvas get/allocate/upload及space list；canvas get必须支持--team-id。必要语义命令覆盖快照、权限、节点创建/更新/删除（含update_asset）、精确删除引用边的delete_edges（create_edge仅历史黑幕模式需要，不作为新流程安装前提）、提示词写入、角色/场景描述及角色主图更新。还须核实角色updateAppearance的patch.generationPrompt与expected.generationPrompt字段；不能只凭命令名存在认定支持。create_checkpoint只在权限支持时使用，保持可选；不探测本Skill不调用的模型列表/描述、生图、生视频、超分、擦字幕、积分、query-result、logout或canvas create/apply。`auth --login`先检查status，已有登录不重复打开授权页。首次提示用户完成浏览器授权；CLI自行保存安全凭据。配置文件只保存CLI/Node路径、版本和公开账号标识，禁止保存密钥、完整status、认证环境变量或浏览器存储。CLI报401/403时先判断账号/权限；仅确认浏览器凭据过期或撤销后使用`auth --login --force`，不将force作为常规操作。
+`setup`检测现有官方CLI及本Skill实际调用的命令，缺少时用包内`ensure-cli.js`安装到官方CLI缓存；不每次安装或升级。必要原生命令为status/login、canvas get/allocate/upload及space list；canvas get必须支持--team-id。必要语义命令覆盖快照、权限、节点创建/更新/删除（含update_asset）、引用连线的create_edge与精确删除引用边的delete_edges、提示词写入、角色/场景描述及角色主图更新。create_edge用于派生角色图片引用及历史黑幕引用；新none-v1视频仍不创建黑幕连线。角色updateAppearance须支持patch.generationPrompt与expected.generationPrompt，以及派生图片引用所需的patch.generation与expected.generation整体配置字段；不能只凭命令名存在认定支持。create_checkpoint只在权限支持时使用，保持可选；不探测本Skill不调用的模型列表/描述、生图、生视频、超分、擦字幕、积分、query-result、logout或canvas create/apply。`auth --login`先检查status，已有登录不重复打开授权页。首次提示用户完成浏览器授权；CLI自行保存安全凭据。配置文件只保存CLI/Node路径、版本和公开账号标识，禁止保存密钥、完整status、认证环境变量或浏览器存储。CLI报401/403时先判断账号/权限；仅确认浏览器凭据过期或撤销后使用`auth --login --force`，不将force作为常规操作。
 
 链接支持两种已核实的官方格式：`https://xyq.jianying.com/novel/detail/canvas?...`与`https://www.xiaoyunque.com/project?...`，严格校验域名、路径及唯一ID参数。前者常见于个人画布，后者常见于团队画布，只作为候选线索，不作归属证明。overviewPippitAssetId须在选定空间后通过官方CLI解析实际canvas ID，不能把overview或project ID当成canvas ID。所有远端ID及TeamID保持字符串。
 
@@ -40,6 +40,12 @@ CLI的原生查询、分配、上传与语义查询、创建、编辑、删除�
 | 道具image | `xyq.generation.update_prompt` | 保留当前生成配置与引用 |
 
 角色`updateDescription(field=appearance)`与场景`updateDescription(field=description)`只用于明确的描述编辑，不能代替生图提示词写入。三条资产入口——后台assets、直接assets、videos补建——共用canvas.py的资产初始化步骤与验收。创建后完成显示名/basicInfo.name、空形象/视角名和正确提示词回读；SDK工厂默认显示名不是最终名称。仅新建/未完成初始化节点检查上述默认图片参数，ready或采用节点的人工配置保持。所有操作仅配置节点，不触发生成。
+
+派生角色图片按[图片设计](asset-image-design.md)的已编译`asset-image-reference-v1`合同读取基础角色与道具依赖，按依赖顺序创建节点；旧台账没有该合同的独立提示词保持原样。完整制作名引用在写入时转换为查询确认的真实`<node-asset>`标签，并通过官方`create_edge`建立指向派生角色的reference连线。引用名称、节点ID、Pippit素材ID和云端媒体assetId分别核实，不互相代填。
+
+角色图片引用使用`xyq.role.updateAppearance`的`patch.generation`保存从最新快照完整合并的生成配置，同时传`expected.generation`；仅改文字时仍使用上表的`generationPrompt`。`generation.references`保存源节点身份、`type:image`、实际主图的`pippitAssetId/assetId`；基础角色还用`dataReferenceSelection`明确选择该图片，不能混入声音。保留模型、比例、清晰度、推理强度、无关引用、外观描述及当前主图；人工改过的受管理引用不得直接覆盖。不得对角色调用图片/视频专用的`xyq.generation.update_prompt`。
+
+节点与提示词初始化完成、引用连接完成、参考图片输入就绪分别验收。缺图片时仍允许创建节点及写入引用提示词，记录`image_input.status=pending`及缺项，不静默退回独立文生图，也不标记图片输入就绪。只有真实参考节点、所选图片、媒体身份、完整提示词、连线和保存的引用条目全部回读一致时，才记图片输入配置`ready`。这个状态只表示配置已核验，不证明实际生成服务已消费参考图或成图身份一致；最终成图仍须实际检查。已知写入中断按原日志和ID续接，恢复图片后仅在用户授权的资产同步中重新解析输入，不自动恢复暂停队列。
 
 默认参数仅用于新建节点及按原ID续接本版本未完成的初始化。已完成或复用节点保留当前模型、比例、清晰度、推理强度、图片与其他配置；不因Skill升级改写既有节点。历史创建日志没有这些参数时按原证据续接，不把新默认值追加为历史恢复门槛。
 

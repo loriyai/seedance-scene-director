@@ -249,7 +249,9 @@ class AssetVisualDesignTests(unittest.TestCase):
         payload = copy.deepcopy(self.payload)
         payload["designs"].append(dict(payload["designs"][0], asset_id="CHAR0002",
                                      appearance_overrides={"hair": "同一黑发改束高髻"},
-                                     variant_differences=["已登记束发版本仅改变发髻，脸部与体型保留"]))
+                                     variant_differences=["已登记束发版本仅改变发髻，脸部与体型保留"],
+                                     image_reference={"base_asset_id": "CHAR0001",
+                                                      "changes": ["同一黑发改束高髻"], "preserve": ["脸部与体型保留"]}))
         out = self.designed(value, payload)
         self.assertEqual(out["characters"][0]["visual_design"]["identity_anchor_id"], out["characters"][1]["visual_design"]["identity_anchor_id"])
         self.assertIn("同一黑发改束高髻", out["characters"][1]["image_prompt"])
@@ -271,9 +273,13 @@ class AssetVisualDesignTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "相同身份与世次"):
             self.designed(value, payload)
         payload["designs"][-1]["identity_anchor_id"] = payload["designs"][0]["identity_anchor_id"]
+        with self.assertRaisesRegex(ValueError, "其余填写image_reference"):
+            self.designed(value, payload)
+        payload["designs"][-1]["image_reference"] = {"base_asset_id": "CHAR0001",
+                                                       "changes": ["替换为本版已审衣装"], "preserve": ["同一面容与体型"]}
         self.designed(value, payload)
         value["characters"][1]["appearance"]["incarnation"] = "第二世"
-        with self.assertRaisesRegex(ValueError, "不同身份或世次"):
+        with self.assertRaisesRegex(ValueError, "跨身份或世次"):
             self.designed(value, payload)
 
     def test_changed_design_basis_requires_recompilation(self):
