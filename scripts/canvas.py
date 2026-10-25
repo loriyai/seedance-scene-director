@@ -25,6 +25,11 @@ VIDEO_READBACK_ATTEMPTS = 3
 VIDEO_READBACK_DELAY = 0.5
 ASSET_IMAGE_DEFAULTS = {"resolution": "2K", "effort": "high", "ratio": "16:9"}
 ASSET_CONTRACT = "generation-prompt-v2"
+CANVAS_URL_SPACE_HINTS = {
+    ("xyq.jianying.com", "/novel/detail/canvas"): "personal",
+    ("xyq.jianying.com", "/project"): "team",
+    ("www.xiaoyunque.com", "/project"): "team",
+}
 
 
 class CanvasError(ValueError):
@@ -233,10 +238,10 @@ def parse_target(target, cli, resolve=True):
         d.require(re.fullmatch(r"[A-Za-z0-9_-]+", target), "画布ID格式非法")
         return {"canvas_id": target, "project_id": None, "url": None}
     parsed = urlparse(target)
-    d.require((parsed.hostname, parsed.path) in (("xyq.jianying.com", "/novel/detail/canvas"),
-                                               ("www.xiaoyunque.com", "/project")) and parsed.port in (None, 443)
+    route = (parsed.hostname, parsed.path)
+    d.require(route in CANVAS_URL_SPACE_HINTS and parsed.port in (None, 443)
               and not parsed.username and not parsed.password, "请提供小云雀官方画布链接")
-    query = parse_qs(parsed.query)
+    query = parse_qs(parsed.query, keep_blank_values=True)
     def one(key):
         values = query.get(key, [])
         d.require(len(values) <= 1, "画布链接含重复参数")
@@ -272,7 +277,7 @@ def parse_target(target, cli, resolve=True):
     params = {"projectId": project_id} if project_id else {}
     params.update({"overviewPippitAssetId": overview} if overview else {"canvasId": canvas_id})
     return {"canvas_id": canvas_id, "project_id": project_id, "overview_id": overview,
-            "space_hint": "team" if parsed.hostname == "www.xiaoyunque.com" else "personal",
+            "space_hint": CANVAS_URL_SPACE_HINTS[route],
             "url": "https://" + parsed.hostname + parsed.path + "?" + urlencode(params)}
 
 

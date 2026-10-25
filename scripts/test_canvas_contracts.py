@@ -12,6 +12,7 @@ from test_canvas_reference_workflow import WorkflowCLI, add_node
 
 PERSONAL = 'https://xyq.jianying.com/novel/detail/canvas?projectId=P&canvasId=ROOT&overviewPippitAssetId=OV'
 TEAM = 'https://www.xiaoyunque.com/project?projectId=P&canvasId=ROOT&agent_thread_id=unneeded'
+TEAM_XYQ = 'https://xyq.jianying.com/project?projectId=P&generate_mode=agent&canvasId=ROOT&agent_thread_id=unneeded'
 
 
 def document():
@@ -49,19 +50,56 @@ class CanvasContractChecks(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.project = Path(self.temp.name)
 
-    def test_both_official_link_formats_and_host_validation(self):
-        for url, hint in [(PERSONAL, 'personal'), (TEAM, 'team')]:
+    def test_official_link_routes_and_host_validation(self):
+        for url, hint in [(PERSONAL, 'personal'), (TEAM, 'team'), (TEAM_XYQ, 'team')]:
             parsed = c.parse_target(url, None)
             self.assertEqual(parsed['canvas_id'], 'ROOT')
             self.assertEqual(parsed['space_hint'], hint)
             self.assertNotIn('agent_thread_id', parsed['url'])
         for url in [TEAM.replace('www.xiaoyunque.com', 'www.xiaoyunque.com.evil.test'),
                     TEAM.replace('https://', 'https://user@'), TEAM.replace('/project?', '/wrong?'),
-                    TEAM + '&canvasId=OTHER']:
+                    TEAM + '&canvasId=OTHER',
+                    TEAM_XYQ.replace('xyq.jianying.com', 'xyq.jianying.com.evil.test'),
+                    TEAM_XYQ.replace('/project?', '/wrong?'), TEAM_XYQ + '&canvasId=OTHER']:
             with self.assertRaises(ValueError): c.parse_target(url, None)
 
+    def test_empty_duplicate_routing_ids_are_not_discarded(self):
+        for url in [TEAM_XYQ + '&canvasId=',
+                    TEAM_XYQ.replace('canvasId=ROOT', 'canvasId=&canvasId=ROOT'),
+                    TEAM_XYQ + '&projectId=', PERSONAL + '&overviewPippitAssetId=']:
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                c.parse_target(url, None)
+
+    def test_jianying_project_retains_context_and_selects_team_not_current_personal(self):
+        cli = SpaceCLI()
+        binding = c.bind(self.project, cli, TEAM_XYQ)['binding']
+        self.assertEqual(binding['team_id'], '12')
+        self.assertEqual(binding['project_id'], 'P')
+        self.assertEqual(binding['canvas_id'], 'ROOT')
+        self.assertEqual(binding['url'], 'https://xyq.jianying.com/project?projectId=P&canvasId=ROOT')
+        self.assertEqual(binding['space_evidence'], 'url_and_single_team_candidate')
+        self.assertTrue(cli.selected)
+        self.assertEqual(set(cli.selected), {'12'})
+        self.assertFalse(cli.writes)
+
+    def test_jianying_project_multiple_teams_does_not_probe_personal_or_any_team(self):
+        cli = SpaceCLI(('12', '34'))
+        with self.assertRaises(c.CanvasError) as error:
+            c.bind(self.project, cli, TEAM_XYQ)
+        self.assertEqual(error.exception.code, 'SPACE_REQUIRED')
+        self.assertEqual(cli.selected, [])
+        self.assertFalse(cli.writes)
+
+    def test_jianying_project_failed_team_verification_does_not_fallback(self):
+        cli = SpaceCLI(accepted='34')
+        with self.assertRaises(c.CanvasError) as error:
+            c.bind(self.project, cli, TEAM_XYQ)
+        self.assertEqual(error.exception.code, 'SPACE_LOOKUP_FAILED')
+        self.assertEqual(cli.selected, ['12'])
+        self.assertIsNone(c.read_state(self.project)['binding'])
+
     def test_team_id_strings_are_normalized_without_float_conversion(self):
-        self.assertEqual(c.normalize_team_id('7692294259755455769'), '7692294259755455769')
+        self.assertEqual(c.normalize_team_id('7690000000000000001'), '7690000000000000001')
         self.assertEqual(c.normalize_team_id('000'), '0')
         for bad in [-1, 0, '-1', '1.2', '9223372036854775808']:
             with self.assertRaises(ValueError): c.normalize_team_id(bad)
