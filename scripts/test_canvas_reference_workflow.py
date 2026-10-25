@@ -180,15 +180,14 @@ class ReferenceWorkflowChecks(unittest.TestCase):
         self.assertTrue(c.prompt_references_satisfied(self.cli.doc, target, c.prompt_of(self.cli.doc, target)))
         self.assertEqual(c.fingerprint(self.cli.doc, "EXTRA"), extra_before)
         self.assertTrue(Path(result["reference_report"]).is_file())
-        self.assertEqual({issue["key"] for issue in result["reference_issues"] if issue["reason"] == "missing_image"},
-                         {"CHAR1", "SET1", "PROP1"})
-        self.assertEqual({issue["key"] for issue in result["reference_issues"] if issue["reason"] == "missing_video"}, {"BLACK"})
+        self.assertFalse(any(issue["reason"] in ("missing_image", "missing_video") for issue in result["reference_issues"]))
 
     def test_missing_asset_nodes_are_created_including_unused_ledger_assets(self):
         self.session["ledger"]["characters"].append({"id": "CHAR2", "name": "Unused"})
+        add_node(self.cli.doc, "EXISTING_ACTOR", "role", "Actor")
         result = self.sync(ids=[self.session["units"][0]["id"]])
         state = c.read_state(self.project)
-        self.assertEqual(result["asset_reconciliation"]["created"], ["CHAR1", "CHAR2", "SET1", "PROP1"])
+        self.assertEqual(result["asset_reconciliation"]["created"], ["CHAR2", "SET1", "PROP1"])
         self.assertEqual(state["mappings"]["CHAR2"]["kind"], "role")
         self.assertEqual(c.name_of(self.cli.doc, state["mappings"]["PROP1"]["node_id"]), "Pen")
         self.assertTrue(all(entry["status"] == "verified" for entry in state["journal"]))
@@ -364,7 +363,7 @@ class ReferenceWorkflowChecks(unittest.TestCase):
         self.assertNotIn("generation", c.content(self.cli.doc, black))
         self.assertNotIn("BLACK", state["mappings"])
         self.assertEqual(result["created"], 1)
-        self.assertIn("BLACK", {row["key"] for row in result["pending_references"]})
+        self.assertNotIn("BLACK", {row["key"] for row in result["pending_references"]})
         self.assertFalse(any("generate" in name for name, _ in self.cli.writes))
         initial_allocations = list(self.cli.allocations)
         self.sync(ids=[self.session["units"][0]["id"]])

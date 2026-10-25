@@ -26,7 +26,7 @@ class SceneContextTests(unittest.TestCase):
             'props': ['PROP0001', 'PROP0002']})
         self.assertNotIn('SET0002', [a['id'] for a in result['assets']])
         self.assertIn('陈默：把消息发给@群里。', result['source_lines']['text'])
-        self.assertEqual(result['versions']['context_sha256'], context.context_hash(d.load(self.project)))
+        self.assertEqual(result['versions']['context_sha256'], context.context_hash(d.load(self.project), self.project))
         self.assertEqual(result['semantic_review'], 'not_performed')
         self.assertEqual(result['style'], '3D国漫')
 

@@ -10,17 +10,24 @@ import director as d
 import storyboard_text as text_core
 
 
-def context_hash(state):
+def context_hash(state, project=None):
     data = {key: state.get(key) for key in
             ('files', 'records', 'ledger', 'style_hash', 'units', 'entry')}
     required = ('references/storyboard-rules.md', 'references/storyboard-text-format.md',
                 'scripts/storyboard_text.py', 'scripts/storyboard_text_delivery.py',
-                'scripts/storyboard_context.py')
+                 'scripts/storyboard_context.py', 'scripts/segment_naming.py',
+                 'scripts/script_partition.py', 'scripts/video_settings.py')
     data['text_rules'] = {name: d.file_hash(d.ROOT / name) for name in required}
+    if project is not None:
+        from video_settings import get_ratio
+        from script_partition import load_plan
+        data['video_ratio'] = get_ratio(project, state)
+        data['partition_plan'] = load_plan(project, state)
     return d.sha(d.packed(data))
 
 
 def scene_context(project, scene_id, span=None):
+    from video_settings import get_ratio
     project = Path(project).resolve()
     state = d.load(project)
     d.require(state.get('style_hash'), '请先保存本项目风格')
@@ -86,8 +93,9 @@ def scene_context(project, scene_id, span=None):
         'source_lines': {'first': first, 'last': last, 'text': '\n'.join(lines[first - 1:last])},
         'records': selected, 'allowed_asset_ids': allowed, 'assets': projected,
         'style': (project / 'video-style.txt').read_text(encoding='utf-8-sig').strip(),
+        'video_ratio': get_ratio(project, state),
         'versions': {'session_revision': state['revision'], 'files': copy.deepcopy(state['files']),
-                     'style_sha256': state['style_hash'], 'context_sha256': context_hash(state)},
+                     'style_sha256': state['style_hash'], 'context_sha256': context_hash(state, project)},
         'neighbours': neighbours, 'semantic_review': 'not_performed',
         'limits': '仅派生本场资料；局部范围的完整记录及source_lines提供阅读上下文，不扩大span。'
                   '外观设计不代表当前剧情状态；未交付的前场末态须由写者另行提供，程序不推断接触、持物或通路。',

@@ -637,6 +637,8 @@ def write_acknowledged(project, cli, state, command, value, targets, receipt):
                 baseline.update({key: val for key, val in target["patch"].items() if key in ("name", "caption", "title")})
             elif target["action"] == "duration":
                 baseline["durationMs"] = target["value"]
+            elif target["action"] == "generation_settings":
+                baseline.update(target["value"])
             elif target["action"] == "prompt_text":
                 baseline["prompt_hash"] = digest(target["value"])
     save(project, state)
@@ -655,6 +657,9 @@ def video_initialization_changes(doc, node_id, mapping, item):
     if "durationMs" in baseline and (current.get("generation") or {}).get("durationMs") not in (
             baseline["durationMs"], item.get("settings", {}).get("durationMs")):
         changes.append("durationMs")
+    if "ratio" in baseline and (current.get("generation") or {}).get("ratio") not in (
+            baseline["ratio"], item.get("settings", {}).get("ratio")):
+        changes.append("ratio")
     if digest(prompt_of(doc, node_id)) not in (baseline["prompt_hash"], digest(item["prompt"])):
         changes.append("prompt")
     return changes
@@ -680,6 +685,9 @@ def write_video(project, cli, state, doc, item, node_id, context, create=None, r
     if not references_only:
         targets[1:1] = [{"action": "patch", "node_id": node_id, "patch": names},
                         {"action": "duration", "node_id": node_id, "value": item["settings"]["durationMs"]}]
+        if "ratio" in item["settings"]:
+            targets.append({"action": "generation_settings", "node_id": node_id,
+                            "value": {"ratio": item["settings"]["ratio"]}})
     receipt = {"id": uuid.uuid4().hex, "key": item["key"], "node_id": node_id,
                "status": "writing", "steps": [], "targets": copy.deepcopy(targets),
                "reference_targets": [], "references_only": references_only}
@@ -709,7 +717,8 @@ def write_video(project, cli, state, doc, item, node_id, context, create=None, r
                 write_acknowledged(project, cli, state, "update_node_data", {"id": node_id, "patch": names},
                                    [{"action": "patch", "node_id": node_id, "patch": names}], receipt)
             # update_node_data replaces nested values. Read and preserve all generation
-            # fields; the only selected parameter is durationMs. No model API is used.
+            # fields. Ratio is selected only for this version's new initialization.
+            # Existing nodes and historical units do not acquire a ratio default.
             doc = video_snapshot(cli, state, node_id)
             context["doc"] = doc
             generation = copy.deepcopy(content(doc, node_id).get("generation") or {})
@@ -718,13 +727,21 @@ def write_video(project, cli, state, doc, item, node_id, context, create=None, r
             if digest(prompt_of(doc, node_id)) not in (baseline["prompt_hash"], digest(item["prompt"])):
                 fail("CONCURRENT_EDIT", "视频提示词在初始化期间发生人工修改，已停止。", node_id=node_id)
             baseline.setdefault("durationMs", generation.get("durationMs"))
+            if "ratio" in item["settings"]:
+                baseline.setdefault("ratio", generation.get("ratio"))
+                if generation.get("ratio") not in (baseline["ratio"], item["settings"]["ratio"]):
+                    fail("CONCURRENT_EDIT", "视频比例在初始化期间发生人工修改，已停止。", node_id=node_id)
             save(project, state)
             duration = item["settings"]["durationMs"]
-            if generation.get("durationMs") != duration:
-                generation["durationMs"] = duration
+            if any(generation.get(key) != value for key, value in item["settings"].items()):
+                generation.update(item["settings"])
+                setting_targets = [{"action": "duration", "node_id": node_id, "value": duration}]
+                if "ratio" in item["settings"]:
+                    setting_targets.append({"action": "generation_settings", "node_id": node_id,
+                                            "value": {"ratio": item["settings"]["ratio"]}})
                 write_acknowledged(project, cli, state, "update_node_data",
                                    {"id": node_id, "patch": {"generation": generation}},
-                                   [{"action": "duration", "node_id": node_id, "value": duration}], receipt)
+                                   setting_targets, receipt)
         if edge_only_black(item) and item.get("references_bound") and item.get("black_node_id"):
             source = item["black_node_id"]
             d.require(black_prompt_absent(item["prompt"], source), "独立黑幕引用不能出现在提示词正文中")
@@ -770,6 +787,8 @@ def write_video(project, cli, state, doc, item, node_id, context, create=None, r
                        observed={"kind": kind_of(nodes(doc)[node_id]) if node_id in nodes(doc) else None,
                                  **{field: observed.get(field) for field in names},
                                  "durationMs": (observed.get("generation") or {}).get("durationMs"),
+                                 **({"ratio": (observed.get("generation") or {}).get("ratio")}
+                                    if "ratio" in item.get("settings", {}) else {}),
                                  "prompt_hash": digest(prompt_of(doc, node_id)) if node_id in nodes(doc) else None},
                        checks=[{"action": target["action"], "matched": target_satisfied(doc, target)}
                                for target in [*targets, *receipt["reference_targets"]]])
@@ -1154,7 +1173,7 @@ def reconcile_black_video(project, cli, state, doc, decisions=None, preview=Fals
     return doc, result
 
 
-def reference_map(session, state, doc, asset_ids=None, blocked_assets=()):
+def reference_map(session, state, doc, asset_ids=None, blocked_assets=(), inspect_media=True):
     node_map = nodes(doc) if doc else {}
     names = d.reference_catalog(session, asset_ids)
     prompt_only = {item["id"] for item in session["ledger"]["characters"] if item.get("visual_mode") == "prompt_only"}
@@ -1178,7 +1197,7 @@ def reference_map(session, state, doc, asset_ids=None, blocked_assets=()):
                             "actual_name": name_of(doc, node_id)})
         elif node_id in node_map:
             resolved[name] = "<node-asset>" + node_id + "</node-asset>"
-            if not ready_image(doc, node_id):
+            if inspect_media and not ready_image(doc, node_id):
                 pending.append({"key": key, "name": name, "node_id": node_id, "reason": "missing_image"})
         else:
             pending.append({"key": key, "name": name, "reason": "node_missing", "node_id": node_id})
@@ -1197,12 +1216,12 @@ def reference_renderer(references, all_names=None):
     return convert
 
 
-def desired_videos(session, state, doc, units, bind_references=False, failures=None, blocked_assets=()):
+def desired_videos(session, state, doc, units, bind_references=False, failures=None, blocked_assets=(), inspect_media=True):
     d.require(session["ledger"].get("schema_version") == 3, "旧项目须先审核资产去重升级方案，再同步视频及引用")
     flags = {u["id"]: bind_references or state["mappings"].get(u["id"], {}).get("references_requested",
              state["mappings"].get(u["id"], {}).get("references_bound", False)) for u in units}
     needed = set().union(*(unit_asset_ids(session, unit) for unit in units)) if units else set()
-    refs, pending = reference_map(session, state, doc, needed, blocked_assets) if any(flags.values()) else ({}, [])
+    refs, pending = reference_map(session, state, doc, needed, blocked_assets, inspect_media) if any(flags.values()) else ({}, [])
     # Older lookup adapters included one project-wide BLACK issue. The unit-level
     # resolver below owns that special reference now, so do not report it twice.
     pending = [row for row in pending if row.get("key") != "BLACK"]
@@ -1214,7 +1233,7 @@ def desired_videos(session, state, doc, units, bind_references=False, failures=N
             if black_issue is None:
                 if not edge_only_black(unit):
                     unit_refs["黑幕"] = "<node-asset>" + black + "</node-asset>"
-                if not reference_ready(doc, black):
+                if inspect_media and not reference_ready(doc, black):
                     black_issue = {"reason": "missing_video" if black_kind == "video" else "missing_image"}
             if black_issue is not None:
                 pending.append({"key": "BLACK", "name": "黑幕", "kind": black_kind, "node_id": black,
@@ -1234,6 +1253,7 @@ def desired_videos(session, state, doc, units, bind_references=False, failures=N
             reference_keys.add("BLACK")
         wanted.append({"key": unit["id"], "name": unit.get("display_name", unit["id"]), "kind": "video", "version": unit["version"],
                        "duration": unit["duration"], "prompt": prompt, "references_bound": flags[unit["id"]],
+                       **({"video_ratio": unit["video_ratio"]} if "video_ratio" in unit else {}),
                        "reference_keys": sorted(reference_keys), "black_node_id": black if black_issue is None or black_issue.get("reason") in ("missing_image", "missing_video") else None,
                        "black_node_kind": black_kind, "black_reference_mode": unit.get("black_reference_mode")})
     used = set().union(*(set(item["reference_keys"]) for item in wanted)) if wanted else set()
@@ -1343,8 +1363,18 @@ def asset_reconciliation_plan(session, state, doc, decisions=None):
 
 def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, preview=False, context=None):
     plan, conflicts = asset_reconciliation_plan(session, state, doc, decisions)
+    missing = [{"key": item["key"], "name": item["name"], "kind": item["kind"],
+                "previous_node_id": state["mappings"].get(item["key"], {}).get("node_id")}
+               for item in plan if item["resolution"] == "create"]
     summary = {"created": [], "adopted": [], "reused": [], "conflicts": conflicts,
+               "missing_asset_count": len(missing), "missing_assets": missing,
                "plan": [{key: item[key] for key in ("key", "name", "kind", "node_id", "resolution")} for item in plan]}
+    if len(missing) > 3:
+        summary["blocked"] = True
+        conflicts.append({"reason": "asset_rebuild_limit", "missing_asset_count": len(missing),
+                          "missing_assets": missing,
+                          "message": "缺失资产超过3个；已列出全部缺失资产，本次未补建资产或写入视频。"})
+        return doc, summary
     state["asset_reconciliation_conflicts"] = copy.deepcopy(conflicts)
     positions = layout_positions(doc, plan)
     image_reference_keys = set()
@@ -1400,8 +1430,10 @@ def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, pre
         if initialized and item.get("image_prompt"):
             state["mappings"][key].update(prompt_hash=digest(item["image_prompt"]), asset_contract=ASSET_CONTRACT)
     if not preview:
-        image_reference_keys.update(k for k, m in state["mappings"].items() if "image_input" in m)
-        doc = sync_asset_image_references(project, cli, session, state, doc, image_reference_keys)
+        # Video preparation owns new initialization only. Completed assets may have
+        # been edited in Canvas; their prompts, media and image inputs belong to users.
+        if image_reference_keys:
+            doc = sync_asset_image_references(project, cli, session, state, doc, image_reference_keys)
         summary["image_inputs"] = asset_image_input_status(state, image_reference_keys)
         save(project, state)
     if context is not None:
@@ -1456,7 +1488,8 @@ def reference_report(project, context):
     state["last_reference_failures"] = copy.deepcopy(context["failures"])
     save(project, state)
     return canvas_reference_report.write_reference_report(project, context["session"], state, context["doc"],
-                                                          context.get("units", []), failures=context["failures"])
+                                                          context.get("units", []), failures=context["failures"],
+                                                          inspect_media=context.get("inspect_media", True))
 
 
 def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview=False, bind_references=False,
@@ -1467,7 +1500,7 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
     if preview:
         state = copy.deepcopy(state)
     context = context if context is not None else {"failures": []}
-    context.update(session=session, state=state, doc=doc)
+    context.update(session=session, state=state, doc=doc, inspect_media=kind != "videos" or references_only)
     reconcile(project, cli, state, doc, preview=preview, decisions=decisions)
     asset_summary = None
     if kind == "assets":
@@ -1479,6 +1512,11 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
             doc, asset_summary = reconcile_asset_nodes(project, cli, session, state, doc, decisions, preview, context)
             context["doc"] = doc
             context["failures"].extend(asset_summary["conflicts"])
+            if asset_summary.get("blocked"):
+                return {"status": "needs_decision", "count": 0,
+                        "conflicts": asset_summary["conflicts"], "asset_reconciliation": asset_summary,
+                        "missing_assets": asset_summary["missing_assets"], "pending_references": [],
+                        "unbound_units": [], "skipped": [], "plan": []}
             legacy_black_units = [u for u in units if not no_black(u)]
             if legacy_black_units:
                 # Historical receipt execution remains compatible; new requests
@@ -1490,7 +1528,8 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
             bind_references = True
         bind_references = bind_references or references_only or any(m.get("image") for m in state["mappings"].values())
         blocked_assets = {item["key"] for item in asset_summary["conflicts"]} if asset_summary else set()
-        desired, pending = desired_videos(session, state, doc, units, bind_references, context["failures"], blocked_assets)
+        desired, pending = desired_videos(session, state, doc, units, bind_references, context["failures"], blocked_assets,
+                                          inspect_media=references_only)
         failed_units = {row["key"] for row in context["failures"] if row.get("reason") == "prompt_encoding_failed"}
         if failed_units and not preview:
             state["pending_units"] = list(dict.fromkeys([*state["pending_units"], *sorted(failed_units)]))
@@ -1535,6 +1574,12 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
             current = content(doc, node_id).get("generation", {}) if node_id else {}
             d.require(type(item["duration"]) is int and item["duration"] > 0, "分镜时长须为正整数秒")
             item["settings"] = {"durationMs": item["duration"] * 1000}
+            # Only brand-new nodes or the same unfinished initialization receive
+            # the ratio frozen in this submitted unit. Reuse never changes ratio.
+            if "video_ratio" in item:
+                d.require(item["video_ratio"] in ("16:9", "9:16"), "视频比例须为16:9或9:16")
+                if not node_id or mapping and mapping.get("stage") in ("allocated", "writing"):
+                    item["settings"]["ratio"] = item["video_ratio"]
             changed_settings = []
             if node_id and (not mapping or mapping.get("stage") == "ready"):
                 baseline = (mapping or {}).get("video_settings", {})
@@ -1627,7 +1672,9 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
             context["active"]["node_id"] = node_id
             state["mappings"][key] = {"node_id": node_id, "kind": item["kind"], "name": item["name"], "stage": "allocated"}
             save(project, state)
-            init = {} if item["kind"] == "video" else initial_data(item)
+            init = ({"generation": {"ratio": item["settings"]["ratio"]}}
+                    if item["kind"] == "video" and "ratio" in item.get("settings", {})
+                    else {} if item["kind"] == "video" else initial_data(item))
             command = {"nodeKind": item["kind"], "id": node_id, "initialData": init, "topLeft": positions[key]}
             if item["kind"] == "video":
                 create_video = command

@@ -1,6 +1,78 @@
 """Read-only source syntax adapters. Raw source text is never rewritten."""
 
 import re
+import hashlib
+import json
+from pathlib import Path
+
+
+ACTION_MARKERS_FILE = "action-markers.json"
+
+
+def action_content(line, markers=None):
+    """Read an approved action prefix; return the body without rewriting it."""
+    markers = ("△",) if markers is None else markers
+    value = line.lstrip()
+    for marker in sorted(markers, key=len, reverse=True):
+        if value.startswith(marker):
+            return value[len(marker):].lstrip()
+    return None
+
+
+def _source_digest(paragraphs):
+    packed = json.dumps(paragraphs, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(packed.encode("utf-8")).hexdigest()
+
+
+def load_action_markers(source_path):
+    """Load source-bound, reader-approved symbols; old projects keep △ only."""
+    source_path = Path(source_path)
+    if source_path.is_dir():
+        source_path = source_path / "source.json"
+    path = source_path.parent / ACTION_MARKERS_FILE
+    if not path.is_file():
+        return ("△",)
+    value = json.loads(path.read_text(encoding="utf-8-sig"))
+    source = json.loads(source_path.read_text(encoding="utf-8-sig"))
+    paragraphs = [item["text"] for item in source["paragraphs"]]
+    markers = value.get("markers")
+    if (value.get("policy") != "action-markers-v1"
+            or value.get("source_digest") != _source_digest(paragraphs)
+            or value.get("reviewed") is not True
+            or not isinstance(value.get("reason"), str) or not value["reason"].strip()
+            or not isinstance(markers, list) or not markers):
+        raise ValueError("动作标识登记缺少实读结论或已与原文失配")
+    for marker in markers:
+        if (not isinstance(marker, str) or not marker or marker != marker.strip()
+                or any(char.isalnum() or char.isspace() for char in marker)
+                or any(char in ':：\r\n\"“”‘’「」『』' for char in marker)):
+            raise ValueError("动作标识须为不含文字、空白、冒号或台词引号的行首符号")
+        if marker != "△" and not any(p.lstrip().startswith(marker) for p in paragraphs):
+            raise ValueError("动作标识必须在当前原文行首实际出现")
+    if len(set(markers)) != len(markers):
+        raise ValueError("动作标识不得重复")
+    return tuple(dict.fromkeys(["△", *markers]))
+
+
+def register_action_markers(workdir, markers, reason):
+    """Persist a reader decision; symbols are never inferred from punctuation."""
+    workdir = Path(workdir)
+    source = json.loads((workdir / "source.json").read_text(encoding="utf-8-sig"))
+    value = {"policy": "action-markers-v1", "source_digest": _source_digest(
+        [item["text"] for item in source["paragraphs"]]), "reviewed": True,
+        "markers": list(markers), "reason": reason}
+    path = workdir / ACTION_MARKERS_FILE
+    old = path.read_bytes() if path.exists() else None
+    try:
+        path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        load_action_markers(workdir)
+    except Exception:
+        if old is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(old)
+        raise
+    return value
 
 
 QUOTE_PAIRS = {"「": "」", "『": "』", "“": "”", "‘": "’", '"': '"'}

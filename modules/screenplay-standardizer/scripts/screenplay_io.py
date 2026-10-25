@@ -12,6 +12,7 @@ import zipfile
 from pathlib import Path
 
 from asset_ledger import HEADING, validate_image_name
+import source_compat
 from cast_contract import validate_cast_entries
 
 
@@ -71,6 +72,7 @@ def prepare(input_path: Path, workdir: Path) -> None:
     scene_dir.mkdir(exist_ok=True)
     payload = {
         "input": str(input_path.resolve()),
+        "format_policy": "standard-screenplay-v1",
         "paragraphs": [{"id": i, "text": value} for i, value in enumerate(paragraphs, 1)],
     }
     source_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -80,13 +82,18 @@ def prepare(input_path: Path, workdir: Path) -> None:
     print(f"已提取 {len(paragraphs)} 段；逐场中间稿目录：{scene_dir}")
 
 
-def validate_scene(content: str, number: int, path: Path) -> list[str]:
+def validate_scene(content: str, number: int, path: Path, *, current_heading=False) -> list[str]:
     errors = []
+    source_path = path.parent.parent / "source.json"
+    if source_path.is_file():
+        current_heading = current_heading or json.loads(source_path.read_text(encoding="utf-8-sig")).get("format_policy") == "standard-screenplay-v1"
     lines = [(i, line.strip()) for i, line in enumerate(content.splitlines(), 1) if line.strip()]
     if len(lines) < 2:
         return [f"{path.name}：缺少场景标题或人物行"]
     if not (match := HEADING.fullmatch(lines[0][1])) or int(match.group(1)) != number:
         errors.append(f"{path.name}:{lines[0][0]}：场景标题应为 场景{number}-日/夜-内/外-地点")
+    elif current_heading and not lines[0][1].startswith(f"场景{match.group(1)}-"):
+        errors.append(f"{path.name}:{lines[0][0]}：新稿标题须使用 场景{number}-日/夜-内/外-地点")
     elif lines[0][1].startswith(f"场景{match.group(1)}-"):
         try:
             validate_image_name(lines[0][1])
@@ -100,9 +107,14 @@ def validate_scene(content: str, number: int, path: Path) -> list[str]:
     elif cast != "人物：无；":
         entries = cast[3:-1].split("；")
         errors.extend(f"{path.name}:{lines[1][0]}：{error}" for error in validate_cast_entries(entries))
+    markers = source_compat.load_action_markers(path.parent.parent)
     for line_no, line in lines[2:]:
-        if not line.startswith("△ ") and not DIALOGUE.fullmatch(line):
-            errors.append(f"{path.name}:{line_no}：正文应为 △ 动作段 或 角色名：台词")
+        action = source_compat.action_content(line, markers)
+        if action is not None:
+            if not action.strip():
+                errors.append(f"{path.name}:{line_no}：动作标识后缺少正文")
+        elif not DIALOGUE.fullmatch(line):
+            errors.append(f"{path.name}:{line_no}：正文应为已登记标识的动作段或 角色名：台词")
     return errors
 
 
@@ -168,6 +180,10 @@ def main() -> None:
     prep = sub.add_parser("prepare", help="提取原文并生成内部段落编号")
     prep.add_argument("input", type=Path)
     prep.add_argument("--workdir", type=Path, required=True)
+    markers = sub.add_parser("action-markers", help="登记实读确认与台词明确区分的原动作行首符号")
+    markers.add_argument("workdir", type=Path)
+    markers.add_argument("--marker", action="append", required=True)
+    markers.add_argument("--reason", required=True)
     join = sub.add_parser("assemble", help="验证逐场中间稿并合并")
     join.add_argument("workdir", type=Path)
     join.add_argument("--output", type=Path, required=True)
@@ -176,6 +192,8 @@ def main() -> None:
     try:
         if args.command == "prepare":
             prepare(args.input, args.workdir)
+        elif args.command == "action-markers":
+            print(json.dumps(source_compat.register_action_markers(args.workdir, args.marker, args.reason), ensure_ascii=False))
         else:
             assemble(args.workdir, args.output, args.review_report)
     except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:

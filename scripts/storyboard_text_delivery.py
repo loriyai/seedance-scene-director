@@ -18,8 +18,11 @@ import batch_naming
 import storyboard_text as text_core
 from storyboard_context import context_hash, scene_context
 import storyboard_metrics
+import segment_naming
+from video_settings import get_ratio
 
 POLICY = 'scene-text-v1'
+EXPORT_FORMAT = 'ratio-summary-v1'
 
 
 def now():
@@ -69,19 +72,33 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True):
         d.require(records and actual_span == [records[0]['start'], records[-1]['end']],
                   '默认须覆盖所选完整场景；明确制作局部范围时提供 --span START END')
     style = (project / 'video-style.txt').read_text(encoding='utf-8-sig').strip()
+    ratio = get_ratio(project, state)
     for unit in units:
         unit.update(style=style, output_format=POLICY,
-                    header_policy=d.HEADER_POLICY, black_reference_mode=d.BLACK_REFERENCE_MODE)
+                    header_policy=d.HEADER_POLICY, black_reference_mode=d.BLACK_REFERENCE_MODE,
+                    video_ratio=ratio, export_format=EXPORT_FORMAT)
+        if replace_ids:
+            old = previous[unit['id']]
+            # A targeted edit retains its original numbering and video shape;
+            # changing a default cannot silently change an existing unit.
+            for key in (*segment_naming.IDENTITY_FIELDS, 'display_name', 'batch_label', 'batch_index', 'video_ratio'):
+                if key in old:
+                    unit[key] = copy.deepcopy(old[key])
+    plan = segment_naming.active_plan(project, state)
+    identities = segment_naming.assignments(state, plan, units) if not replace_ids else None
+    if identities:
+        for unit, identity in zip(units, identities):
+            unit.update(identity)
     camera = text_core.camera_constraints(units, *text_core.camera_context(state, units, replace_ids))
     if check_camera:
         require_camera_constraints(camera)
     info['camera_constraints'] = camera
     info['warnings'].extend(camera['warnings'])
     binding = {'draft_sha256': hashlib.sha256(draft_bytes).hexdigest(),
-               'context_sha256': context_hash(state)}
+               'context_sha256': context_hash(state, project)}
     info = {**info, **binding, 'scenes': selected, 'span': actual_span,
             'semantic_review': 'not_performed',
-            'history': d.range_review(state, actual_span) if not replace_ids else None}
+            'history': d.range_review(state, actual_span, project=project) if not replace_ids else None}
     return state, units, info
 
 
@@ -118,11 +135,16 @@ def render_units(state, units, preview=False):
     scenes = {scene['id']: scene for scene in state['ledger']['scenes']}
     for index, value in enumerate(units, 1):
         unit = copy.deepcopy(value)
-        if preview:
+        d.require(unit.get('export_format') in (None, EXPORT_FORMAT), '未知的文字分镜导出版式')
+        if preview and unit.get('naming_policy') != segment_naming.POLICY:
             scene = unit['main_scene']
             counts[scene] = counts.get(scene, 0) + 1
             unit['display_name'] = f'预览{index:02d}-场景{scenes[scene]["number"]}-分镜{counts[scene]}'
-        results.append(text_core.render_unit(state, unit))
+        results.append(d.render_unit(state, unit))
+    if units and all(unit.get('export_format') == EXPORT_FORMAT for unit in units):
+        total = sum(unit['duration'] for unit in units)
+        minutes, seconds = divmod(total, 60)
+        results.append(f'本次共{len(units)}个分镜单元，总时长 {minutes}分 {seconds}秒')
     return '\n\n'.join(results) + '\n'
 
 
@@ -227,18 +249,22 @@ def commit(project, draft, request_id, review, output, span=None,
         d.require(range_confirmation == info['history']['confirmation_token'],
                   '范围重叠/间隔/回退需要已取得的本次用户授权，不得自动填写确认')
     target = safe_output(state, project, output, (draft, review))
+    plan = segment_naming.active_plan(project, state) if mode == 'append' else None
     scope = batch_naming.scope_for(project, state.get('batch_scope'))
     d.require(scope != d.ROOT.resolve() and d.ROOT.resolve() not in scope.parents, '批次登记不能写入Skill目录')
     d.require(not state.get('batch_scope') or (scope / batch_naming.REGISTRY).is_file(), '原批次登记丢失；请恢复原登记')
     # Both append and replace serialize their tiny session mutation. No drafts,
     # full-prefix snapshots or per-shot approval ledgers are created here.
     allocation = (batch_naming.allocate(scope, project, request_id, request_hash)
-                  if mode == 'append' else batch_naming._lock(scope))
+                  if mode == 'append' and plan is None else batch_naming._lock(scope))
     with allocation as batch_label:
         d.require(d.read_json(project / 'session.json')['revision'] == state['revision'], '项目已有新的提交；重读后重试')
+        d.require(context_hash(state, project) == info['context_sha256'],
+                  '比例、拆分方案或规则在提交期间变化；请重新预览和核对审阅')
         working = copy.deepcopy(state)
         counts = {}
         scenes = {scene['id']: scene for scene in state['ledger']['scenes']}
+        identities = segment_naming.assignments(working, plan, units) if plan else None
         for index, unit in enumerate(units, 1):
             main = unit['main_scene']
             if mode == 'append':
@@ -250,30 +276,46 @@ def commit(project, draft, request_id, review, output, span=None,
                             batch_id=request_id, batch_label=batch_label, batch_index=index,
                             display_name=f'{batch_label}{index:02d}-场景{scenes[main]["number"]}-分镜{counts[main]}',
                             predecessor=prior['id'] if prior else None, previous_versions=[])
+                if identities:
+                    unit.update(identities[index - 1])
                 working['next_numbers'][main] = number + 1
                 working['units'].append(unit)
             else:
                 old = next(u for u in working['units'] if u['id'] == unit['id'])
                 unit.update(version=old['version'] + 1,
                             previous_versions=old.get('previous_versions', []) + [{k:v for k,v in old.items() if k != 'previous_versions'}])
-                for key in ('batch_id', 'batch_label', 'batch_index', 'display_name', 'predecessor'):
+                for key in ('batch_id', 'batch_label', 'batch_index', 'display_name', 'predecessor',
+                            *segment_naming.IDENTITY_FIELDS):
                     if key in old:
                         unit[key] = copy.deepcopy(old[key])
                 working['units'][working['units'].index(old)] = unit
         if mode == 'append':
-            working['ranges'].append({'span': info['span'], 'batch_id': request_id,
-                                      'confirmed': bool(range_confirmation), 'batch_label': batch_label})
-            working['batch_scope'] = str(scope)
+            row = {'span': info['span'], 'batch_id': request_id,
+                   'confirmed': bool(range_confirmation)}
+            if plan:
+                row.update(segment_plan_id=plan['plan_id'],
+                           batch_labels=list(dict.fromkeys(unit['batch_label'] for unit in units)))
+            else:
+                row['batch_label'] = batch_label
+                working['batch_scope'] = str(scope)
+            working['ranges'].append(row)
         receipt = {'policy': POLICY, 'request_id': request_id, 'request_hash': request_hash,
                    'mode': mode, 'output': str(target), 'units': copy.deepcopy(units),
-                   'display_format': d.RECEIPT_DISPLAY_FORMAT, 'final_review': final_review,
+                   'display_format': d.RECEIPT_DISPLAY_FORMAT, 'export_format': EXPORT_FORMAT,
+                   'video_ratios': list(dict.fromkeys(unit['video_ratio'] for unit in units)),
+                   'final_review': final_review,
                    'committed_at': now()}
-        if mode == 'append':
+        if len(receipt['video_ratios']) == 1:
+            receipt['video_ratio'] = receipt['video_ratios'][0]
+        if mode == 'append' and plan is None:
             receipt.update(batch_scope=str(scope), batch_label=batch_label)
+        elif plan:
+            receipt.update(naming_policy=segment_naming.POLICY, segment_plan_id=plan['plan_id'],
+                           batch_labels=list(dict.fromkeys(unit['batch_label'] for unit in units)))
         # Render before committing so a format error cannot create an unusable receipt.
         rendered = render_units(working, units)
         working['receipts'].append(receipt)
-        working['phase'] = 'followup'
+        working['phase'] = 'nodes_choice'
         d.save(project, working)
     d.atomic_text(target, rendered)
     event(project, 'delivered', note=request_id)
@@ -337,7 +379,7 @@ def main():
             receipt = next((r for r in state['receipts'] if r['request_id'] == args.request_id), None)
             d.require(receipt is not None, '提交记录不存在')
             target = safe_output(state, args.project, args.output)
-            d.atomic_text(target, '\n\n'.join(d.render_unit(state,u) for u in receipt['units'])+'\n')
+            d.atomic_text(target, render_units(state, receipt['units']))
             result = {'output':str(target), **d.receipt_summary(receipt)}
         elif args.command == 'event':
             result = event(args.project, args.name, args.scene, args.note,

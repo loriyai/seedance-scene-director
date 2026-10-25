@@ -32,6 +32,7 @@ REASONS = {
     "invalid_reuse_decision": "指定复用的节点与资产名称或类型不匹配",
     "reuse_fingerprint_changed": "所选候选节点在确认后发生变化，需要重新核对",
     "asset_create_rejected": "CLI拒绝创建该资产节点",
+    "asset_rebuild_limit": "缺失资产超过3个，本次未补建资产或写入视频",
     "prompt_encoding_failed": "提示词节点引用编码失败",
     "prompt_write_rejected": "CLI拒绝写入提示词，已保留原内容",
     "mapped_node_missing": "已绑定的视频节点不存在",
@@ -50,7 +51,7 @@ def api():
     return canvas
 
 
-def collect_issues(session, state, doc, units, failures=()):
+def collect_issues(session, state, doc, units, failures=(), inspect_media=True):
     c = api()
     nodes = c.nodes(doc)
     wanted = c.desired_assets(session)
@@ -75,7 +76,7 @@ def collect_issues(session, state, doc, units, failures=()):
             add(item["key"], "missing_node", nid)
         elif c.kind_of(nodes[nid]) != item["kind"]:
             add(item["key"], "node_type_changed", nid)
-        elif not c.ready_image(doc, nid):
+        elif inspect_media and not c.ready_image(doc, nid):
             add(item["key"], "missing_image", nid)
     black_by_unit = {}
     for unit in units:
@@ -86,7 +87,7 @@ def collect_issues(session, state, doc, units, failures=()):
         if issue is not None:
             reason = "missing_black_node" if issue["reason"] == "node_missing" else issue["reason"]
             add("BLACK", reason, black, [unit["id"]], kind=kind)
-        elif not c.reference_ready(doc, black):
+        elif inspect_media and not c.reference_ready(doc, black):
             add("BLACK", "missing_video" if kind == "video" else "missing_image", black, [unit["id"]], kind=kind)
 
     edges = doc["assets"][doc["rootCanvasId"]]["content"].get("edges", {})
@@ -150,11 +151,11 @@ def collect_issues(session, state, doc, units, failures=()):
     return list(unique.values())
 
 
-def write_reference_report(project, session, state, doc, units, failures=(), output=None):
+def write_reference_report(project, session, state, doc, units, failures=(), output=None, inspect_media=True):
     """Write a user TXT and a resumable JSON record without changing prompt files."""
     c = api()
     project = Path(project).resolve()
-    issues = collect_issues(session, state, doc, units, failures)
+    issues = collect_issues(session, state, doc, units, failures, inspect_media)
     missing_images = [issue for issue in issues if issue["reason"] == "missing_image"]
     missing_videos = [issue for issue in issues if issue["reason"] == "missing_video"]
     other = [issue for issue in issues if issue["reason"] not in ("missing_image", "missing_video")]
@@ -187,6 +188,10 @@ def write_reference_report(project, session, state, doc, units, failures=(), out
                      + "；需要补充：黑幕视频素材；涉及分镜：" + (display_units(issue["unit_ids"]) or "无") + "。")
     if not missing_videos:
         lines.append("无。")
+    if not inspect_media:
+        # Unchecked is distinct from zero missing images. Ordinary videos owns
+        # node references only; explicit references keeps the original diagnostics.
+        lines = lines[:4] + ["本次仅核验节点身份与正式视频引用，未检查图片或视频素材是否就绪。"]
     lines += ["", "节点或引用待处理：" + str(len(other)) + "项"]
     for issue in other:
         details = REASONS.get(issue["reason"], issue["reason"])
@@ -197,16 +202,21 @@ def write_reference_report(project, session, state, doc, units, failures=(), out
                      + "；涉及分镜：" + (display_units(issue["unit_ids"]) or "无") + "；原因：" + details + "。")
     if not other:
         lines.append("无。")
-    lines += ["", "可手动补充上述图片，或明确要求按完整资产名称匹配本地图片上传；补图后刷新引用并重新检查。",
-              "黑幕视频素材需另行补充到已记录的视频节点；节点引用完成不表示视频素材已就绪。",
-              "本记录未触发图片或视频生成。"]
+    if inspect_media:
+        lines += ["", "可手动补充上述图片，或明确要求按完整资产名称匹配本地图片上传；补图后刷新引用并重新检查。",
+                  "黑幕视频素材需另行补充到已记录的视频节点；节点引用完成不表示视频素材已就绪。"]
+    lines += ["本记录未触发图片或视频生成。"]
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + ".tmp")
     temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
     temporary.replace(output)
     record = {"schema": 1, "canvas_id": state.get("binding", {}).get("canvas_id"),
               "unit_ids": [u["id"] for u in units], "report": str(output), "issues": issues,
-              "missing_image_count": len(missing_images), "missing_video_count": len(missing_videos), "reference_issue_count": len(other)}
+              "media_readiness_checked": inspect_media,
+              "missing_image_count": len(missing_images) if inspect_media else None,
+              "missing_video_count": len(missing_videos) if inspect_media else None, "reference_issue_count": len(other)}
     d.write_json(project / "canvas" / "reference-check.json", record)
     return {"report": str(output), "issues": issues,
-            "missing_image_count": len(missing_images), "missing_video_count": len(missing_videos), "reference_issue_count": len(other)}
+            "media_readiness_checked": inspect_media,
+            "missing_image_count": len(missing_images) if inspect_media else None,
+            "missing_video_count": len(missing_videos) if inspect_media else None, "reference_issue_count": len(other)}

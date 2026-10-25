@@ -56,12 +56,25 @@ def scene_files(workdir):
     return paths
 
 
+def format_fingerprint(workdir):
+    result = {}
+    source = json.loads((workdir / "source.json").read_text(encoding="utf-8-sig"))
+    if source.get("format_policy") is not None:
+        result["format_policy"] = source["format_policy"]
+    markers = workdir / source_compat.ACTION_MARKERS_FILE
+    if markers.is_file():
+        source_compat.load_action_markers(workdir)
+        result["action_markers"] = sha(markers.read_text(encoding="utf-8-sig"))
+    return result
+
+
 def fingerprint_workdir(workdir):
     paragraphs = source_paragraphs(workdir / "source.json")
     paths = scene_files(workdir)
     scene_ranges(workdir, len(paths), len(paragraphs))
     return {"source_digest": digest(paragraphs),
-            "drafts": {path.name: sha(path.read_text(encoding="utf-8-sig")) for _, path in paths}}
+            "drafts": {path.name: sha(path.read_text(encoding="utf-8-sig")) for _, path in paths},
+            **format_fingerprint(workdir)}
 
 
 def cue_reason(value, names):
@@ -101,9 +114,11 @@ def draft_parts(path):
     names = [split_cast_entry(part)[0] for part in entries]
     body, dialogues = [], []
     position = 0
+    markers = source_compat.load_action_markers(path.parent.parent)
     for number, line in lines[2:]:
-        if line.startswith("△ "):
-            kind, value, speaker = "action", TRANSITION.sub("", line[2:]), None
+        action = source_compat.action_content(line, markers)
+        if action is not None:
+            kind, value, speaker = "action", TRANSITION.sub("", action), None
         elif "：" in line:
             label, value = line.split("：", 1)
             speaker = re.sub(r"[（(][^（）()]*[）)]$", "", label).strip()
@@ -770,8 +785,11 @@ def make_report(workdir, decisions, previous=None, scope="full", scene_numbers=N
     if scope == "full":
         ranges = scene_ranges(workdir, len(paths), len(paragraphs))
     decision_digest = sha(json.dumps(decisions, ensure_ascii=False, sort_keys=True))
+    syntax = format_fingerprint(workdir)
     prior = {}
-    if previous and previous.get("review_version") == REVIEW_VERSION:
+    if (previous and previous.get("review_version") == REVIEW_VERSION
+            and {key: previous.get("fingerprint", {}).get(key) for key in ("action_markers", "format_policy")}
+            == {key: syntax.get(key) for key in ("action_markers", "format_policy")}):
         for item in previous.get("scenes", []):
             prior.setdefault((item["source_hash"], item["draft_hash"]), []).append(item)
     scenes, reused = [], 0
@@ -802,7 +820,7 @@ def make_report(workdir, decisions, previous=None, scope="full", scene_numbers=N
         issue_counts["scene_boundary"] = boundary_pending
     status = ("passed" if scope == "full" else scope + "_passed") if not (missing or extra or speaker or boundary_pending) else "needs_review"
     fingerprint = {"source_digest": digest(paragraphs),
-                   "drafts": {path.name: sha(path.read_text(encoding="utf-8-sig")) for _, path in paths}}
+                   "drafts": {path.name: sha(path.read_text(encoding="utf-8-sig")) for _, path in paths}, **syntax}
     return {"review_version": REVIEW_VERSION, "fragment_policy": FRAGMENT_POLICY, "scope": scope, "status": status,
             "coverage_complete": scope == "full", "reviewed_scene_numbers": [n for n, _ in paths],
             "source_paragraph_count": len(paragraphs), "fingerprint": fingerprint, "decision_digest": decision_digest,

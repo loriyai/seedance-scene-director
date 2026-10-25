@@ -65,6 +65,8 @@ class DefaultVideoCLI(WorkflowCLI):
                         data[self.final_fault] = 'Unexpected final field'
                     elif self.final_fault == 'duration':
                         data['generation']['durationMs'] = 999
+                    elif self.final_fault == 'ratio':
+                        data['generation']['ratio'] = '1:1'
                     elif self.final_fault == 'prompt':
                         data['generation']['prompt'] = 'Unexpected final prompt'
                     elif self.final_fault == 'references':

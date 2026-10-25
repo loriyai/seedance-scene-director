@@ -350,8 +350,9 @@ def status(project):
                                 "request_id": event["request_id"], "unit_ids": event["unit_ids"],
                                 "completion_reported": event["reported"]})
     return {"jobs": jobs, "worker_active": active, "paused": control.get("paused", False),
-            "assets_ready": ready, "image_choice_available": ready and choice.get("asset_job_id") != latest["job_id"],
+            "assets_ready": ready, "image_choice_available": False,
             "asset_job_id": latest["job_id"] if latest else None,
+            "worker": read(directory(project) / "worker.json", {}),
             "events": events, "pending_events": pending_events,
             "video_followups": video_followups, "video_followup_available": bool(video_followups)}
 
@@ -443,6 +444,69 @@ def image_choice(project, choice):
     return {"status": "upload_pending" if str(choice) == "1" else "skipped"}
 
 
+def write_worker_state(project, **values):
+    """Preserve launch/monitor identity across worker lifecycle updates."""
+    value = read(directory(project) / "worker.json", {})
+    value.update(values)
+    d.write_json(directory(project) / "worker.json", value)
+
+
+def publish_worker_failure(project, code, message, queued_fallback=False):
+    """Caller holds metadata_lock. Never resume or rewrite a paused job."""
+    binding = c.read_state(project).get("binding")
+    current = [job for job in manifests(project) if job["binding"] == binding]
+    running = [job for job in current if job_state(project, job)["status"] == "running"]
+    affected = running or ([job for job in current if job_state(project, job)["status"] == "queued"]
+                          if queued_fallback else [])
+    for job in affected:
+        state = job_state(project, job)
+        state.update(status="needs_attention", stage="needs_attention", finished_at=time.time(),
+                     error={"code": code, "message": message})
+        d.write_json(state_file(project, job["job_id"]), state)
+        publish_event(project, job, state)
+
+
+def settle_worker_exit(project, worker_pid, run_id):
+    """A separate monitor records an unexpected exit; it never dispatches work."""
+    with metadata_lock(project):
+        worker = read(directory(project) / "worker.json", {})
+        if worker.get("pid") != worker_pid or worker.get("run_id") != run_id:
+            return {"status": "obsolete"}
+        if alive(worker_pid):
+            return {"status": "running"}
+        if read(directory(project) / "control.json", {}).get("paused"):
+            for job in manifests(project):
+                state = job_state(project, job)
+                if state["status"] == "running" and job["binding"] == c.read_state(project).get("binding"):
+                    state.update(status="paused", stage="paused", finished_at=time.time())
+                    d.write_json(state_file(project, job["job_id"]), state)
+            write_worker_state(project, status="stopped", reason="USER_PAUSED")
+            return {"status": "paused"}
+        # Recover a durable terminal state whose event write was interrupted.
+        for job in manifests(project):
+            state = job_state(project, job)
+            if state["status"] in ("completed", "needs_attention"):
+                publish_event(project, job, state)
+        if worker.get("status") not in ("starting", "running"):
+            return {"status": "stopped"}
+        publish_worker_failure(project, "WORKER_EXITED_UNEXPECTEDLY",
+                               "后台同步进程非预期退出；已保留原任务、节点ID和进度，恢复前须核对未确认写入。",
+                               queued_fallback=worker.get("status") == "starting")
+        write_worker_state(project, status="stopped", reason="WORKER_EXITED_UNEXPECTEDLY")
+        return {"status": "interrupted"}
+
+
+def monitor_worker(project, worker_pid, run_id):
+    """Independent local observer; no CLI, queue dispatch or automatic recovery."""
+    while True:
+        worker = read(directory(project) / "worker.json", {})
+        if worker.get("pid") != worker_pid or worker.get("run_id") != run_id:
+            return {"status": "obsolete"}
+        if not alive(worker_pid):
+            return settle_worker_exit(project, worker_pid, run_id)
+        time.sleep(.5)
+
+
 def start_worker(project):
     project = Path(project).resolve()
     with metadata_lock(project):
@@ -450,7 +514,18 @@ def start_worker(project):
             return {"status": "paused"}
         if worker_active(project):
             return {"status": "already_running"}
-        log = (directory(project) / "worker.log").open("ab")
+        previous_worker = read(directory(project) / "worker.json", {})
+        if previous_worker.get("status") in ("starting", "running"):
+            publish_worker_failure(project, "WORKER_EXITED_UNEXPECTEDLY",
+                                   "上次后台进程已退出；已保留原任务和进度，请核对未确认写入。")
+        run_id = uuid.uuid4().hex
+        try:
+            log = (directory(project) / "worker.log").open("ab")
+        except OSError as exc:
+            message = "后台同步日志无法打开，进程未启动：" + c.safe_message(exc)
+            write_worker_state(project, status="start_failed", run_id=run_id, error=message)
+            publish_worker_failure(project, "WORKER_START_FAILED", message, queued_fallback=True)
+            return {"status": "start_failed", "error": message}
         options = {"cwd": str(project), "stdin": subprocess.DEVNULL, "stdout": log, "stderr": log,
                    "env": {**os.environ, "PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1"}}
         if os.name == "nt":
@@ -458,11 +533,35 @@ def start_worker(project):
         else:
             options["start_new_session"] = True
         try:
-            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "worker", "--project", str(project)], **options)
+            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "worker", "--project", str(project),
+                                        "--run-id", run_id], **options)
+        except OSError as exc:
+            message = "后台同步进程启动失败：" + c.safe_message(exc)
+            d.write_json(directory(project) / "worker.json", {"status": "start_failed", "run_id": run_id,
+                                                              "error": message})
+            publish_worker_failure(project, "WORKER_START_FAILED", message, queued_fallback=True)
+            return {"status": "start_failed", "error": message}
         finally:
             log.close()
-        d.write_json(directory(project) / "worker.json", {"pid": process.pid, "status": "starting"})
-    return {"status": "started", "pid": process.pid}
+        d.write_json(directory(project) / "worker.json", {"pid": process.pid, "status": "starting", "run_id": run_id})
+        monitor_log = None
+        try:
+            monitor_log = (directory(project) / "worker.log").open("ab")
+            monitor = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "monitor", "--project", str(project),
+                                        "--worker-pid", str(process.pid), "--run-id", run_id],
+                                       **{**options, "stdout": monitor_log, "stderr": monitor_log})
+            monitoring = {"status": "started_result_unknown", "pid": monitor.pid}
+        except OSError as exc:
+            monitoring = {"status": "start_failed", "error": c.safe_message(exc)}
+            try:
+                monitoring["notification"] = notify_attention("同步进程已启动，但退出监护启动失败；请在后续交互中检查同步状态。")
+            except Exception as notify_exc:
+                monitoring["notification"] = {"status": "attempt_outcome_unknown", "error": c.safe_message(notify_exc)}
+        finally:
+            if monitor_log is not None:
+                monitor_log.close()
+        write_worker_state(project, monitor=monitoring)
+    return {"status": "started", "pid": process.pid, "monitor": monitoring}
 
 
 def notify_desktop(text, warning=False):
@@ -470,7 +569,8 @@ def notify_desktop(text, warning=False):
     if os.name != "nt":
         return {"status": "not_attempted", "reason": "unsupported_platform"}
     attempted_at = time.time()
-    script = "$w=New-Object -ComObject WScript.Shell; $null=$w.Popup('" + text.replace("'", "''") + "',8,'小云雀同步'," + ("48" if warning else "64") + ")"
+    timeout = "0" if warning else "8"
+    script = "$w=New-Object -ComObject WScript.Shell; $null=$w.Popup('" + text.replace("'", "''") + "'," + timeout + ",'小云雀同步'," + ("48" if warning else "64") + ")"
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     try:
         process = subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
@@ -503,8 +603,10 @@ def publish_event(project, job, state):
         message = f"已完成{count}个{label}的同步核验"
         payload = {}
     else:
-        error = state.get("error") or {"code": state.get("result", {}).get("status", "INCOMPLETE"),
-                                      "message": "同步目标尚未全部核验，请查看待处理项。"}
+        result = state.get("result", {})
+        conflict = next((row for row in result.get("conflicts", []) if row.get("message")), {})
+        error = state.get("error") or {"code": conflict.get("reason", result.get("status", "INCOMPLETE")),
+                                      "message": conflict.get("message", "同步目标尚未全部核验，请查看待处理项。")}
         payload = {"error": error, "total": state.get("total"),
                    "conflicts": state.get("result", {}).get("conflicts", [])}
         signature = c.digest([job["job_id"], count, payload])
@@ -563,7 +665,7 @@ def dependency_complete(job_id, states, seen=()):
     return False
 
 
-def run_worker(project, runner=None):
+def run_worker(project, runner=None, run_id=None):
     project = Path(project).resolve()
     binding = c.read_state(project).get("binding")
     d.require(binding, "后台同步需要画布绑定")
@@ -572,12 +674,11 @@ def run_worker(project, runner=None):
     runner = runner or run_job
     try:
         with metadata_lock(project):
-            d.write_json(directory(project) / "worker.json", {"pid": os.getpid(), "status": "running"})
+            write_worker_state(project, pid=os.getpid(), status="running", run_id=run_id or uuid.uuid4().hex)
         while True:
             with metadata_lock(project):
                 if c.read_state(project).get("binding") != binding:
-                    d.write_json(directory(project) / "worker.json", {
-                        "pid": os.getpid(), "status": "stopped", "reason": "CANVAS_BINDING_CHANGED"})
+                    write_worker_state(project, pid=os.getpid(), status="stopped", reason="CANVAS_BINDING_CHANGED")
                     guard.release()
                     return {**status(project), "worker_stop_reason": "CANVAS_BINDING_CHANGED"}
                 control = read(directory(project) / "control.json", {})
@@ -600,7 +701,7 @@ def run_worker(project, runner=None):
                 queued = [j for j in current_jobs if states[j["job_id"]]["status"] == "queued"]
                 job = next((j for j in queued if all(dependency_complete(dep, states) for dep in j["dependencies"])), None)
                 if control.get("paused") or not job:
-                    d.write_json(directory(project) / "worker.json", {"pid": os.getpid(), "status": "stopped"})
+                    write_worker_state(project, pid=os.getpid(), status="stopped")
                     guard.release()
                     return status(project)
                 state = states[job["job_id"]]
@@ -648,7 +749,7 @@ def run_worker(project, runner=None):
                 state["status"] = "paused"
             except Superseded:
                 state["status"] = "superseded"
-            except (ValueError, OSError, KeyError, TypeError) as exc:
+            except Exception as exc:
                 state.update(status="needs_attention", error={"code": getattr(exc, "code", "ERROR"), "message": c.safe_message(exc)})
                 state["error"].update({key: value for key, value in getattr(exc, "details", {}).items()
                                       if key in ("operation", "node_id", "key", "command") and isinstance(value, str)})
@@ -659,13 +760,16 @@ def run_worker(project, runner=None):
                 publish_event(project, job, state)
             if state["status"] not in ("completed", "superseded"):
                 with metadata_lock(project):
-                    d.write_json(directory(project) / "worker.json", {"pid": os.getpid(), "status": "stopped"})
+                    write_worker_state(project, pid=os.getpid(), status="stopped")
                     guard.release()
                     return status(project)  # No later writes following an uncertain or rejected operation.
     finally:
         if guard.handle is not None:
             with metadata_lock(project):
-                d.write_json(directory(project) / "worker.json", {"pid": os.getpid(), "status": "stopped"})
+                # Preserve an unfinished state for the independent monitor after
+                # SystemExit/KeyboardInterrupt or an outer lifecycle failure.
+                write_worker_state(project, pid=os.getpid(), status="running" if any(
+                    job_state(project, job)["status"] == "running" for job in manifests(project)) else "stopped")
                 guard.release()
 
 
@@ -674,7 +778,7 @@ def main():
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("enqueue", "start", "worker", "status", "pause", "resume", "image-choice", "recover-assets", "report-event", "video-followup"))
+    parser.add_argument("command", choices=("enqueue", "start", "worker", "monitor", "status", "pause", "resume", "image-choice", "recover-assets", "report-event", "video-followup"))
     parser.add_argument("--project", type=Path, required=True)
     parser.add_argument("--kind", choices=("assets", "videos", "references", "images"))
     parser.add_argument("--request-id")
@@ -689,6 +793,8 @@ def main():
     parser.add_argument("--operation-id")
     parser.add_argument("--fingerprint")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--run-id")
+    parser.add_argument("--worker-pid", type=int)
     args = parser.parse_args()
     try:
         if args.command == "enqueue":
@@ -705,6 +811,11 @@ def main():
         elif args.command == "video-followup":
             d.require(args.job_id and args.action, "必须指定视频任务ID及实际后续处理方式")
             result = video_followup(args.project, args.job_id, args.action)
+        elif args.command == "worker":
+            result = run_worker(args.project, run_id=args.run_id)
+        elif args.command == "monitor":
+            d.require(args.worker_pid and args.run_id, "监护需要worker PID及启动标识")
+            result = monitor_worker(args.project, args.worker_pid, args.run_id)
         else:
             function = {"start": start_worker, "worker": run_worker, "status": status, "pause": pause, "resume": resume}[args.command]
             result = function(args.project)

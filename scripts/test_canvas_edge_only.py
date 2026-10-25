@@ -54,7 +54,7 @@ class EdgeOnlyChecks(unittest.TestCase):
         self.assertIsNotNone(c.reference_edge(self.cli.doc, "BLACK", target))
         self.assertEqual({c.content(self.cli.doc, target)[field] for field in ("name", "title", "caption")},
                          {self.unit["display_name"]})
-        self.assertEqual({row["key"] for row in result["reference_issues"] if row["reason"] == "missing_video"}, {"BLACK"})
+        self.assertFalse(any(row["reason"] == "missing_video" for row in result["reference_issues"]))
         self.assertNotIn("reference_not_encoded", {row["reason"] for row in result["reference_issues"]})
         self.assertIn(self.unit["display_name"], Path(result["reference_report"]).read_text(encoding="utf-8"))
         receipt = json.loads(Path(result["video_write_receipts"][0]).read_text(encoding="utf-8"))

@@ -552,7 +552,10 @@ def render_unit(state, unit, reference_text=None):
     # New authoring sets an explicit policy; old receipts retain that old default.
     header = d.fixed_header(unit.get("header_policy", "visual-only-v2"))
     people = "，".join(asset(cid) for cid in authored["character_ids"]) or "无"
-    lines = [f'{title}（时长：{authored["duration"]}秒）', style + ";" + header[0], header[1],
+    ratio = unit.get('video_ratio')
+    _require(ratio in (None, '16:9', '9:16'), '视频比例须为16:9或9:16')
+    ratio_label = '' if ratio is None else ('横屏16:9' if ratio == '16:9' else '竖屏9:16')
+    lines = [f'{title}（时长：{authored["duration"]}秒）{ratio_label}', style + ";" + header[0], header[1],
              "人物：" + people + "；",
              "场景：" + "；".join(asset(sid) for sid in authored["set_ids"])
              + f'；时间：{replace(authored["time"])}；天气：{replace(authored["weather"])}；',

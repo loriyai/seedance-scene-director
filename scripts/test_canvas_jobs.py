@@ -346,8 +346,9 @@ class CanvasJobChecks(unittest.TestCase):
             second = jobs.start_worker(self.project)
         self.assertEqual(first['status'], 'started')
         self.assertEqual(second['status'], 'already_running')
-        spawn.assert_called_once()
-        options = spawn.call_args.kwargs
+        self.assertEqual(spawn.call_count, 2)  # One writer and one read-only exit monitor.
+        self.assertEqual([call.args[0][2] for call in spawn.call_args_list], ['worker', 'monitor'])
+        options = spawn.call_args_list[0].kwargs
         self.assertEqual(options['stdin'], jobs.subprocess.DEVNULL)
         if os.name == 'nt':
             self.assertTrue(options['creationflags'] & jobs.subprocess.CREATE_NO_WINDOW)

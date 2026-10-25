@@ -92,6 +92,18 @@ class DerivedImageInputs(unittest.TestCase):
         role_id = self.mapping()['node_id']
         self.assertFalse(any(n == 'xyq.generation.update_prompt' and v['nodeId'] == role_id for n, v in self.cli.writes))
 
+    def test_video_preparation_preserves_manually_edited_completed_derived_asset(self):
+        self.sync()
+        generation = self.generation()
+        generation.update(prompt='User rewritten derived image prompt', ratio='1:1', references=[])
+        before = copy.deepcopy(self.cli.doc)
+        self.cli.writes.clear()
+        state, doc = c.connected(self.project, self.cli)
+        _, result = c.reconcile_asset_nodes(self.project, self.cli, self.session, state, doc)
+        self.assertEqual(result['conflicts'], [])
+        self.assertEqual(self.cli.writes, [])
+        self.assertEqual(self.cli.doc, before)
+
     def test_repeat_is_idempotent_and_main_image_change_refreshes_owned_input(self):
         self.sync()
         self.add_media()

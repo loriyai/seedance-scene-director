@@ -20,6 +20,7 @@ import dialogue_layout
 import continuity
 import batch_naming
 import audio_sources
+import video_settings
 HEADER_SHA = "8001822afdf324cbbfa3eb284b2a03ccbde084b2e70fa66763a26b5c738e5962"
 HEADER_POLICY = "visual-only-v3"
 VISUAL_V2_HEADER_SHA = "8001822afdf324cbbfa3eb284b2a03ccbde084b2e70fa66763a26b5c738e5962"
@@ -238,7 +239,9 @@ def dependency(path=None):
     return found, ledger, review
 
 
-def build_records(script_text, ledger):
+def build_records(script_text, ledger, markers=None):
+    sys.path.insert(0, str(ROOT / 'modules' / 'screenplay-standardizer' / 'scripts'))
+    from source_compat import action_content
     scenes = {s["number"]: s for s in ledger["scenes"]}
     records, cursor, scene, heading_line = [], 0, None, 0
     for line_no, raw in enumerate(script_text.splitlines(), 1):
@@ -252,8 +255,9 @@ def build_records(script_text, ledger):
         else:
             require(scene is not None, "标准剧本正文出现在场景标题之前")
             label, voice, speaker, source_kind = "", None, None, None
-            if line.startswith("△ "):
-                kind, text = "action", line[2:]
+            action = action_content(line, markers)
+            if action is not None:
+                kind, text = "action", action
             else:
                 require("：" in line, f"标准剧本第{line_no}行无法识别")
                 label, text = line.split("：", 1)
@@ -303,7 +307,12 @@ def bind(args):
     ledger_mod.validate(ledger_mod.parse_script(paths["script"]), ledger_mod.source_paragraphs(paths["source"]), ledger,
                         require_designed=requires_design(ledger, project=project, explicit=getattr(args, "require_designed", False)))
     require(ledger.get("schema_version") == 3, "新绑定须使用区分场次与布景的schema 3台账；旧项目先离线审计升级")
-    records, length = build_records(script_text, ledger)
+    from source_compat import load_action_markers
+    markers = load_action_markers(paths['source'])
+    records, length = build_records(script_text, ledger, markers)
+    marker_path = paths['source'].parent / 'action-markers.json'
+    if marker_path.is_file():
+        paths['action_markers'] = marker_path
     style_path = project / "video-style.txt"
     style = style_path.read_text(encoding="utf-8-sig").strip() if style_path.is_file() else None
     if style is not None:
@@ -318,6 +327,9 @@ def bind(args):
              "ledger": ledger, "entry": {"min": args.min_duration, "max": 30, "durations": args.durations},
              "style_hash": sha(style) if style is not None else None,
              "ranges": [], "units": [], "next_numbers": {}, "receipts": []}
+    if (project / video_settings.RATIO_FILE).exists() or (project / video_settings.WORKFLOW_FILE).exists():
+        ratio = video_settings.get_ratio(project, required=True)
+        state.update(video_ratio=ratio, video_ratio_hash=video_settings.digest(ratio))
     if contract:
         state['delivery_contract'] = contract
         if contract['scope'] != 'workflow':
@@ -329,11 +341,14 @@ def bind(args):
     return {"status": "bound", "project": str(project), "phase": state["phase"], "length": length}
 
 
-def load(project, verify_style=True):
+def load(project, verify_style=True, verify_ratio=True):
     state = read_json(project / "session.json")
     require(state.get("schema_version") == 1, "项目状态版本不兼容")
     for label, record in state["files"].items():
         require(Path(record["path"]).is_file() and file_hash(record["path"]) == record["sha256"], f"{label}已变化；请按改稿流程重新绑定")
+    marker_path = Path(state['files']['source']['path']).parent / 'action-markers.json'
+    require(not marker_path.exists() or 'action_markers' in state['files'],
+            '绑定后新增了动作标识清单；请按改稿流程重新复核绑定')
     if state.get('delivery_contract') is not None:
         dependency()
         from project_contract import delivery_contract
@@ -344,6 +359,8 @@ def load(project, verify_style=True):
     require(current == state["drafts"], "逐场稿已变化；请重新复核绑定")
     if verify_style and state["style_hash"]:
         require(sha((project / "video-style.txt").read_text(encoding="utf-8-sig").strip()) == state["style_hash"], "风格文件被外部更改；请用style命令更新")
+    if verify_ratio:
+        video_settings.get_ratio(project, state)
     return state
 
 
@@ -371,7 +388,19 @@ def set_style(args, state=None):
             state["phase"] = ("complete" if state.get("delivery_contract", {}).get("scope")
                               in {"assets", "screenplay"} else "range")
         save(args.project, state)
-    return {"status": "style_saved", "style_file": str((args.project / "video-style.txt").resolve())}
+    return {"status": "style_saved", "style_file": str((args.project / "video-style.txt").resolve()),
+            "next_step": 'ratio' if state is None else state.get('phase')}
+
+
+def set_ratio(args, state=None):
+    value = video_settings.RATIOS.get(getattr(args, 'choice', None))
+    result = video_settings.save_ratio(args.project, value, inherit=getattr(args, 'inherit', False))
+    if state is not None:
+        state.update(video_ratio=result['video_ratio'], video_ratio_hash=video_settings.digest(result['video_ratio']))
+        if state.get('phase') == 'ratio':
+            state['phase'] = 'range'
+        save(args.project, state)
+    return result
 
 
 def portion(record, start, end):
@@ -459,7 +488,7 @@ def merged_intervals(intervals):
     return result
 
 
-def range_review(state, span):
+def range_review(state, span, project=None):
     a, b = interval(span, state["length"])
     issues = []
     overlaps = merged_intervals([[max(a, h["span"][0]), min(b, h["span"][1])] for h in state["ranges"]
@@ -479,11 +508,31 @@ def range_review(state, span):
                 issues.append({"kind": "间隔", "span": [cursor, a], "text": excerpt(state, cursor, a)})
         if a < last[0]:
             issues.append({"kind": "顺序回退", "span": span, "text": excerpt(state, a, b)})
+    if project is not None and not overlaps:
+        from script_partition import load_plan
+        plan = load_plan(project, state)
+        if plan and plan.get('status') == 'confirmed':
+            selected = [item for item in plan['segments']
+                        if max(a, item['span'][0]) < min(b, item['span'][1])]
+            # Only explicit whole, as-yet-unmade plan segments waive order/gap
+            # prompts. Partial ranges and actual duplicate coverage keep review.
+            if (selected and selected[0]['span'][0] == a and selected[-1]['span'][1] == b
+                    and all(not any(max(item['span'][0], prior['span'][0]) < min(item['span'][1], prior['span'][1])
+                                    for prior in state['ranges']) for item in selected)):
+                issues = [issue for issue in issues if issue['kind'] not in ('间隔', '顺序回退')]
     token = sha(packed([state["revision"], span, issues])) if issues else None
     return {"issues": issues, "confirmation_token": token}
 
 
 def locate(args, state):
+    if getattr(args, 'segment', None):
+        from script_partition import resolve_segment
+        segment = resolve_segment(args.project, state, args.segment)
+        require(segment is not None, '找不到当前有效拆分计划中的分段代号')
+        span = segment['span']
+        return {'status': 'located', 'span': span, 'segment': segment['label'],
+                'approximate': False, 'text': excerpt(state, *span),
+                **range_review(state, span, args.project)}
     request = read_json(args.anchors)
     starts, ends = anchors(state, request["start"]), anchors(state, request["end"])
     candidates = {}
@@ -493,7 +542,7 @@ def locate(args, state):
             if start["span"][0] <= end["span"][0] and start["span"][1] <= b:
                 span = [a, b]
                 candidates[(a, b)] = {"span": span, "approximate": start["approximate"] or end["approximate"],
-                                      "text": excerpt(state, a, b), **range_review(state, span)}
+                                      "text": excerpt(state, a, b), **range_review(state, span, getattr(args, 'project', None))}
     values = list(candidates.values())
     if len(values) > 100:
         return {"status": "need_longer_anchors", "candidate_count": len(values)}
@@ -584,9 +633,18 @@ def unit_name(unit):
 
 
 def resolve_unit_id(state, value):
-    """Resolve exact stable IDs, full visible names or a unique batch short name."""
-    matches = {unit["id"] for unit in state["units"] if value == unit["id"] or value == unit_name(unit)
-               or (unit.get("display_name") and value == unit["display_name"].split("-", 1)[0])}
+    """Resolve exact identities first, then an unambiguous batch/round alias."""
+    matches = {unit['id'] for unit in state['units'] if value in (unit['id'], unit_name(unit))}
+    if not matches:
+        for unit in state['units']:
+            if not unit.get('display_name'):
+                continue
+            short = unit['display_name'].split('-', 1)[0]
+            aliases = {short}
+            if unit.get('segment_round', 0):
+                aliases.add(f"{short}-{unit['segment_round']}")
+            if value in aliases:
+                matches.add(unit['id'])
     require(len(matches) == 1, f"分镜名称不存在或无法唯一定位：{value}")
     return next(iter(matches))
 
@@ -977,7 +1035,9 @@ def validate_output_path(state, project, output, batch_scope=None):
     output = Path(output).resolve()
     project = Path(project).resolve()
     protected = [Path(x["path"]).resolve() for x in state["files"].values()]
-    protected.extend((project / n).resolve() for n in ("session.json", "video-style.txt"))
+    protected.extend((project / n).resolve() for n in ('session.json', 'video-style.txt',
+                     video_settings.RATIO_FILE, video_settings.WORKFLOW_FILE, 'script-partition.json'))
+    protected.append((project.parent / video_settings.DEFAULTS_FILE).resolve())
     scope = batch_naming.scope_for(project, state.get("batch_scope"), batch_scope)
     protected.extend(scope / n for n in (batch_naming.REGISTRY, ".batch-names.lock"))
     directories = [ROOT.resolve(), (project / "canvas").resolve(), (project / "scenes").resolve()]
@@ -995,6 +1055,10 @@ def render_receipt(state, receipt, project=None):
         batch_naming.recover(receipt["batch_scope"])
     display_format = receipt.get("display_format")
     require(display_format in (None, LEGACY_RECEIPT_DISPLAY_FORMAT, RECEIPT_DISPLAY_FORMAT), "未知的交付展示格式")
+    if receipt.get('policy') == 'scene-text-v1' and receipt.get('export_format'):
+        from storyboard_text_delivery import render_units
+        atomic_text(receipt['output'], render_units(state, receipt['units']))
+        return
     rendered = []
     for number, unit in enumerate(receipt["units"], 1):
         text = render_unit(state, unit)
@@ -1132,16 +1196,24 @@ def main():
     p.add_argument("--require-designed", action="store_true", help="新项目图片资产交付必须具备全部有效设计；旧事实台账兼容读取不自动升级")
     p.add_argument("--min-duration", type=int, default=4)
     p.add_argument("--durations", type=int, nargs="+")
-    for command in ("style", "phase", "status", "locate", "range", "check", "commit", "render"):
+    for command in ('style', 'ratio', 'intake-status', 'phase', 'status', 'locate', 'range', 'check', 'commit', 'render'):
         p = sub.add_parser(command)
         p.add_argument("--project", type=Path, required=True)
         if command == "style":
             p.add_argument("--choice", choices=("1", "2", "3"), required=True)
             p.add_argument("--file", type=Path)
+        elif command == 'ratio':
+            selection = p.add_mutually_exclusive_group(required=True)
+            selection.add_argument('--choice', choices=('1', '2'))
+            selection.add_argument('--inherit', action='store_true', help='沿用当前聊天已确认比例并独立保存到本项目')
         elif command == "phase":
-            p.add_argument("--value", choices=("asset_choice", "image_choice", "image_folder", "style", "range", "nodes_choice", "followup", "complete"), required=True)
+            p.add_argument('--value', choices=('asset_choice', 'canvas_url', 'partition_choice', 'partition_count',
+                           'partition_confirm', 'image_choice', 'image_folder', 'style', 'ratio', 'range',
+                           'nodes_choice', 'followup', 'complete'), required=True)
         elif command == "locate":
-            p.add_argument("--anchors", type=Path, required=True)
+            selection = p.add_mutually_exclusive_group(required=True)
+            selection.add_argument('--anchors', type=Path)
+            selection.add_argument('--segment', help='当前拆分计划中的A/B/C等分段代号')
         elif command == "range":
             p.add_argument("--start", type=int, required=True)
             p.add_argument("--end", type=int, required=True)
@@ -1159,17 +1231,26 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == 'project-init':
+            new_contract = not (args.project / 'project-contract.json').exists()
+            if new_contract:
+                video_settings.require_intake(args.project)
             dependency()
             from project_contract import initialize_project
             result = initialize_project(args.project, args.scope)
+            if new_contract:
+                video_settings.mark_workflow(args.project)
         elif args.command == "bind":
             result = bind(args)
         else:
             args.project = args.project.resolve()
-            state = (None if args.command == "style" and not (args.project / "session.json").exists()
-                     else load(args.project, verify_style=args.command != "style"))
+            state = (None if args.command in ('style', 'ratio', 'intake-status') and not (args.project / 'session.json').exists()
+                     else load(args.project, verify_style=args.command != 'style', verify_ratio=args.command != 'ratio'))
             if args.command == "style":
                 result = set_style(args, state)
+            elif args.command == 'ratio':
+                result = set_ratio(args, state)
+            elif args.command == 'intake-status':
+                result = video_settings.status(args.project, state)
             elif args.command == "phase":
                 state["phase"] = args.value
                 save(args.project, state)
@@ -1180,6 +1261,11 @@ def main():
                 for item, unit in zip(result["units"], state["units"]):
                     item["name"] = unit_name(unit)
                 result["batch_scope"] = state.get("batch_scope")
+                result['video_settings'] = video_settings.status(args.project, state)
+                from script_partition import load_plan
+                plan = load_plan(args.project, state)
+                if plan:
+                    result['partition'] = {key: plan[key] for key in ('plan_id', 'version', 'status', 'segments')}
                 if 'delivery_contract' in state:
                     result['delivery_contract'] = state['delivery_contract']
                     result['task_complete'] = state['phase'] == 'complete'
@@ -1194,7 +1280,7 @@ def main():
             elif args.command == "locate":
                 result = locate(args, state)
             elif args.command == "range":
-                result = {"span": [args.start, args.end], **range_review(state, [args.start, args.end])}
+                result = {"span": [args.start, args.end], **range_review(state, [args.start, args.end], args.project)}
             elif args.command == "check":
                 if args.require_workflow:
                     require_workflow(read_json(args.request))
