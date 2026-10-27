@@ -24,7 +24,7 @@ def summarize(project, state, queue=None):
             if valid:
                 key = (job['kind'], tuple(job['options']['ids']))
                 if key not in input_digests:
-                    input_digests[key] = c.digest(jobs.input_scope(state, *key))
+                    input_digests[key] = c.digest(jobs.frozen_input_scope(project, state, job))
                 valid = job['input_digest'] == input_digests[key]
             if valid and job['kind'] == 'images':
                 folder = job['options']['folder']
@@ -70,4 +70,6 @@ def summarize(project, state, queue=None):
                     legacy['differences'].append({'field': key, 'snapshot': old[key], 'current': value})
         except (OSError, ValueError, TypeError, AttributeError):
             legacy['error'] = '旧intake快照无法读取；不用于恢复决策。'
+    from project_continuation import resume
+    result['continuation'] = resume(project, state)
     return result

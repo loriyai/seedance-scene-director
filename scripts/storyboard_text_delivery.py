@@ -99,6 +99,10 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True):
     info = {**info, **binding, 'scenes': selected, 'span': actual_span,
             'semantic_review': 'not_performed',
             'history': d.range_review(state, actual_span, project=project) if not replace_ids else None}
+    from project_continuation import review_bridge
+    bridge = review_bridge(project, binding['draft_sha256'], binding['context_sha256'])
+    if bridge:
+        info['review_bridge'] = bridge
     return state, units, info
 
 
@@ -110,7 +114,12 @@ def require_camera_constraints(report):
 def verify_review(report, info):
     d.require(isinstance(report, dict), '场次审阅须为JSON对象')
     for key in ('draft_sha256', 'context_sha256'):
-        d.require(report.get(key) == info[key], f'审阅绑定不匹配：{key}；核对实际变化后更新本次场次结论')
+        bridge = info.get('review_bridge')
+        equivalent = (key == 'context_sha256' and bridge
+                      and report.get(key) == bridge['old_context_sha256']
+                      and info[key] == bridge['new_context_sha256']
+                      and d.sha(d.packed(report)) == bridge['report_digest'])
+        d.require(report.get(key) == info[key] or equivalent, f'审阅绑定不匹配：{key}；核对实际变化后更新本次场次结论')
     d.require(isinstance(report.get('reviewer'), str) and report['reviewer'].strip(), '缺少实际独立审阅者')
     rows = report.get('scenes')
     d.require(isinstance(rows, list) and all(isinstance(row, dict) for row in rows), '缺少场次审阅结论')
@@ -161,6 +170,8 @@ def write_preview(target, payload):
 
 
 def preview(project, draft, output=None, span=None, replace_ids=None, activity_id=None):
+    from project_paths import assert_writable
+    assert_writable(project)
     project, draft = Path(project).resolve(), Path(draft).resolve()
     state, units, info = prepare(project, draft, span, replace_ids)
     payload = render_units(state, units, preview=True).encode('utf-8')
@@ -221,6 +232,8 @@ def timing(project):
 
 def commit(project, draft, request_id, review, output, span=None,
            replace_ids=None, range_confirmation=None):
+    from project_paths import assert_writable
+    assert_writable(project)
     project = Path(project).resolve()
     d.require(isinstance(request_id, str) and request_id.strip(), 'request_id不能为空')
     state, units, info = prepare(project, draft, span, replace_ids, check_camera=False)

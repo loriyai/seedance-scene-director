@@ -25,6 +25,8 @@ VIDEO_READBACK_ATTEMPTS = 3
 VIDEO_READBACK_DELAY = 0.5
 ASSET_IMAGE_DEFAULTS = {"resolution": "2K", "effort": "high", "ratio": "16:9"}
 ASSET_CONTRACT = "generation-prompt-v2"
+BATCH_PROTOCOL = "sdk-local-batch-v1"
+MAX_AUTO_REBUILD_ASSETS = 10
 CANVAS_URL_SPACE_HINTS = {
     ("xyq.jianying.com", "/novel/detail/canvas"): "personal",
     ("xyq.jianying.com", "/project"): "team",
@@ -142,6 +144,9 @@ class CLI:
         return status
 
     def command(self, canvas_id, name, value=None):
+        if name != 'get_snapshot':
+            from project_paths import assert_writable
+            assert_writable(self.project, cloud=True)
         self.ready()
         binding = self.binding or read_state(self.project).get("binding") or {}
         d.require(binding.get("canvas_id") == canvas_id, "命令目标与当前绑定画布不一致")
@@ -156,6 +161,43 @@ class CLI:
 
     def allocate(self):
         return self.allocate_many(1)[0]
+
+    def batch_adapter(self, mode, **payload):
+        self.ready()
+        check_control(self)
+        with tempfile.TemporaryDirectory(prefix="batch-", dir=self.directory) as temporary:
+            path = Path(temporary) / "input.json"
+            d.write_json(path, {"mode": mode, "canvas_entry": self.config["canvas_entry"], **payload})
+            value = run_json([self.config["node_path"], Path(__file__).with_name("canvas_cli_batch.js"), path], self.project)
+        result = value.get("data", {})
+        d.require(result.get("protocol") == BATCH_PROTOCOL, "批量适配器契约不匹配")
+        return result
+
+    def batch_snapshot(self, binding):
+        self.use_binding(binding)
+        result = self.batch_adapter("snapshot", canvas_id=binding["canvas_id"], team_id=normalize_team_id(binding["team_id"]),
+                                    cli_path=self.config["cli_path"], project=str(self.project))
+        doc = result["document"]
+        d.require(doc.get("rootCanvasId") == binding["canvas_id"] and not doc["assets"][doc["rootCanvasId"]]["content"].get("settings", {}).get("readOnly"),
+                  "批量快照目标不匹配或画布只读")
+        return result
+
+    def compile_batch(self, doc, commands):
+        return self.batch_adapter("compile", document=doc, commands=commands)
+
+    def apply_batch(self, request):
+        from project_paths import assert_writable
+        assert_writable(self.project, cloud=True)
+        # Use the public native command and its strict ACK/version validation.
+        # No hidden transport-result flag, HTTP bypass or automatic retry.
+        d.require(len(request.get("transactions", [])) == 1, "批量写入必须为单个事务")
+        with tempfile.TemporaryDirectory(prefix="apply-", dir=self.directory) as temporary:
+            path = Path(temporary) / "patch.json"
+            d.write_json(path, request)
+            args = ["canvas", "apply", "--file", str(path)]
+            if self.binding.get("project_id"):
+                args.extend(["--project-id", self.binding["project_id"]])
+            return self.native(*args)
 
     def allocate_many(self, count):
         d.require(isinstance(count, int) and 1 <= count <= 5000, "ID申请数量须为1至5000")
@@ -481,8 +523,10 @@ def video_references_satisfied(doc, node_id, item):
     return True
 
 
-def repair_role_reference_rows(project, cli, state, doc, node_id, prompt):
-    """Refresh only an old empty-role edge after that role receives its media."""
+def stale_role_reference_edges(doc, node_id, prompt):
+    """Shared plan for refreshing an empty-role edge after media arrives."""
+    if node_id not in nodes(doc):
+        return []
     edges = doc["assets"][doc["rootCanvasId"]]["content"].get("edges", {})
     references = content(doc, node_id).get("generation", {}).get("references", [])
     ids = []
@@ -493,6 +537,12 @@ def repair_role_reference_rows(project, cli, state, doc, node_id, prompt):
             continue
         ids.extend(edge_id for edge_id, edge in edges.items() if edge.get("source") == source
                    and edge.get("target") == node_id and edge.get("type") == "reference")
+    return ids
+
+
+def repair_role_reference_rows(project, cli, state, doc, node_id, prompt):
+    """Refresh only an old empty-role edge after that role receives its media."""
+    ids = stale_role_reference_edges(doc, node_id, prompt)
     if not ids:
         return doc
     return write_verified(project, cli, state, "delete_edges", {"ids": ids},
@@ -519,6 +569,11 @@ def target_satisfied(doc, target):
     if action == "generation_settings":
         generation = content(doc, node_id).get("generation") or {}
         return all(generation.get(key) == value for key, value in target["value"].items())
+    if action == "reference_graph":
+        from canvas_batch import reference_edges
+        return reference_edges(doc, node_id) == target["value"]
+    if action == "asset_snapshot":
+        return fingerprint(doc, node_id) == target["value"]
     if action == "prompt":
         return prompt_of(doc, node_id) == target["value"] and prompt_references_satisfied(doc, node_id, target["value"])
     if action == "prompt_text":
@@ -585,6 +640,8 @@ def check_control(cli):
 
 
 def write_verified(project, cli, state, command, value, targets):
+    from project_paths import assert_writable
+    assert_writable(project, cloud=True)
     check_control(cli)
     entry = {"id": uuid.uuid4().hex, "command": command, "input": copy.deepcopy(value),
              "targets": copy.deepcopy(targets), "status": "pending"}
@@ -615,6 +672,8 @@ def write_verified(project, cli, state, command, value, targets):
 
 
 def write_acknowledged(project, cli, state, command, value, targets, receipt):
+    from project_paths import assert_writable
+    assert_writable(project, cloud=True)
     """Journal a video step's official ACK; defer snapshot acceptance to its receipt."""
     check_control(cli)
     entry = {"id": uuid.uuid4().hex, "command": command, "input": copy.deepcopy(value),
@@ -911,106 +970,103 @@ def asset_image_input_status(state, keys=None):
             if "image_input" in mapping and (keys is None or key in keys)]
 
 
+def asset_image_reference_plan(original, state, doc):
+    """Pure derived-asset reference contract, shared by local and remote execution."""
+    key = original["key"]
+    mapping = state["mappings"].get(key, {})
+    nid = mapping.get("node_id")
+    d.require(nid, "派生图片目标节点尚未创建，不能核验图片输入")
+    if (nid not in nodes(doc) or kind_of(nodes(doc)[nid]) != original["kind"] or name_of(doc, nid) != original["name"]):
+        fail("CONCURRENT_EDIT", "派生图片目标节点名称或类型已改变。", key=key, node_id=nid)
+    item = resolve_asset_image_item(original, state, doc)
+    current = prompt_of(doc, nid)
+    if current != item["image_prompt"] and digest(current) != mapping.get("prompt_hash"):
+        fail("CONCURRENT_EDIT", "派生图片提示词已被修改，停止绑定参考图。", key=key, node_id=nid)
+    sources = item["image_reference_sources"]
+    old = mapping.get("image_input", {})
+    previous = old.get("managed_references", [])
+    owned_edges = copy.deepcopy(old.get("managed_edges", {}))
+    for entry in state["journal"]:
+        if entry.get("status") != "verified":
+            continue
+        for target in entry.get("targets", []):
+            if target.get("node_id") != nid:
+                continue
+            if target.get("action") == "asset_reference_edge":
+                owned_edges[target["source"]] = target["edge_id"]
+            elif target.get("action") == "reference_edges_absent":
+                owned_edges = {sid: eid for sid, eid in owned_edges.items() if eid not in target["edge_ids"]}
+    generation = copy.deepcopy(content(doc, nid).get("generation") or {})
+    saved = generation.get("references", [])
+    d.require(isinstance(saved, list) and all(isinstance(r, dict) for r in saved), "角色图片引用结构非法")
+    source_ids = {row["node_id"] for row in sources}
+    old_ids = {r["sourceNodeId"] for r in previous}
+    selected = [row["reference"] for row in sources if row.get("reference")]
+    def owned(row):
+        return any(isinstance(row.get(field), str) and row[field].strip() in source_ids | old_ids
+                   for field in ("sourceNodeId", "nodeAssetId", "id"))
+    managed = [r for r in saved if owned(r)]
+    if managed != previous and managed != selected:
+        fail("CONCURRENT_EDIT", "派生图片参考素材已被修改，停止覆盖。", key=key, node_id=nid)
+    commands, targets = [], []
+    edges = doc["assets"][doc["rootCanvasId"]]["content"].get("edges", {})
+    def add(name, value, checks):
+        commands.append({"name": name, "input": value, "targets": checks})
+        targets.extend(checks)
+    for sid, eid in list(owned_edges.items()):
+        edge = edges.get(eid)
+        if edge is None or edge.get("source") != sid or edge.get("target") != nid or edge.get("type") != "reference":
+            fail("CONCURRENT_EDIT", "派生图片受管理的引用连线已被删除或改变。", key=key, edge_id=eid)
+        if sid not in source_ids:
+            add("delete_edges", {"ids": [eid]}, [{"action": "reference_edges_absent", "node_id": nid, "edge_ids": [eid]}])
+            owned_edges.pop(sid)
+    for source in sources:
+        sid = source["node_id"]
+        if reference_edge(doc, sid, nid) is None:
+            eid = "edge-image-" + uuid.uuid4().hex
+            add("create_edge", {"edge": {"id": eid, "type": "reference", "source": sid, "target": nid}},
+                [{"action": "asset_reference_edge", "node_id": nid, "source": sid, "edge_id": eid}])
+            owned_edges[sid] = eid
+    merged = {**generation, "prompt": item["image_prompt"], "references": [r for r in saved if not owned(r)] + selected}
+    if merged != generation:
+        add("xyq.role.updateAppearance", {"nodeId": nid, "assetId": nid,
+            "expected": {"generation": generation}, "patch": {"generation": merged}},
+            [{"action": "generation_settings", "node_id": nid, "value": merged}])
+    return {"key": key, "node_id": nid, "sources": sources, "commands": commands, "targets": targets,
+            "image_input": {"status": "pending" if item["image_reference_pending"] else "ready",
+                "pending": item["image_reference_pending"], "managed_references": copy.deepcopy(selected), "managed_edges": owned_edges}}
+
+
 def sync_asset_image_references(project, cli, session, state, doc, keys=None):
-    """Bind derived-image inputs after node creation; never generate or upload media."""
+    """Historical serial executor for the shared derived-asset reference plan."""
     for original in desired_assets(session):
         key = original["key"]
         if not original.get("image_reference_assets") or keys is not None and key not in keys:
             continue
-        mapping = state["mappings"].get(key, {})
-        nid = mapping.get("node_id")
-        if not nid:
-            fail("ASSET_NOT_READY", "派生图片目标节点尚未创建，不能核验图片输入。", key=key)
         doc = document(cli, state["binding"])
-        def valid_target(snapshot):
-            return (nid in nodes(snapshot) and kind_of(nodes(snapshot)[nid]) == original["kind"]
-                    and name_of(snapshot, nid) == original["name"])
-        if not valid_target(doc):
-            mapping.setdefault("image_input", {}).update(status="pending", pending=[
+        nid = state["mappings"].get(key, {}).get("node_id")
+        if (nid not in nodes(doc) or kind_of(nodes(doc)[nid]) != original["kind"] or name_of(doc, nid) != original["name"]):
+            state["mappings"].setdefault(key, {}).setdefault("image_input", {}).update(status="pending", pending=[
                 {"key": key, "node_id": nid, "reason": "target_missing_or_changed"}])
             save(project, state)
-            fail("CONCURRENT_EDIT", "派生图片目标节点名称或类型已改变。", key=key, node_id=nid)
-        item = resolve_asset_image_item(original, state, doc)
-        current = prompt_of(doc, nid)
-        if current != item["image_prompt"] and digest(current) != mapping.get("prompt_hash"):
-            fail("CONCURRENT_EDIT", "派生图片提示词已被修改，停止绑定参考图。", key=key, node_id=nid)
-        sources = item["image_reference_sources"]
-        old = mapping.get("image_input", {})
-        previous = old.get("managed_references", [])
-        owned_edges = copy.deepcopy(old.get("managed_edges", {}))
-        # Recover ownership after a verified edge write interrupted before mapping save.
-        for entry in state["journal"]:
-            if entry.get("status") != "verified":
-                continue
-            for target in entry.get("targets", []):
-                if target.get("node_id") != nid:
-                    continue
-                if target.get("action") == "asset_reference_edge":
-                    owned_edges[target["source"]] = target["edge_id"]
-                elif target.get("action") == "reference_edges_absent":
-                    owned_edges = {sid: eid for sid, eid in owned_edges.items() if eid not in target["edge_ids"]}
-        generation = copy.deepcopy(content(doc, nid).get("generation") or {})
-        saved = generation.get("references", [])
-        d.require(isinstance(saved, list) and all(isinstance(r, dict) for r in saved), "角色图片引用结构非法")
-        source_ids = {s["node_id"] for s in sources}
-        old_ids = {r["sourceNodeId"] for r in previous}
-        selected = [s["reference"] for s in sources if s.get("reference")]
-        def owned(row):
-            return any(isinstance(row.get(field), str) and row[field].strip() in source_ids | old_ids
-                       for field in ("sourceNodeId", "nodeAssetId", "id"))
-        managed = [r for r in saved if owned(r)]
-        if managed != previous and managed != selected:
-            fail("CONCURRENT_EDIT", "派生图片参考素材已被修改，停止覆盖。", key=key, node_id=nid)
-        # Persist an explicit pending state before the first write. Interrupted writes
-        # remain journaled and are reconciled before this function can run again.
-        mapping["image_input"] = {"status": "pending", "pending": item["image_reference_pending"],
-                                  "managed_references": copy.deepcopy(previous), "managed_edges": owned_edges}
+        plan = asset_image_reference_plan(original, state, doc)
+        mapping = state["mappings"][key]
+        mapping["image_input"] = {**copy.deepcopy(mapping.get("image_input", {})), "status": "pending",
+                                   "pending": plan["image_input"]["pending"]}
         save(project, state)
-        edges = doc["assets"][doc["rootCanvasId"]]["content"].get("edges", {})
-        for sid, eid in list(owned_edges.items()):
-            edge = edges.get(eid)
-            if edge is None or edge.get("source") != sid or edge.get("target") != nid or edge.get("type") != "reference":
-                fail("CONCURRENT_EDIT", "派生图片受管理的引用连线已被删除或改变。", key=key, edge_id=eid)
-            if sid not in source_ids:
-                doc = write_verified(project, cli, state, "delete_edges", {"ids": [eid]},
-                                     [{"action": "reference_edges_absent", "node_id": nid, "edge_ids": [eid]}])
-                owned_edges.pop(sid)
-                save(project, state)
-        for source in sources:
-            sid = source["node_id"]
-            if reference_edge(doc, sid, nid) is None:
-                edge = {"id": "edge-image-" + uuid.uuid4().hex, "type": "reference", "source": sid, "target": nid}
-                doc = write_verified(project, cli, state, "create_edge", {"edge": edge},
-                    [{"action": "asset_reference_edge", "node_id": nid, "source": sid, "edge_id": edge["id"]}])
-                owned_edges[sid] = edge["id"]
-                save(project, state)
-        fresh = document(cli, state["binding"])
-        if not valid_target(fresh):
-            fail("CONCURRENT_EDIT", "派生图片目标节点在引用写入前发生变化。", key=key, node_id=nid)
-        if content(fresh, nid).get("generation", {}) != generation:
-            fail("CONCURRENT_EDIT", "派生图片引用写入前生成配置发生变化。", key=key, node_id=nid)
-        refreshed = resolve_asset_image_item(original, state, fresh)
-        if refreshed["image_reference_sources"] != sources:
-            fail("CONCURRENT_EDIT", "派生图片的参考素材在写入前发生变化。", key=key)
-        merged = {**generation, "prompt": item["image_prompt"], "references":
-            [r for r in saved if not owned(r)] + selected}
-        if merged != generation:
-            doc = write_verified(project, cli, state, "xyq.role.updateAppearance", {
-                "nodeId": nid, "assetId": nid, "expected": {"generation": content(fresh, nid).get("generation")},
-                "patch": {"generation": merged}},
-                [{"action": "generation_settings", "node_id": nid, "value": merged}])
-        else:
-            doc = fresh
-        check = resolve_asset_image_item(original, state, doc)
-        if not valid_target(doc) or check["image_reference_sources"] != sources or prompt_of(doc, nid) != item["image_prompt"]:
-            fail("READBACK_FAILED", "派生图片提示词或实际参考素材回读变化。", key=key)
-        d.require(all(reference_edge(doc, s["node_id"], nid) is not None for s in sources), "派生图片引用连线回读失败")
-        actual_refs = content(doc, nid).get("generation", {}).get("references", [])
-        d.require(all(r in actual_refs for r in selected), "派生图片实际媒体引用回读失败")
-        mapping.update(prompt_hash=digest(item["image_prompt"]), image_input={
-            "status": "ready" if not check["image_reference_pending"] else "pending",
-            "pending": check["image_reference_pending"], "managed_references": copy.deepcopy(selected),
-            "managed_edges": owned_edges})
+        for step in plan["commands"]:
+            if step["name"] == "xyq.role.updateAppearance":
+                fresh = document(cli, state["binding"])
+                if (content(fresh, plan["node_id"]).get("generation", {}) != content(doc, plan["node_id"]).get("generation", {})
+                        or resolve_asset_image_item(original, state, fresh)["image_reference_sources"] != plan["sources"]):
+                    fail("CONCURRENT_EDIT", "派生图片引用写入前配置或参考素材已变化。", key=key)
+                doc = fresh
+            doc = write_verified(project, cli, state, step["name"], step["input"], step["targets"])
+        if resolve_asset_image_item(original, state, doc)["image_reference_sources"] != plan["sources"]:
+            fail("READBACK_FAILED", "派生图片实际参考素材回读变化。", key=key)
+        d.require(all(reference_edge(doc, row["node_id"], plan["node_id"]) is not None for row in plan["sources"]),
+                  "派生图片引用连线回读失败")
+        mapping.update(prompt_hash=digest(prompt_of(doc, plan["node_id"])), image_input=plan["image_input"])
         save(project, state)
     return doc
 
@@ -1366,7 +1422,7 @@ def asset_reconciliation_plan(session, state, doc, decisions=None):
     return plan, conflicts
 
 
-def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, preview=False, context=None):
+def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, preview=False, context=None, batch_mode=False):
     plan, conflicts = asset_reconciliation_plan(session, state, doc, decisions)
     missing = [{"key": item["key"], "name": item["name"], "kind": item["kind"],
                 "previous_node_id": state["mappings"].get(item["key"], {}).get("node_id")}
@@ -1374,12 +1430,19 @@ def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, pre
     summary = {"created": [], "adopted": [], "reused": [], "conflicts": conflicts,
                "missing_asset_count": len(missing), "missing_assets": missing,
                "plan": [{key: item[key] for key in ("key", "name", "kind", "node_id", "resolution")} for item in plan]}
-    if len(missing) > 3:
+    rebuild_limit = MAX_AUTO_REBUILD_ASSETS if batch_mode else 3
+    if len(missing) > rebuild_limit:
         summary["blocked"] = True
         conflicts.append({"reason": "asset_rebuild_limit", "missing_asset_count": len(missing),
                           "missing_assets": missing,
-                          "message": "缺失资产超过3个；已列出全部缺失资产，本次未补建资产或写入视频。"})
+                          "message": f"缺失资产超过{rebuild_limit}个；已列出全部缺失资产，本次未补建资产或写入视频。"})
         return doc, summary
+    if batch_mode and not preview:
+        if conflicts:
+            summary["blocked"] = True
+            return doc, summary
+        from canvas_batch import prepare_assets
+        return prepare_assets(project, cli, session, state, doc, plan, summary)
     state["asset_reconciliation_conflicts"] = copy.deepcopy(conflicts)
     positions = layout_positions(doc, plan)
     image_reference_keys = set()
@@ -1447,10 +1510,62 @@ def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, pre
     return doc, summary
 
 
+def accept_synced_item(project, state, doc, item, pending, context, references_only=False, kind="videos"):
+    """Accept one actually read-back node, shared by serial and batch execution."""
+    key, node_id = item["key"], item["node_id"]
+    mapping = state["mappings"][key]
+    mapping["stage"] = "ready"
+    mapping.pop("initialization_fingerprint", None)
+    mapping.pop("video_initialization_baseline", None)
+    if not references_only:
+        mapping["name"] = item["name"]
+        if item["kind"] == "video":
+            mapping["video_names"] = {field: item["name"] for field in ("name", "caption", "title")}
+    if item["kind"] in ("role", "scene"):
+        mapping["appearance_name"] = ""
+    if "prompt" in item:
+        text_verified = prompt_of(doc, node_id) == item["prompt"]
+        d.require(text_verified, "提示词文字回读尚未通过，不能标记同步完成")
+        references_verified = video_references_satisfied(doc, node_id, item)
+        unit_pending = [row for row in pending if row["key"] in item["reference_keys"] and (not row.get("unit_ids") or key in row["unit_ids"])]
+        unresolved = any(row.get("reason") not in ("missing_image", "missing_video") for row in unit_pending)
+        references_verified = references_verified and not unresolved
+        mapping.update(prompt_hash=digest(item["prompt"]), version=item["version"],
+                       references_requested=item["references_bound"],
+                       references_bound=item["references_bound"] and references_verified)
+        if item["references_bound"] and not references_verified:
+            context["failures"].append({"key": key, "node_id": node_id, "reason": "reference_failed",
+                                        "message": "提示词文字已保存，部分资产节点引用未通过回读。"})
+        if item.get("settings"):
+            mapping["video_settings"] = item["settings"]
+        if not references_only and (not item["references_bound"] or references_verified):
+            state["pending_units"] = [x for x in state["pending_units"] if x != key]
+        elif not references_only:
+            state["pending_units"] = list(dict.fromkeys([*state["pending_units"], key]))
+        for marker_path in ([] if references_only or item["references_bound"] and not references_verified else (Path(project) / "canvas" / "pending-sync").glob("*.json")):
+            marker = d.read_json(marker_path)
+            if marker["units"].get(key, 0) <= item["version"]:
+                marker["units"].pop(key, None)
+                if marker["units"]:
+                    d.write_json(marker_path, marker)
+                else:
+                    marker_path.unlink()
+    save(project, state)
+    complete = mapping.get("references_bound") is True and mapping.get("version") == item.get("version")
+    if kind == "videos" and context.get("progress"):
+        # Only a fully verified node advances the count. Allocation/ACKs,
+        # core-only and partial reference receipts never count as complete.
+        context["progress"]({"stage": "node_verified" if complete else "node_needs_attention",
+                             "current_unit": key, "current_node_id": node_id,
+                             "verified_unit": key if complete else None})
+    return complete
+
+
 def sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview=False, bind_references=False,
-         existing_only=False, references_only=False, session_override=None, progress=None):
+         existing_only=False, references_only=False, session_override=None, progress=None, batch_mode=True):
     """Always leave a batch report, including on a stopped/uncertain CLI write."""
-    context = {"failures": [], "progress": progress}
+    context = {"failures": [], "progress": progress,
+               "batch_mode": batch_mode and callable(getattr(cli, "compile_batch", None))}
     try:
         result = _sync(project, cli, kind, request_id, ids, decisions, preview, bind_references,
                        existing_only, references_only, context, session_override)
@@ -1505,8 +1620,13 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
     if preview:
         state = copy.deepcopy(state)
     context = context if context is not None else {"failures": []}
-    context.update(session=session, state=state, doc=doc, inspect_media=kind != "videos" or references_only)
+    context.update(session=session, state=state, doc=doc,
+                   inspect_media=kind != "videos" or references_only or context.get("batch_mode", False))
     reconcile(project, cli, state, doc, preview=preview, decisions=decisions)
+    if kind == "assets" and context.get("batch_mode") and not preview:
+        from canvas_job_backend import sync_assets
+        return sync_assets(project, cli, session, context.get("progress") or (lambda value: None), decisions,
+                           batch_mode=True, connected=(state, doc))
     asset_summary = None
     if kind == "assets":
         desired, pending = [resolve_asset_image_item(i, state, doc) for i in desired_assets(session)], []
@@ -1514,7 +1634,8 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
         units = selected_units(session, request_id, ids)
         context["units"] = units
         if not existing_only and not references_only:
-            doc, asset_summary = reconcile_asset_nodes(project, cli, session, state, doc, decisions, preview, context)
+            doc, asset_summary = reconcile_asset_nodes(project, cli, session, state, doc, decisions, preview, context,
+                                                       batch_mode=context.get("batch_mode", False))
             context["doc"] = doc
             context["failures"].extend(asset_summary["conflicts"])
             if asset_summary.get("blocked"):
@@ -1534,7 +1655,7 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
         bind_references = bind_references or references_only or any(m.get("image") for m in state["mappings"].values())
         blocked_assets = {item["key"] for item in asset_summary["conflicts"]} if asset_summary else set()
         desired, pending = desired_videos(session, state, doc, units, bind_references, context["failures"], blocked_assets,
-                                          inspect_media=references_only)
+                                          inspect_media=references_only or context.get("batch_mode", False))
         failed_units = {row["key"] for row in context["failures"] if row.get("reason") == "prompt_encoding_failed"}
         if failed_units and not preview:
             state["pending_units"] = list(dict.fromkeys([*state["pending_units"], *sorted(failed_units)]))
@@ -1643,6 +1764,16 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
         checkpoint(project, cli, state, "seedance batch sync")
     created, updated, reused = 0, 0, 0
     reference_completed = set()
+    if kind == "videos" and context.get("batch_mode"):
+        from canvas_batch import sync_videos
+        doc, counts, reference_completed = sync_videos(project, cli, state, doc, plan, pending, context, references_only)
+        context["doc"] = doc
+        consume_image_references(session, state, reference_completed, pending)
+        save(project, state)
+        return {"status": "partial" if context["failures"] else "synced", **counts,
+                "sync_protocol": BATCH_PROTOCOL, "pending_references": pending, "unbound_units": unbound,
+                "skipped": skipped, "binding": state["binding"], "failures": context["failures"],
+                "asset_reconciliation": asset_summary, "video_write_receipts": context.get("video_write_receipts", [])}
     positions = layout_positions(doc, plan)
     for item in plan:
         key, node_id = item["key"], item.get("node_id")
@@ -1744,52 +1875,8 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
             if item.get("image_prompt"):
                 mapping.update(prompt_hash=digest(item["image_prompt"]), asset_contract=ASSET_CONTRACT)
             context["doc"] = doc
-        mapping["stage"] = "ready"
-        mapping.pop("initialization_fingerprint", None)
-        mapping.pop("video_initialization_baseline", None)
-        if not references_only:
-            mapping["name"] = item["name"]
-            if item["kind"] == "video":
-                mapping["video_names"] = {field: item["name"] for field in ("name", "caption", "title")}
-        if item["kind"] in ("role", "scene"):
-            mapping["appearance_name"] = ""
-        if "prompt" in item:
-            text_verified = prompt_of(doc, node_id) == item["prompt"]
-            d.require(text_verified, "提示词文字回读尚未通过，不能标记同步完成")
-            references_verified = video_references_satisfied(doc, node_id, item)
-            unit_pending = [row for row in pending if row["key"] in item["reference_keys"] and (not row.get("unit_ids") or key in row["unit_ids"])]
-            unresolved = any(row.get("reason") not in ("missing_image", "missing_video") for row in unit_pending)
-            references_verified = references_verified and not unresolved
-            mapping.update(prompt_hash=digest(item["prompt"]), version=item["version"],
-                           references_requested=item["references_bound"],
-                           references_bound=item["references_bound"] and references_verified)
-            if item["references_bound"] and not references_verified:
-                context["failures"].append({"key": key, "node_id": node_id, "reason": "reference_failed",
-                                            "message": "提示词文字已保存，部分资产节点引用未通过回读。"})
-            if item["references_bound"] and references_verified:
-                reference_completed.add(key)
-            if item.get("settings"):
-                mapping["video_settings"] = item["settings"]
-            if not references_only and (not item["references_bound"] or references_verified):
-                state["pending_units"] = [x for x in state["pending_units"] if x != key]
-            elif not references_only:
-                state["pending_units"] = list(dict.fromkeys([*state["pending_units"], key]))
-            for marker_path in ([] if references_only or item["references_bound"] and not references_verified else (Path(project) / "canvas" / "pending-sync").glob("*.json")):
-                marker = d.read_json(marker_path)
-                if marker["units"].get(key, 0) <= item["version"]:
-                    marker["units"].pop(key, None)
-                    if marker["units"]:
-                        d.write_json(marker_path, marker)
-                    else:
-                        marker_path.unlink()
-        save(project, state)
-        if kind == "videos" and context.get("progress"):
-            # Only a fully verified node advances the count. Allocation/ACKs,
-            # core-only and partial reference receipts never count as complete.
-            complete = mapping.get("references_bound") is True and mapping.get("version") == item.get("version")
-            context["progress"]({"stage": "node_verified" if complete else "node_needs_attention",
-                                 "current_unit": key, "current_node_id": node_id,
-                                 "verified_unit": key if complete else None})
+        if accept_synced_item(project, state, doc, dict(item, node_id=node_id), pending, context, references_only, kind):
+            reference_completed.add(key)
     context.pop("active", None)
     if kind == "assets":
         doc = sync_asset_image_references(project, cli, session, state, doc, {i["key"] for i in plan})
@@ -1823,6 +1910,8 @@ def pending_asset_settings(state, node_id):
     mapping = next((m for m in state["mappings"].values() if m.get("node_id") == node_id), {})
     if mapping.get("stage") == "ready":
         return []
+    if mapping.get("batch_initialization"):
+        return [asset_settings_target(node_id)]
     for entry in reversed(state["journal"]):
         value = entry.get("input", {})
         if entry.get("command") == "create_biz_node" and value.get("id") == node_id:

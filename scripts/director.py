@@ -342,7 +342,10 @@ def bind(args):
 
 
 def load(project, verify_style=True, verify_ratio=True):
+    from project_paths import state_view, io_path
+    project = io_path(project)
     state = read_json(project / "session.json")
+    state = state_view(project, state)
     require(state.get("schema_version") == 1, "项目状态版本不兼容")
     for label, record in state["files"].items():
         require(Path(record["path"]).is_file() and file_hash(record["path"]) == record["sha256"], f"{label}已变化；请按改稿流程重新绑定")
@@ -365,8 +368,10 @@ def load(project, verify_style=True, verify_ratio=True):
 
 
 def save(project, state):
+    from project_paths import assert_writable, state_view
+    assert_writable(project)
     state["revision"] += 1
-    write_json(project / "session.json", state)
+    write_json(project / "session.json", state_view(project, state, storing=True))
 
 
 def validate_style(style):
@@ -489,6 +494,14 @@ def merged_intervals(intervals):
 
 
 def range_review(state, span, project=None):
+    if project is not None:
+        from project_continuation import deliveries, related
+        local = deliveries(project)
+        siblings = related(project)
+        if local or siblings:
+            state = copy.deepcopy(state)
+            state['ranges'] = ([row for sibling in siblings for row in sibling['ranges']] + state['ranges']
+                               + [{'span': row['span'], 'delivery_mode': 'local_manual_delivery'} for row in local])
     a, b = interval(span, state["length"])
     issues = []
     overlaps = merged_intervals([[max(a, h["span"][0]), min(b, h["span"][1])] for h in state["ranges"]
@@ -1183,6 +1196,13 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
+    if len(sys.argv) > 1 and sys.argv[1] == 'project':
+        import project_bundle
+        try:
+            return project_bundle.main(sys.argv[2:])
+        except (ValueError, OSError, KeyError, project_bundle.zipfile.BadZipFile) as error:
+            print(json.dumps({'status': 'error', 'error': str(error)}, ensure_ascii=False))
+            raise SystemExit(2)
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser('project-init', help='保存本次交付范围；新项目完整资产门槛自动生效')
@@ -1230,6 +1250,9 @@ def main():
             p.add_argument("--request-id", required=True)
     args = parser.parse_args()
     try:
+        if args.command not in ('status', 'intake-status', 'locate', 'range', 'check'):
+            from project_paths import assert_writable
+            assert_writable(args.project)
         if args.command == 'project-init':
             new_contract = not (args.project / 'project-contract.json').exists()
             if new_contract:

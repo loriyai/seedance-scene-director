@@ -15,7 +15,7 @@ REFERENCE = re.compile(r"@\{((?:CHAR|SET|PROP)\d{4,})\}")
 SHOT = re.compile(r"·(\d{2})秒-(\d{2})秒\[镜头(\d+)-([^\[\]]+)\]：（(.+)；转场：([^（）]+)）(.+)音效：(.+)。")
 VOICE = re.compile(
     r"声音\[(L\d{6,}),(\d+(?:\.\d{1,3})?)-(\d+(?:\.\d{1,3})?)\]："
-    r"(@\{CHAR\d{4,}\}|[^@{}（）：“]+?)"
+    r"(@\{CHAR\d{4,}\}(?:、@\{CHAR\d{4,}\})*|[^@{}（）：“]+?)"
     r"(内心想法|画外音|旁白|非人物播报|说)(（[^（）]+）)?：“(.*)”")
 FRAMINGS = ("大远景", "大全景", "远景", "全景", "中景", "中近景", "近景", "特写")
 PROJECTION_FIELDS = (
@@ -161,7 +161,11 @@ def _parse_units(text, state):
             part = {"record": rid, "start": _seconds(start), "end": _seconds(end),
                     "voice": voice, "direction": direction or "", "text": spoken}
             if source.startswith("@{"):
-                part["character_id"] = source[2:-1]
+                ids = [match.group(1) for match in REFERENCE.finditer(source)]
+                if len(ids) == 1:
+                    part["character_id"] = ids[0]
+                else:
+                    part["character_ids"] = ids
             else:
                 part.update(source_kind="non_character", source_label=source)
             unit["shots"][-1]["dialogue_parts"].append(part)
@@ -233,11 +237,14 @@ def _check(units, state):
                     _require(part.get("source_kind") == "non_character" and part.get("source_label") == record["speaker"]
                              and part["voice"] == "非人物播报", f"{key}/{rid}：非人物播报声源与原文不一致")
                 else:
-                    cid = part.get("character_id")
-                    _require(cid in unit["character_ids"] and cid in _scene_characters(scenes[record["scene"]])
-                             and cid in assets and _speaker(assets[cid]) == record["speaker"],
+                    ids = part.get("character_ids", [part.get("character_id")])
+                    _require(isinstance(ids, list) and ids and len(ids) == len(set(ids))
+                             and all(cid in unit["character_ids"]
+                                     and cid in _scene_characters(scenes[record["scene"]])
+                                     and cid in assets for cid in ids)
+                             and "、".join(_speaker(assets[cid]) for cid in ids) == record["speaker"],
                              f"{key}/{rid}：台词说话人与来源台账不一致")
-                    used.append(cid)
+                    used.extend(ids)
                 _require("@" not in part["direction"], f"{key}/{rid}：语气括注只写声音表现，不写资产引用")
                 t0, t1 = Decimal(str(part["start"])), Decimal(str(part["end"]))
                 _require(shot["start"] <= t0 < t1 <= shot["end"], f"{key}/{rid}：声音时码必须完整落在所属镜头内")
@@ -565,7 +572,15 @@ def render_unit(state, unit, reference_text=None):
         visual, sound = shot["text"].rsplit("音效：", 1)
         line = replace(visual)
         for part in shot["dialogue_parts"]:
-            source = part.get("source_label") if part.get("source_kind") == "non_character" else asset(part["character_id"])
+            if part.get("source_kind") == "non_character":
+                source = part["source_label"]
+            elif "character_ids" in part:
+                # Joint speech remains one source event and one verbatim line.
+                # Stable IDs are validated and retained in the character list;
+                # the displayed attribution preserves the original source names.
+                source = "、".join(_speaker(assets[cid]) for cid in part["character_ids"])
+            else:
+                source = asset(part["character_id"])
             line += source + part["voice"] + part["direction"] + '：“' + part["text"] + '”'
         lines.append(line + "音效：" + replace(sound))
     return "\n".join(lines) + "\n"

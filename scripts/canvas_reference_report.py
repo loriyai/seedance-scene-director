@@ -32,7 +32,7 @@ REASONS = {
     "invalid_reuse_decision": "指定复用的节点与资产名称或类型不匹配",
     "reuse_fingerprint_changed": "所选候选节点在确认后发生变化，需要重新核对",
     "asset_create_rejected": "CLI拒绝创建该资产节点",
-    "asset_rebuild_limit": "缺失资产超过3个，本次未补建资产或写入视频",
+    "asset_rebuild_limit": "缺失资产超过本任务的自动补建上限，本次未补建资产或写入视频",
     "prompt_encoding_failed": "提示词节点引用编码失败",
     "prompt_write_rejected": "CLI拒绝写入提示词，已保留原内容",
     "mapped_node_missing": "已绑定的视频节点不存在",

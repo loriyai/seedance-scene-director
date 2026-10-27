@@ -288,6 +288,31 @@ class StoryboardTextTests(unittest.TestCase):
         output = st.render_unit(self.state, renderable(units[0]))
         self.assertIn('说：“等我回来。”', output)
 
+    def test_phrase_boundary_cut_keeps_speech_contiguous_without_semantic_approval(self):
+        state, text = fixture('站在这里等我回来。')
+        text = text.replace('0.2-2.8', '0.2-3').replace('：“站在这里等我回来。”', '：“站在这里”')
+        text += '声音[L000004,3-4.8]：@{CHAR0001}说（压低音量）：“等我回来。”\n'
+        original = copy.deepcopy(state)
+        units = st.parse(text, state)
+        first = units[0]['shots'][0]['dialogue_parts'][0]
+        second = units[0]['shots'][1]['dialogue_parts'][0]
+        self.assertEqual((first['record'], second['record']), ('L000004', 'L000004'))
+        self.assertEqual((first['character_id'], second['character_id']), ('CHAR0001', 'CHAR0001'))
+        self.assertEqual((first['voice'], second['voice']), ('说', '说'))
+        self.assertEqual(first['end'], second['start'])
+        self.assertEqual(first['text'] + second['text'], '站在这里等我回来。')
+        output = st.render_unit(state, renderable(units[0]))
+        self.assertEqual(output.count('说（压低音量）：“站在这里”'), 1)
+        self.assertEqual(output.count('说（压低音量）：“等我回来。”'), 1)
+        self.assertNotIn('声音[', output)
+        report = st.validate(state, units)
+        self.assertEqual(report['semantic_review'], 'not_performed')
+        self.assertEqual(state, original)
+        for invalid in (text.replace('3-4.8', '2.9-4.8'),
+                        text.replace('：“等我回来。”', '：“等我回来！”')):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                st.parse(invalid, state)
+
     def test_split_dialogue_across_units_exact_offsets(self):
         intro, tail = self.text.split('·03秒-05秒', 1)
         intro = intro.replace('L000003-L000005', 'L000003-L000004').replace('·00秒-03秒', '·00秒-04秒').replace('：“别动，等我回来。”', '：“别动，”')

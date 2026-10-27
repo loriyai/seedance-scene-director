@@ -248,11 +248,11 @@ def acknowledge(project, cli, state, command, value, targets, baseline=None):
     c.save(project, state)
 
 
-def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
+def sync_assets(project, cli, session, progress, decisions=None, batch_size=10, batch_mode=False, connected=None):
     d.require(1 <= batch_size <= 50, "分组核对数量须为1至50；这不是服务端并发限制")
     decisions = decisions or {}
     items = asset_items(session)
-    state, doc = c.connected(project, cli)
+    state, doc = connected or c.connected(project, cli)
     items = [c.resolve_asset_image_item(item, state, doc) for item in items]
     # A confirmed canvas node may not yet expose its backing business asset.
     for key, mapping in state["mappings"].items():
@@ -320,10 +320,17 @@ def sync_assets(project, cli, session, progress, decisions=None, batch_size=10):
     c.save(project, state)
     progress({"completed": len(completed), "total": len(items), "node_ids": node_ids})
     if not pending:
-        doc = c.sync_asset_image_references(project, cli, session, state, doc, {i["key"] for i in items})
+        if batch_mode:
+            from canvas_batch import sync_asset_inputs
+            doc = sync_asset_inputs(project, cli, session, state, doc, {i["key"] for i in items}, batch_size)
+        else:
+            doc = c.sync_asset_image_references(project, cli, session, state, doc, {i["key"] for i in items})
         return {"status": "synced", "count": len(items), "created": 0, "reused": len(completed),
                 "image_inputs": c.asset_image_input_status(state, {i["key"] for i in items})}
     c.checkpoint(project, cli, state, "seedance asset job")
+    if batch_mode:
+        from canvas_batch import sync_asset_groups
+        return sync_asset_groups(project, cli, session, state, doc, pending, completed, node_ids, progress, batch_size)
     positions = c.layout_positions(doc, pending)
     created = 0
     for offset in range(0, len(pending), batch_size):
@@ -409,7 +416,8 @@ def run_job(project, manifest, check_control, progress):
     session, options, kind = manifest["session"], manifest["options"], manifest["kind"]
     check_control()
     if kind == "assets":
-        return sync_assets(project, cli, session, progress, options["decisions"])
+        return sync_assets(project, cli, session, progress, options["decisions"],
+                           batch_mode=options.get("sync_protocol") == c.BATCH_PROTOCOL)
     if kind == "images":
         matched = c.media.scan_images(session, Path(options["folder"]))["matched"]
         total = sum(not options["decisions"].get(item["key"], {}).get("skip") for item in matched)
@@ -438,7 +446,7 @@ def run_job(project, manifest, check_control, progress):
     result = c.sync(project, cli, "videos", request_id=options["request_id"], ids=options["ids"],
                     decisions=options["decisions"], existing_only=options["existing_only"],
                     references_only=options["references_only"], bind_references=True, session_override=session,
-                    progress=node_progress)
+                     progress=node_progress, batch_mode=options.get("sync_protocol") == c.BATCH_PROTOCOL)
     progress({"completed": len(verified), "total": len(options["ids"]), "node_ids": verified,
               "stage": "verified" if len(verified) == len(options["ids"]) else "needs_attention"})
     if result.get("status") == "synced" and (len(verified) != len(options["ids"]) or result.get("unbound_units") or result.get("skipped")):

@@ -170,6 +170,20 @@ def input_scope(session, kind, selected_ids):
     return scope
 
 
+def frozen_input_scope(project, session, job):
+    """Keep a frozen job digest while checking relocated inputs by content."""
+    from project_paths import read_metadata, resolve
+    scope = input_scope(session, job['kind'], job['options']['ids'])
+    if read_metadata(project):
+        scope = copy.deepcopy(scope)
+        frozen = job['session']['files']
+        d.require(set(scope['files']) == set(frozen), '任务绑定文件集合已变化')
+        for role, row in scope['files'].items():
+            d.require(resolve(project, frozen[role]['path']) == Path(row['path']).resolve(), '冻结任务位置映射不匹配')
+            row['path'] = frozen[role]['path']
+    return scope
+
+
 def enqueue(project, kind, request_id=None, ids=None, folder=None, decisions=None,
             start=False, existing_only=False, references_only=False):
     project = Path(project).resolve()
@@ -181,6 +195,8 @@ def enqueue(project, kind, request_id=None, ids=None, folder=None, decisions=Non
     selected = [u["id"] for u in c.selected_units(session, request_id, ids)] if kind in ("videos", "references") else []
     options = {"request_id": request_id, "ids": selected, "decisions": decisions or {},
                "existing_only": existing_only or kind == "references", "references_only": references_only or kind == "references"}
+    if kind in ("assets", "videos", "references"):
+        options["sync_protocol"] = c.BATCH_PROTOCOL
     if kind == "images":
         d.require(folder is not None, "上传任务需要明确的图片文件夹")
         options.update(folder=str(Path(folder).resolve()), images=image_inventory(folder))
@@ -225,9 +241,10 @@ def validate_job(project, job):
     d.require(c.digest(payload) == job["manifest_digest"], "任务JSON被修改，请重新提交任务")
     d.require(job.get("asset_contract") == c.ASSET_CONTRACT,
               "任务冻结的画布字段契约与当前版本不同；保留原任务和暂停状态，请核对后重新提交，不执行旧任务。")
+    d.require(job["options"].get("sync_protocol") in (None, c.BATCH_PROTOCOL), "任务冻结的批量协议不受当前版本支持")
     d.require(c.read_state(project).get("binding") == job["binding"], "画布绑定已变化，停止旧任务")
     session = d.load(Path(project))
-    d.require(c.digest(input_scope(session, job["kind"], job["options"]["ids"])) == job["input_digest"],
+    d.require(c.digest(frozen_input_scope(project, session, job)) == job["input_digest"],
               "任务来源、台账、风格或选中分镜已变化，请重新提交")
     if job["kind"] == "images":
         d.require(image_inventory(job["options"]["folder"]) == job["options"]["images"], "待上传图片已变化，请重新提交")
@@ -253,9 +270,10 @@ class JobInputGuard:
         session = self.job["session"]
         paths = [self.project / "session.json", self.project / "video-style.txt"]
         files = session.get("files", {})
-        paths.extend(Path(row["path"]) for row in files.values())
+        from project_paths import resolve
+        paths.extend(resolve(self.project, row['path']) for row in files.values())
         if "source" in files:
-            scenes = Path(files["source"]["path"]).parent / "scenes"
+            scenes = resolve(self.project, files['source']['path']).parent / 'scenes'
             paths.extend([scenes, *scenes.glob("*.txt")])
         if self.job["kind"] == "images":
             folder = Path(self.job["options"]["folder"])
@@ -509,6 +527,8 @@ def monitor_worker(project, worker_pid, run_id):
 
 def start_worker(project):
     project = Path(project).resolve()
+    from project_paths import assert_writable
+    assert_writable(project, cloud=True)
     with metadata_lock(project):
         if read(directory(project) / "control.json", {}).get("paused"):
             return {"status": "paused"}

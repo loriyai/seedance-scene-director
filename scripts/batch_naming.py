@@ -80,7 +80,9 @@ def _lock(scope):
 
 
 def _key(project, request_id):
-    value = json.dumps([os.path.normcase(str(Path(project).resolve())), request_id], ensure_ascii=False)
+    from project_paths import project_id
+    identity = project_id(project) or os.path.normcase(str(Path(project).resolve()))
+    value = json.dumps([identity, request_id], ensure_ascii=False)
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
@@ -142,7 +144,7 @@ def allocate(scope, project, request_id, request_hash):
         key = _key(project, request_id)
         if key in value["entries"]:
             raise ValueError("该请求已登记提交；请重新读取项目状态后按原request_id重试")
-        number = max((item["number"] for item in value["entries"].values()), default=0) + 1
+        number = max([value.get('high_watermark', 0)] + [item['number'] for item in value['entries'].values()]) + 1
         value["entries"][key] = {"number": number, "label": letter(number), "status": "prepared",
                                  "project": str(project), "request_id": request_id, "request_hash": request_hash}
         _write(scope / REGISTRY, value)

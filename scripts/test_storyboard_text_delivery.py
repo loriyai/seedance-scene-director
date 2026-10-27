@@ -19,6 +19,7 @@ from unittest.mock import patch
 import authoring_gates
 import batch_naming
 import canvas
+import canvas_jobs
 import director as d
 import review_gate
 import storyboard_text as core
@@ -74,6 +75,44 @@ class TextDeliveryIntegration(unittest.TestCase):
         self.draft = self.write_draft('draft.txt', self.authored_text())
         self.review = self.project / 'scene-review-fixture.json'
         self.output = self.project / 'outputs' / 'delivery.txt'
+
+    def test_joint_commit_can_freeze_for_existing_background_batch_worker(self):
+        self.script = self.script.replace('陈默：把消息', '陈默、林青：把消息')
+        self.ledger['characters'].append({'id': 'CHAR0002', 'name': '林青-基础形象'})
+        self.ledger['scenes'][0]['character_ids'].append('CHAR0002')
+        (self.project / 'script.txt').write_text(self.script, encoding='utf-8')
+        (self.project / 'scenes/fixture.txt').write_text(self.script, encoding='utf-8')
+        d.write_json(self.project / 'ledger.json', self.ledger)
+        self.state.update(ledger=copy.deepcopy(self.ledger),
+                          drafts={'fixture.txt': d.sha(self.script)})
+        self.state['records'], self.state['length'] = d.build_records(self.script, self.ledger)
+        for key in ('script', 'ledger'):
+            self.state['files'][key]['sha256'] = d.file_hash(self.state['files'][key]['path'])
+        d.write_json(self.project / 'session.json', self.state)
+        authored = self.authored_text()
+        blocks = authored.split('\n\n')
+        for i, block in enumerate(blocks):
+            if '：“把消息发给@群里。”' in block:
+                blocks[i] = block.replace('人物：@{CHAR0001}；', '人物：@{CHAR0001}、@{CHAR0002}；').replace(
+                    ']：@{CHAR0001}说', ']：@{CHAR0001}、@{CHAR0002}说')
+        self.draft.write_text('\n\n'.join(blocks), encoding='utf-8')
+        result = self.commit_fixture(request_id='fictional-joint')
+        self.assertEqual(result['status'], 'committed')
+        rendered = self.output.read_text(encoding='utf-8')
+        self.assertEqual(rendered.count('陈默、林青说：“把消息发给@群里。”'), 1)
+        binding = {'canvas_id': 'fictional-canvas', 'team_id': 'fictional-team',
+                   'account_id': 'fictional-account'}
+        with patch.object(canvas, 'read_state', return_value={'binding': binding}):
+            queued = canvas_jobs.enqueue(self.project, 'videos', request_id='fictional-joint')
+        job = d.read_json(self.project / 'canvas/jobs' / (queued['job_id'] + '.json'))
+        self.assertEqual(job['options']['sync_protocol'], canvas.BATCH_PROTOCOL)
+        self.assertEqual(len(job['options']['ids']), 4)
+        self.assertNotIn('worker', queued)
+        self.assertEqual(job['session']['receipts'][-1]['request_id'], 'fictional-joint')
+        joint = [part for unit in job['session']['units'] for shot in unit['shots']
+                 for part in shot['dialogue_parts'] if 'character_ids' in part]
+        self.assertEqual(len(joint), 1)
+        self.assertEqual(joint[0]['character_ids'], ['CHAR0001', 'CHAR0002'])
 
     def authored_text(self, records=None, label='原作'):
         rows = []

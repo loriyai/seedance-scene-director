@@ -94,12 +94,22 @@ def read_events(project):
         stamp(row['at'])
         if not isinstance(row['event'], str) or not row['event'].strip():
             raise ValueError('事件名称不能为空')
-    return identified(rows)
+    rows = identified(rows)
+    from project_paths import read_metadata, resolve
+    if read_metadata(project):
+        for row in rows:
+            if row.get('artifact'):
+                row['artifact'] = dict(row['artifact'])
+                for key in ('draft', 'output'):
+                    row['artifact'][key] = str(resolve(project, row['artifact'][key]))
+    return rows
 
 
 def record_event(project, name, *, at, scene=None, note=None, activity_id=None,
                  coverage=None, issue_kind=None, artifact=None, producer=None, invalidates=None):
     project = Path(project).resolve()
+    from project_paths import assert_writable
+    assert_writable(project)
     if not (project / 'session.json').is_file():
         raise ValueError('计时必须指向已绑定项目')
     if not isinstance(name, str) or not name.strip():

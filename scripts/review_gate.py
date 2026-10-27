@@ -19,8 +19,11 @@ def digest(value):
 
 
 def context_digest(state):
-    return digest({key: state.get(key) for key in
-                   ('files', 'drafts', 'records', 'ledger', 'style_hash', 'entry', 'units', 'ranges')})
+    from project_paths import semantic_files
+    value = {key: state.get(key) for key in
+             ('files', 'drafts', 'records', 'ledger', 'style_hash', 'entry', 'units', 'ranges')}
+    value.update(files=semantic_files(state), context_policy='content-context-v2')
+    return digest(value)
 
 
 def warning_records(warnings):

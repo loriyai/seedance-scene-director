@@ -11,18 +11,30 @@ import storyboard_text as text_core
 
 
 def context_hash(state, project=None):
+    from project_paths import semantic_files
     data = {key: state.get(key) for key in
             ('files', 'records', 'ledger', 'style_hash', 'units', 'entry')}
+    data['files'] = semantic_files(state)
+    data['context_policy'] = 'content-context-v2'
     required = ('references/storyboard-rules.md', 'references/storyboard-text-format.md',
                 'scripts/storyboard_text.py', 'scripts/storyboard_text_delivery.py',
                  'scripts/storyboard_context.py', 'scripts/segment_naming.py',
-                 'scripts/script_partition.py', 'scripts/video_settings.py')
+                 'scripts/script_partition.py', 'scripts/video_settings.py',
+                 'scripts/project_paths.py', 'scripts/project_continuation.py',
+                 'references/storyboard-workflow.md')
     data['text_rules'] = {name: d.file_hash(d.ROOT / name) for name in required}
     if project is not None:
         from video_settings import get_ratio
         from script_partition import load_plan
         data['video_ratio'] = get_ratio(project, state)
         data['partition_plan'] = load_plan(project, state)
+        from project_continuation import deliveries, related, sha
+        from project_paths import resolve
+        data['local_history'] = [{'segment': r['segment'], 'span': r['span'],
+            'draft': sha(resolve(project, r['draft'])), 'actual': sha(resolve(project, r['actual'])),
+            'review': sha(resolve(project, r['review']))} for r in deliveries(project)]
+        data['related_history'] = [{'session_sha256': r['sha256'], 'ranges': r['ranges'],
+                                  'outputs': [s['output_sha256'] for s in r['receipts']]} for r in related(project)]
     return d.sha(d.packed(data))
 
 
@@ -87,6 +99,14 @@ def scene_context(project, scene_id, span=None):
     script = Path(state['files']['script']['path']).read_text(encoding='utf-8-sig')
     lines = script.splitlines()
     first, last = selected[0]['line'], selected[-1]['line']
+    from project_continuation import deliveries
+    local = deliveries(project)
+    local_neighbours = []
+    for row in local:
+        if row['span'][1] == start or row['span'][0] == end:
+            from project_paths import resolve
+            local_neighbours.append({'delivery_mode': row['delivery_mode'], 'span': row['span'],
+                'segment': row['segment'], 'actual_text': resolve(project, row['actual']).read_text(encoding='utf-8-sig')})
     return {
         'policy': 'scene-text-v1', 'scene': copy.deepcopy(scene),
         'span': selected_span, 'full_scene_span': full_span,
@@ -96,7 +116,7 @@ def scene_context(project, scene_id, span=None):
         'video_ratio': get_ratio(project, state),
         'versions': {'session_revision': state['revision'], 'files': copy.deepcopy(state['files']),
                      'style_sha256': state['style_hash'], 'context_sha256': context_hash(state, project)},
-        'neighbours': neighbours, 'semantic_review': 'not_performed',
+        'neighbours': neighbours, 'local_neighbours': local_neighbours, 'semantic_review': 'not_performed',
         'limits': '仅派生本场资料；局部范围的完整记录及source_lines提供阅读上下文，不扩大span。'
                   '外观设计不代表当前剧情状态；未交付的前场末态须由写者另行提供，程序不推断接触、持物或通路。',
     }

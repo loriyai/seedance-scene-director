@@ -7,7 +7,7 @@ const vm = require("vm");
 
 const source = fs.readFileSync(path.join(__dirname, "ensure-cli.js"), "utf8");
 const requiredSemantic = [
-  "get_snapshot", "get_permissions", "create_biz_node", "create_edge", "update_node_data", "update_asset", "delete_nodes", "delete_edges",
+  "get_snapshot", "get_permissions", "apply_mutations", "create_biz_node", "create_edge", "update_node_data", "update_asset", "delete_nodes", "delete_edges",
   "xyq.generation.update_prompt", "xyq.role.updateDescription",
   "xyq.scene.updateDescription", "xyq.role.updateAppearance",
 ];
@@ -74,7 +74,7 @@ runCase("complete canvas command catalog", () => {
   const normal = fixture(requiredSemantic);
   assert.strictEqual(normal.ensureCLI({ canvas: true }).cli_path, cliPath);
   const probes = normal.calls.filter((call) => call.args.includes("--help")).map((call) => call.args.slice(0, -1).join(" "));
-  assert.deepStrictEqual(probes, ["status", "login", "canvas get", "canvas allocate", "canvas upload", "space list"]);
+  assert.deepStrictEqual(probes, ["status", "login", "canvas get", "canvas allocate", "canvas apply", "canvas upload", "space list"]);
   assert(!normal.calls.some((call) => call.args.includes("install")));
 });
 

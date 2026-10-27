@@ -11,6 +11,7 @@
 | 原文交互转物理约束、作者字段职责、共享继承及实际编译语义 | [图片设计](asset-image-design.md) |
 | 阶段顺序、证据验收、过程问题性质和计量起止/类别 | [资产主流程](asset-workflow.md)的对应章节 |
 | 新项目/绑定项目状态入口及命令路由 | [后台接口](runtime.md) |
+| 已绑定分镜项目导出、导入、位置映射、关联历史和检查点恢复 | [项目迁移](project-portability.md)；`project_bundle.py`、`project_paths.py`、`project_continuation.py` |
 | 原剧本按人数拆分、合法切点、字数和精确范围映射 | [剧本分工与范围映射](script-partition.md)、`scripts/script_partition.py` |
 | 分段轮次、段内序号及稳定分镜显示名称 | [交付版式](storyboard-rules.md#交付版式)、`scripts/segment_naming.py`与文本交付入口 |
 | 新文字分镜的创作、流程和语法 | 下述三份分镜权威资料 |

@@ -31,6 +31,8 @@ python <skill>/scripts/director.py range --project <project> --start <起点整�
 
 ## 恢复与画布
 
+跨电脑交接、导入已上传项目包和本机路径重定位统一使用[项目迁移](project-portability.md)中的`director.py project`接口。恢复后先读取`project resume`；绑定内容未变的位置迁移不走原位rebind，不手改会话、原审摘要或批次编号。
+
 先按项目文件选择入口。已有`session.json`的绑定项目运行`director.py status`；尚未bind的新项目先用`intake-status`核对风格和比例，再读取`project-contract.json`、已保存来源/阶段产物及`pipeline_metrics.py status --project <project>`，不能把缺少session当作损坏或因此重复初始化。status的session/recovery接口不承担未绑定项目的阶段诊断。workflow-settings.json只记录新入口版本，不迁移旧项目；分工计划与视频比例均由各自保存接口维护，不能手改session中的摘要或编号。
 
 绑定项目以`status.recovery`中的session前台阶段、当前输入对应队列及提交记录为准；`intake-state.json`仅是历史快照，不用其旧计数、next_step或失败描述决定续接。查询只读、不连接云端、不改变phase、不解除暂停。phase只表前台位置，不代表外部授权；后台worker状态独立，已排队或单步ACK不计完整节点完成，完成事件不覆盖正在创作的phase。
