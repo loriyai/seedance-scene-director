@@ -111,7 +111,7 @@ scenes按草稿实际场景顺序完整列出。报告不含逐镜passed、字�
 
 commit使用现有session保存稳定ID、展示名、范围、版本和receipt，正文仍是唯一作者源。有已确认拆分方案时使用`partition-round-v1`分段编号，并冻结计划身份、分段代号、轮次、轮内序号和场内序号；跨分段请求逐段编号，任何单元跨段即报错。preview只展示预计编号，不消费编号；commit在锁内重新核对会话版本后保存。局部续写沿当前轮累计，完整重做新开一轮，旧单元和节点保留；局部修订与同request_id重试继承原身份。没有拆分方案时继续使用共享批次分配器。导出失败用render重建。正式输出必须是新路径，不能覆盖输入/审阅、来源、风格、比例、session或Skill文件，也不放项目内部scenes/canvas状态目录。主代理单写，预览可由写者写其草稿目录。
 
-文字commit不自动排队Canvas。已明确授权的节点任务按[画布流程](canvas-workflow.md)使用支持文本回执的适配入口。旧receipt继续 `director.py render --project <project> --request-id <旧ID>`；混合项目不要用旧director check/commit提交文字单元。
+文字commit完成且同步状态为`authorized`时，按[画布流程](canvas-workflow.md)将该段视频回执加入后台队列；入队成功后立即继续下一段本地分镜，不等待云端同步完成。同步状态为`disabled`时不提交Canvas任务。入队失败、明确拒绝或结果未知时保存失败事件并提示用户，本地分镜继续；节点重建、跳过和未知写入沿[后台队列](canvas-jobs.md)规则执行。旧receipt继续 `director.py render --project <project> --request-id <旧ID>`；混合项目不要用旧director check/commit提交文字单元。
 
 ## 事件计时
 
