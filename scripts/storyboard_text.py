@@ -18,6 +18,8 @@ VOICE = re.compile(
     r"(@\{CHAR\d{4,}\}(?:、@\{CHAR\d{4,}\})*|[^@{}（）：“]+?)"
     r"(内心想法|画外音|旁白|非人物播报|说)(（[^（）]+）)?：“(.*)”")
 FRAMINGS = ("大远景", "大全景", "远景", "全景", "中景", "中近景", "近景", "特写")
+LIGHTING_FIELDS = ("主光", "辅光", "侧逆轮廓光", "环境遮蔽", "色彩溢出", "连续性")
+LIGHTING_FIELD_RE = re.compile("|".join(re.escape(field) for field in LIGHTING_FIELDS) + r"\s*[：:]")
 PROJECTION_FIELDS = (
     "output_format", "draft_key", "author_key", "main_scene", "source_records", "span",
     "duration", "character_ids", "scene_ids", "prop_ids", "asset_ids", "set_ids",
@@ -60,6 +62,24 @@ def _listed_refs(text, prefix, context):
         ids.append(match.group(1))
     _require(len(ids) == len(set(ids)), f"{context}：名单重复")
     return ids
+
+
+def _lighting_error(text):
+    """Return a mechanical error for the required six-part lighting clause."""
+    header = re.search(r"光照\s*[：:]", text)
+    if header is None:
+        return "每镜须包含光照：主光、辅光、侧逆轮廓光、环境遮蔽、色彩溢出、连续性"
+    tail = text[header.end():]
+    markers = list(LIGHTING_FIELD_RE.finditer(tail))
+    names = [match.group(0).split("：", 1)[0].split(":", 1)[0].strip() for match in markers]
+    if names != list(LIGHTING_FIELDS):
+        return "光照字段须按主光、辅光、侧逆轮廓光、环境遮蔽、色彩溢出、连续性顺序各出现一次"
+    for index, marker in enumerate(markers):
+        end = markers[index + 1].start() if index + 1 < len(markers) else len(tail)
+        value = tail[marker.end():end].strip(" \t；;，,。")
+        if not value:
+            return f"光照字段{LIGHTING_FIELDS[index]}不可为空"
+    return None
 
 
 def _context(state):
@@ -148,6 +168,8 @@ def _parse_units(text, state):
             _require(framing is not None, f"{context}：景别须绑定主体并采用规定景别名称")
             _require(_refs(focal, context), f"{context}：景别主体须使用稳定资产引用")
             _require(all(s.strip() for s in (label, focal, transition, body, sound)), f"{context}：镜头字段不可为空")
+            lighting_error = _lighting_error(body)
+            _require(lighting_error is None, f"{context}：{lighting_error}")
             _require("：“" not in line, f"{context}：台词只写在声音来源行，不可直接重复写入镜头正文")
             _require(line.count("音效：") == 1, f"{context}：每镜只能有一个末尾音效字段")
             unit["shots"].append({"start": int(start), "end": int(end), "text": line,

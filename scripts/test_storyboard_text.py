@@ -28,9 +28,9 @@ def fixture(dialogue='别动，等我回来。', voice='说'):
 人物：@{{CHAR0001}}；
 场景：@{{SET0001}}；时间：白天；天气：未明示；
 人物站位：@{{CHAR0001}}站在门边朝向窗外。
-·00秒-03秒[镜头1-交代]：（@{{CHAR0001}}的中景；转场：硬切）镜头向右平移，人物居左，门框在后景，人物与门框清晰，窗外柔光；@{{CHAR0001}}停在门边。音效：无。
+·00秒-03秒[镜头1-交代]：（@{{CHAR0001}}的中景；转场：硬切）机位向右平移，保持人物左前方平视，广角保留门框与窗边纵深，人物居左，门框在后景，人物与门框清晰，光照：主光：左前方冷白窗光，偏硬，照亮左脸并在右颊形成窄阴影；辅光：地面灰蓝反射，低强度，保留眼窝暗部；侧逆轮廓光：右后方微弱冷光，勾勒发丝和肩线；环境遮蔽：门槛与衣袖接触处保留柔和阴影；色彩溢出：窗外冷蓝落在门框边缘，无明显彩色光斑；连续性：本镜建立场景基线；镜头向右平移，@{{CHAR0001}}停在门边。音效：无。
 声音[L000004,0.2-2.8]：@{{CHAR0001}}{voice}（压低音量）：“{dialogue}”
-·03秒-05秒[镜头2-等待]：（@{{CHAR0001}}的近景；转场：硬切）侧后方固定机位保留视线方向，肩部在前景，窗框清晰，沿用窗外柔光；@{{CHAR0001}}看向窗外。音效：无。
+·03秒-05秒[镜头2-等待]：（@{{CHAR0001}}的近景；转场：硬切）侧后方平视固定机位保持视线关系，中长焦轻微压缩肩部与窗框距离，肩部在前景、窗框在后景，窗框略柔而可辨，光照：主光：沿用左前方冷白窗光，照亮脸部左侧并保持右颊阴影；辅光：沿用低强度灰蓝地面反射，暗部不抬平；侧逆轮廓光：沿用右后方微弱冷光，保持发丝边缘；环境遮蔽：沿用门槛与衣袖接触阴影；色彩溢出：沿用窗框边缘冷蓝反射，无新增色源；连续性：沿用上一镜光照基线；@{{CHAR0001}}看向窗外。音效：无。
 '''
     return state, text
 
@@ -70,6 +70,16 @@ class StoryboardTextTests(unittest.TestCase):
         self.assertEqual((report['unit_count'], report['shot_count'], report['total_duration']), (1, 2, 5))
         self.assertEqual(report['semantic_review'], 'not_performed')
         self.assertEqual(self.state, original)
+
+    def test_each_shot_requires_ordered_six_part_lighting_clause(self):
+        valid = st.parse(self.text, self.state)
+        self.assertEqual(len(valid[0]['shots']), 2)
+        bad_order = self.text.replace('光照：主光：', '光照：辅光：', 1)
+        with self.assertRaisesRegex(ValueError, '光照字段须按'):
+            st.parse(bad_order, self.state)
+        missing = self.text.replace('环境遮蔽：门槛与衣袖接触处保留柔和阴影；', '', 1)
+        with self.assertRaisesRegex(ValueError, '光照字段须按'):
+            st.parse(missing, self.state)
 
     def test_render_keeps_product_layout_and_strips_author_markers(self):
         unit = renderable(st.parse(self.text, self.state)[0])
@@ -246,7 +256,7 @@ class StoryboardTextTests(unittest.TestCase):
     def test_historical_structural_parse_retains_every_camera_wording_and_duration(self):
         for wording, label in (('固定机位', 'fixed'), ('镜头向右平移', 'moving'), ('窗框清晰', 'unknown')):
             with self.subTest(wording=wording):
-                draft = self.action_draft([1, 2, 3, 4, 5, 6]).replace('镜头向右平移', wording)
+                draft = self.action_draft([1, 2, 3, 4, 5, 6]).replace('机位向右平移', wording)
                 units = st.parse(draft, self.state)
                 stats = st.validate(self.state, units)['observations']['camera_wording']
                 self.assertEqual(stats['basis'], 'lexical_leading_camera_clause_only')
@@ -320,7 +330,7 @@ class StoryboardTextTests(unittest.TestCase):
 人物：@{CHAR0001}；
 场景：@{SET0001}；时间：白天；天气：未明示；
 人物站位：@{CHAR0001}仍站在门边。
-·00秒-04秒[镜头1-等待]：（@{CHAR0001}的中景；转场：硬切）向窗边平移并停在肩后，窗框在后景，窗框清晰，柔光；@{CHAR0001}看向窗外。音效：无。
+·00秒-04秒[镜头1-等待]：（@{CHAR0001}的中景；转场：硬切）向窗边平移并停在肩后，窗框在后景，窗框清晰，光照：主光：左前方冷白窗光，偏软，照亮肩后空间；辅光：地面灰蓝反射，低强度，保留窗框暗部；侧逆轮廓光：右后方微弱冷光，勾勒肩线；环境遮蔽：肩部与窗框接触区域保留柔和阴影；色彩溢出：窗外冷蓝落在窗框边缘，无明显彩色光斑；连续性：建立本单元光照基线；@{CHAR0001}看向窗外。音效：无。
 声音[L000004,0.1-3.8]：@{CHAR0001}说：“等我回来。”
 '''
         units = st.parse(intro + second, self.state)
@@ -365,9 +375,9 @@ class StoryboardTextTests(unittest.TestCase):
 人物：@{CHAR0001}；
 场景：@{SET0001}；时间：白天；天气：未明示；
 人物站位：@{CHAR0001}站在门边。
-·00秒-06秒[镜头1-开始]：（@{CHAR0001}的中景；转场：硬切）向门边推近，人物居左，门边清晰，柔光；@{CHAR0001}从门侧转身。音效：无。
-·06秒-12秒[镜头2-接续]：（@{CHAR0001}的中景；转场：硬切）沿人物方向跟移，人物居左，门边清晰，柔光；@{CHAR0001}接续转身。音效：无。
-·12秒-16秒[镜头3-临界]：（@{CHAR0001}的中景；转场：硬切）向肩后移动，人物居左，门边清晰，柔光；@{CHAR0001}继续原动作。音效：无。
+·00秒-06秒[镜头1-开始]：（@{CHAR0001}的中景；转场：硬切）向门边推近，人物居左，门边清晰，光照：主光：左前方暖白室内光，偏软，照亮人物正面；辅光：地面反射低强度补足衣襟暗部；侧逆轮廓光：右后方微弱暖光勾勒肩线；环境遮蔽：门槛与鞋底接触处保留柔和阴影；色彩溢出：门边木色轻微反射到衣袖，无明显彩色光斑；连续性：本镜建立室内光照基线；@{CHAR0001}从门侧转身。音效：无。
+·06秒-12秒[镜头2-接续]：（@{CHAR0001}的中景；转场：硬切）沿人物方向跟移，人物居左，门边清晰，光照：主光：沿用左前方暖白室内光，保持正面受光；辅光：沿用低强度地面反射，保留衣襟暗部；侧逆轮廓光：沿用右后方暖光，保持肩线；环境遮蔽：沿用门槛与鞋底接触阴影；色彩溢出：沿用门边木色反射，无新增色源；连续性：沿用上一镜光照基线；@{CHAR0001}接续转身。音效：无。
+·12秒-16秒[镜头3-临界]：（@{CHAR0001}的中景；转场：硬切）向肩后移动，人物居左，门边清晰，光照：主光：随相机向肩后移动仍来自左前方，人物右脸阴影加深；辅光：沿用地面低强度反射，暗部保持可读；侧逆轮廓光：右后方暖光勾勒发丝与肩线；环境遮蔽：肩部与门边接触区域保留柔和阴影；色彩溢出：门边木色仅落在近侧衣袖；连续性：相机改变观察侧但未改变光源方向；@{CHAR0001}继续原动作。音效：无。
 '''
         second = text.replace('/ u01 /', '/ u02 /').replace('从门侧转身', '接续上一单元的转身').replace('继续原动作', '完成原动作')
         units = st.parse(text + second, self.state)
