@@ -64,72 +64,85 @@ class PartitionTests(unittest.TestCase):
                                 for key, filename in [('source', 'source.json'), ('script', 'script.txt'), ('review', 'review.json')]}}
         return self.state
 
-    def test_scene_plan_covers_source_counts_original_punctuation(self):
+    def local_review(self, state, participants, rows):
+        review_data = partition.boundary_template(state, participants)
+        review_data['boundaries'] = rows
+        return review_data
+
+    def boundary(self, state, offset, target_index, side, participants):
+        paragraphs, starts, text = partition.source_data(state)
+        mapped = partition.exact_source_map(state)
+        source_position = partition.position_for(mapped[offset], paragraphs, starts)
+        raw_offset = partition.source_offset(source_position, paragraphs, starts)
+        total = sum(not char.isspace() for char in text)
+        target = partition.target_counts(total, participants)[target_index - 1]
+        return {'target_index': target_index, 'offset': offset,
+                'source_position': source_position, 'side': side,
+                'distance': abs(sum(not char.isspace() for char in text[:raw_offset]) - target), 'safe': True,
+                'reason': '目标点附近当前事件已经完成，下一内容可以独立开始。'}
+
+    def test_count_plan_covers_source_counts_original_punctuation(self):
         state = self.fixture([['阿明站起。'], ['阿明坐下。'], ['阿明伸手。'], ['阿明收手。']])
-        proposal = partition.build_plan(state, 2, 'scene')
+        review_data = self.local_review(state, 2, [self.boundary(state, 8, 1, 'before', 2)])
+        proposal = partition.build_plan(state, 2, review=review_data)
         self.assertEqual([s['word_count'] for s in proposal['segments']], [10, 10])
         self.assertEqual(proposal['total_count'], 20)
         self.assertEqual([s['span'] for s in proposal['segments']], [[0, 8], [8, 16]])
+        self.assertEqual(proposal['mode'], 'count')
+        self.assertEqual(proposal['selected_boundaries'][0]['target_index'], 1)
         plan = partition.save_plan(self.project, state, proposal)
         self.assertEqual(partition.load_plan(self.project, state), plan)
         self.assertEqual(partition.resolve_segment(self.project, state, [1, 7])['label'], 'A')
         self.assertIsNone(partition.resolve_segment(self.project, state, [7, 9]))
         self.assertEqual(partition.resolve_segment(self.project, state, 'B分段')['span'], [8, 16])
 
-    def test_scene_gap_threshold_and_confirmation_are_exact_and_idempotent(self):
-        state = self.fixture([['甲' * 2001 + '。'], ['乙。']])
-        proposal = partition.build_plan(state, 2, 'scene')
-        self.assertEqual(proposal['difference'], 2000)
-        self.assertEqual(proposal['status'], 'confirmed')
-        state = self.fixture([['甲' * 2002 + '。'], ['乙。']])
-        proposal = partition.build_plan(state, 2, 'scene')
-        plan = partition.save_plan(self.project, state, proposal)
-        self.assertEqual(plan['status'], 'needs_confirmation')
-        with self.assertRaisesRegex(ValueError, '尚未'):
-            partition.resolve_segment(self.project, state, 'A')
-        with self.assertRaisesRegex(ValueError, '过期'):
-            partition.confirm_plan(self.project, state, 'wrong')
-        confirmed = partition.confirm_plan(self.project, state, plan['proposal_hash'])
-        self.assertEqual(confirmed, partition.confirm_plan(self.project, state, plan['proposal_hash']))
-        self.assertEqual(confirmed, partition.save_plan(self.project, state, proposal))
+    def test_count_plan_selects_global_candidate_combination(self):
+        state = self.fixture([['甲' * 5 + '。', '乙' * 5 + '。', '丙' * 5 + '。', '丁' * 5 + '。', '戊' * 5 + '。']])
+        review_data = self.local_review(state, 3, [
+            self.boundary(state, 5, 1, 'before', 3), self.boundary(state, 10, 1, 'after', 3),
+            self.boundary(state, 15, 2, 'before', 3), self.boundary(state, 20, 2, 'after', 3)])
+        proposal = partition.build_plan(state, 3, review=review_data)
+        self.assertEqual(proposal['mode'], 'count')
+        self.assertEqual(len(proposal['segments']), 3)
+        self.assertEqual([row['target_index'] for row in proposal['selected_boundaries']], [1, 2])
 
-    def test_balanced_requires_reviewed_exact_boundary_and_keeps_dialogue_whole(self):
+    def test_local_boundary_review_is_exact_and_keeps_dialogue_whole(self):
         state = self.fixture([['阿明站起。', '阿明：我已经知道了。', '阿明走开。']])
-        review_data = partition.boundary_template(state)
-        review_data['boundaries'] = [{'offset': 4, 'source_position': [2, 0], 'safe': True,
-                                     'reason': '站起已结束，后续发言可以另起单元。'},
-                                    {'offset': 10, 'source_position': [3, 0], 'safe': True,
-                                     'reason': '发言完整结束，无急促回应依赖。'}]
-        proposal = partition.build_plan(state, 2, 'balanced', review_data)
+        review_data = self.local_review(state, 2, [self.boundary(state, 4, 1, 'before', 2),
+                                                    self.boundary(state, 10, 1, 'after', 2)])
+        proposal = partition.build_plan(state, 2, review=review_data)
         self.assertEqual(len(proposal['segments']), 2)
         bad = copy.deepcopy(review_data)
         bad['boundaries'][0]['source_position'] = [1, 1]
         with self.assertRaisesRegex(ValueError, '精确对应'):
-            partition.build_plan(state, 2, 'balanced', bad)
+            partition.build_plan(state, 2, review=bad)
         bad = copy.deepcopy(review_data)
         bad['boundaries'] = [{'offset': 6, 'source_position': [2, 5], 'safe': True, 'reason': '错误样本'}]
-        with self.assertRaisesRegex(ValueError, '台词'):
-            partition.build_plan(state, 2, 'balanced', bad)
+        with self.assertRaisesRegex(ValueError, '对白或动作'):
+            partition.build_plan(state, 2, review=bad)
         bad = copy.deepcopy(review_data)
         bad['boundaries'][0]['safe'] = False
-        with self.assertRaisesRegex(ValueError, '实读'):
-            partition.build_plan(state, 2, 'balanced', bad)
+        with self.assertRaisesRegex(ValueError, '连续性理由'):
+            partition.build_plan(state, 2, review=bad)
 
     def test_participant_limits_one_person_and_labels(self):
         state = self.fixture([['阿明站起。'], ['阿明坐下。']])
         for count in (0, -1, True, 2.5, 3):
             with self.assertRaises(ValueError):
-                partition.build_plan(state, count, 'scene')
-        self.assertEqual(partition.build_plan(state, 1, 'balanced')['segments'][0]['span'], [0, 8])
+                partition.build_plan(state, count)
+        self.assertEqual(partition.build_plan(state, 1)['segments'][0]['span'], [0, 8])
         self.assertEqual([partition.label_for(n) for n in (1, 26, 27, 28)], ['A', 'Z', 'AA', 'AB'])
 
     def test_stale_source_and_changed_plan_after_generation_rejected(self):
         state = self.fixture([['阿明站起。'], ['阿明坐下。'], ['阿明走开。']])
-        plan = partition.save_plan(self.project, state, partition.build_plan(state, 2, 'scene'))
+        review_data = self.local_review(state, 2, [self.boundary(state, 4, 1, 'before', 2)])
+        plan = partition.save_plan(self.project, state, partition.build_plan(state, 2, review=review_data))
         state['units'] = [{'id': 'existing'}]
-        self.assertEqual(plan, partition.save_plan(self.project, state, partition.build_plan(state, 2, 'scene')))
+        self.assertEqual(plan, partition.save_plan(self.project, state, partition.build_plan(state, 2, review=review_data)))
         with self.assertRaisesRegex(ValueError, '已有分镜'):
-            partition.save_plan(self.project, state, partition.build_plan(state, 3, 'scene'))
+            review_data3 = self.local_review(state, 3, [self.boundary(state, 4, 1, 'before', 3),
+                                                        self.boundary(state, 8, 2, 'before', 3)])
+            partition.save_plan(self.project, state, partition.build_plan(state, 3, review=review_data3))
         with (self.project / 'script.txt').open('a', encoding='utf-8') as stream:
             stream.write('变更')
         with self.assertRaisesRegex(ValueError, '已变化'):
@@ -175,9 +188,9 @@ class PartitionTests(unittest.TestCase):
         import director
         cases = [
             ('转场 阿明：我知道。', '阿明：我知道。'),
-            ('转场 OS 阿明：“我知道。”', '阿明(内心OS)：我知道。'),
-            ('转场 OS “我知道。”', '阿明(内心OS)：我知道。'),
-            ('遮挡转场 阿明 O.S.：我知道。', '阿明(内心OS)：我知道。'),
+            ('转场 OS 阿明：“我知道。”', '阿明(内心想法os)：我知道。'),
+            ('转场 OS “我知道。”', '阿明(内心想法os)：我知道。'),
+            ('遮挡转场 阿明 O.S.：我知道。', '阿明(内心想法os)：我知道。'),
             ('转场 阿明走过来。', '△ 转场 阿明走过来。'),
         ]
         for original, body in cases:
@@ -198,7 +211,7 @@ class PartitionTests(unittest.TestCase):
                          'files': {key: {'path': str(path), 'sha256': partition.file_digest(path)}
                                    for key, path in [('source', fixture.source), ('script', fixture.path),
                                                      ('review', fixture.work / 'review.json')]}}
-                plan = partition.build_plan(state, 1, 'scene')
+                plan = partition.build_plan(state, 1)
                 self.assertEqual(plan['segments'][0]['span'], [0, length])
                 self.assertEqual(plan['total_count'], sum(not c.isspace() for c in original))
                 mapped = partition.exact_source_map(state)

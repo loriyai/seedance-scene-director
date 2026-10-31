@@ -115,16 +115,21 @@ class StandardizerAuditRepairs(unittest.TestCase):
 
     def test_explicit_parenthetical_dialogue_preserves_cues_and_speaker(self):
         for source, body in [
-            ('阿明（低声，语气平静）：我知道。', '阿明(低声，语气平静)：我知道。'),
-            ('阿明 (低声): 我知道。', '阿明（低声）：我知道。'),
-            ('阿明（内心想法）：我知道。', '阿明(OS)：我知道。'),
-            ('阿红（轻声）：「走吧。」', '阿红(轻声)：走吧。'),
+            ('阿明（低声，语气平静）：我知道。', '阿明（低声，语气平静）：我知道。'),
+            ('阿明（顿了顿）：我知道。', '阿明（顿了顿）：我知道。'),
+            ('阿红（笑）：走吧。', '阿红（笑）：走吧。'),
+            ('阿明（内心想法）：我知道。', '阿明(内心想法os)：我知道。'),
+            ('阿红（轻声）：「走吧。」', '阿红（轻声）：走吧。'),
         ]:
             with self.subTest(source=source):
                 report = self.review_fixture(source, body)
                 self.assertEqual(report['status'], 'passed', report)
                 self.assertEqual(report['counts']['missing'], 0)
                 self.assertEqual(report['counts']['extra'], 0)
+
+        report = self.review_fixture('阿明（低声）：我知道。', '阿明(低声)：我知道。')
+        self.assertEqual(report['status'], 'needs_review')
+        self.assertIn('括号提示', report['scenes'][0]['coverage_missing'][0]['issue'])
 
     def test_dropping_or_changing_parenthetical_cue_is_still_missing_content(self):
         for body in ('阿明：我知道。', '阿明(高声)：我知道。', '阿明(低声)：我知道。'):
@@ -145,10 +150,10 @@ class StandardizerAuditRepairs(unittest.TestCase):
         self.assertEqual(report['status'], 'needs_review')
 
     def test_parenthetical_change_invalidates_previous_review(self):
-        report = self.review_fixture('阿明（低声）：我知道。', '阿明(低声)：我知道。')
+        report = self.review_fixture('阿明（低声）：我知道。', '阿明（低声）：我知道。')
         self.assertEqual(report['status'], 'passed')
         draft = self.work / 'scenes/scene_001_0001-0001.txt'
-        draft.write_text(draft.read_text(encoding='utf-8').replace('(低声)', ''), encoding='utf-8')
+        draft.write_text(draft.read_text(encoding='utf-8').replace('（低声）', ''), encoding='utf-8')
         rechecked = review.make_report(self.work, {}, report)
         self.assertEqual(rechecked['status'], 'needs_review')
         self.assertEqual(rechecked['counts']['reused_scenes'], 0)

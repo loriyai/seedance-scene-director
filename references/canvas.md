@@ -51,8 +51,8 @@ CLI的原生查询、分配、上传与语义查询、创建、编辑、删除�
 
 ```text
 python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind assets --start [--decisions <选择.json>]
-python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind videos --request-id <本批提交ID> --start [--decisions <选择.json>]
-python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind videos --ids 场景1-分镜1 场景1-分镜2 --start
+python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind videos --request-id <当前分段提交ID> --start [--decisions <选择.json>]
+python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind videos --ids <当前分段的分镜ID…> --start
 ```
 
 `assets`后台任务冻结session绑定台账，创建role/scene/image业务节点并写入完整image_prompt；各节点按本节字段契约写入generation.prompt，描述不作为提示词验收。只有最终字段与ID映射全部核验才算完成。仅需图片的角色使用台账完整name；visual_mode为prompt_only的群像不建节点、不匹配上传图片、不列为缺图，场景使用scene_assets[].name及SET ID，每个SET仅一个节点（包括有证据的时间版本和布置版本），SC heading不参与资产建节点，道具使用主name；角色/场景同时设置节点显示名和basicInfo.name，basicInfo.appearanceName为空。视频普通业务节点的name/title/caption逐字使用对应已提交单元display_name，例如 `A01-场景3-分镜2`；无新名称的旧单元继续使用原ID，不附加时长、镜头标签或布景名称。完整提示词直接由当前有效单元按其输出版本渲染写入generation.prompt，保留固定抬头、视频风格、换行和人物/场景前缀；不调用生成命令。
@@ -177,7 +177,7 @@ python <skill>/scripts/canvas.py delete --project <project> --request <删除.js
 
 ## 局部修改同步与结果
 
-director.commit的replace会先保存本地版本并输出TXT，再提交已有映射的视频节点更新任务并启动后台worker；未绑定的不新建，也不触发全台账资产盘点或无关资产补建。冻结输入与版本保存在`canvas/jobs/`，同画布worker忙时任务排队；后台状态只读本地文件，旧pending-sync记录仍兼容。用户明确要求继续批量创建时可用`videos --ids ...`，该显式操作按资产准备流程执行；先处理日志未确认或云端冲突。正常同步在同一真实节点ID上依次更新名称、仅更新分镜时长、写入正式引用编码提示词，各步记录官方确认后统一回读并保存完成回执；不查询、写入或校验模型与分辨率。名称、时长、提示词的人工修改按实际冲突处理。保留已有素材及其他参数，不重建已绑定视频节点。
+director.commit的replace会先保存本地版本并输出TXT，再提交已有映射的视频节点更新任务并启动后台worker；未绑定的不新建，也不触发全台账资产盘点或无关资产补建。冻结输入与版本保存在`canvas/jobs/`，同画布worker忙时任务排队；后台状态只读本地文件，旧pending-sync记录仍兼容。用户明确要求继续同步时，按已确认分段范围逐个提交`videos`任务；当前分段任务启动或进入有效队列后再提交下一个。单次请求仍可包含该分段内多个视频节点，不能把多个分段合并为一个自动同步任务。先处理日志未确认或云端冲突。正常同步在同一真实节点ID上依次更新名称、仅更新分镜时长、写入正式引用编码提示词，各步记录官方确认后统一回读并保存完成回执；不查询、写入或校验模型与分辨率。名称、时长、提示词的人工修改按实际冲突处理。保留已有素材及其他参数，不重建已绑定视频节点。
 
 常规操作结果简要报告创建/更新/复用/删除数量、待处理项及画布链接。错误中出现凭据须隐藏；常规交付不附内部JSON、标签或原始日志。用户要求故障分析时，可以提供必要且已脱敏的命令名称、错误原因和核验依据。所选操作因连接失败中断时说明阻塞项，并保留已经完成的文件与节点。
 

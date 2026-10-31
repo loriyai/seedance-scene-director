@@ -58,7 +58,7 @@ class SourceFragmentMappingTests(unittest.TestCase):
     def mapping(self, decisions):
         return next(iter(decisions["fragments"].values()))
 
-    def cue_fixture(self, cue="os", target_cue="内心OS", spoken="“我知道。”", speaker="阿明", action="阿明垂眸"):
+    def cue_fixture(self, cue="os", target_cue="内心想法os", spoken="“我知道。”", speaker="阿明", action="阿明垂眸"):
         self.fixture([action + cue, spoken], f"△ {action}。\n{speaker}({target_cue})：我知道。")
         return self.decisions(1, [self.piece(1, action, 3),
             self.piece(1, cue, 4, target_cue, "cue", speaker="阿明",
@@ -79,7 +79,9 @@ class SourceFragmentMappingTests(unittest.TestCase):
         return report
 
     def test_suffix_voice_to_adjacent_dialogue_with_full_action_preserved(self):
-        for cue, target in [("os", "内心OS"), ("O.S.", "OS"), ("画外音", "画外音")]:
+        for cue, target in [("os", "内心想法os"), ("O.S.", "内心想法os"),
+                            ("ov", "画外音"), ("VO", "画外音"), ("V.O.", "画外音"),
+                            ("画外音", "画外音")]:
             with self.subTest(cue=cue):
                 decisions = self.cue_fixture(cue, target)
                 original = self.source.read_bytes()
@@ -97,8 +99,8 @@ class SourceFragmentMappingTests(unittest.TestCase):
         self.assertEqual(report["scenes"][0]["speaker_items"][0]["source_paragraphs"], [2])
 
     def test_adjacent_dialogue_can_have_multiple_source_paragraphs(self):
-        self.fixture(["阿明垂眸os", "“我", "知道。”"], "△ 阿明垂眸。\n阿明(内心OS)：我知道。")
-        decisions = self.decisions(1, [self.piece(1, "阿明垂眸", 3), self.piece(1, "os", 4, "内心OS", "cue", speaker="阿明",
+        self.fixture(["阿明垂眸os", "“我", "知道。”"], "△ 阿明垂眸。\n阿明(内心想法os)：我知道。")
+        decisions = self.decisions(1, [self.piece(1, "阿明垂眸", 3), self.piece(1, "os", 4, "内心想法os", "cue", speaker="阿明",
             dialogue_source={"source_range": [2, 3], "source_lines": ["“我", "知道。”"]})])
         self.assertEqual(self.checked(decisions)["status"], "passed")
 
@@ -164,7 +166,7 @@ class SourceFragmentMappingTests(unittest.TestCase):
         self.assertIsNone(report["scenes"][0]["speaker_items"][0]["cue_hint"])
 
     def test_voice_mapping_cannot_hide_narration_or_unknown_modifiers(self):
-        for cue, target in [("低声", "低声"), ("os转身", "内心OS"), ("os拔刀", "os拔刀")]:
+        for cue, target in [("低声", "低声"), ("os转身", "内心想法os"), ("os拔刀", "os拔刀")]:
             with self.subTest(cue=cue):
                 decisions = self.cue_fixture(cue, target)
                 self.assert_blocked(decisions, "声音语法")
@@ -174,18 +176,18 @@ class SourceFragmentMappingTests(unittest.TestCase):
         self.assert_blocked(decisions, "声音语法")
 
     def test_voice_cannot_skip_a_source_action_or_draft_action(self):
-        self.fixture(["阿明垂眸os", "阿红转身。", "“我知道。”"], "△ 阿明垂眸。\n△ 阿红转身。\n阿明(内心OS)：我知道。")
-        decisions = self.decisions(1, [self.piece(1, "阿明垂眸", 3), self.piece(1, "os", 5, "内心OS", "cue", speaker="阿明",
+        self.fixture(["阿明垂眸os", "阿红转身。", "“我知道。”"], "△ 阿明垂眸。\n△ 阿红转身。\n阿明(内心想法os)：我知道。")
+        decisions = self.decisions(1, [self.piece(1, "阿明垂眸", 3), self.piece(1, "os", 5, "内心想法os", "cue", speaker="阿明",
             dialogue_source={"source_range": [3, 3], "source_lines": ["“我知道。”"]})])
         self.assert_blocked(decisions, "紧邻")
-        self.fixture(["阿明垂眸os", "“我知道。”"], "△ 阿明垂眸。\n△ 阿红转身。\n阿明(内心OS)：我知道。")
-        decisions = self.decisions(1, [self.piece(1, "阿明垂眸", 3), self.piece(1, "os", 5, "内心OS", "cue", speaker="阿明",
+        self.fixture(["阿明垂眸os", "“我知道。”"], "△ 阿明垂眸。\n△ 阿红转身。\n阿明(内心想法os)：我知道。")
+        decisions = self.decisions(1, [self.piece(1, "阿明垂眸", 3), self.piece(1, "os", 5, "内心想法os", "cue", speaker="阿明",
             dialogue_source={"source_range": [2, 2], "source_lines": ["“我知道。”"]})])
         self.assert_blocked(decisions, "紧邻")
 
     def test_partial_cue_target_cannot_hide_added_cue_text(self):
-        decisions = self.cue_fixture(target_cue="内心OS，拔刀")
-        self.mapping(decisions)["fragments"][1]["target"] = self.piece(1, "os", 4, "内心OS", "cue")["target"]
+        decisions = self.cue_fixture(target_cue="内心想法os，拔刀")
+        self.mapping(decisions)["fragments"][1]["target"] = self.piece(1, "os", 4, "内心想法os", "cue")["target"]
         self.assert_blocked(decisions, "声音语法")
 
     def test_ranges_and_quoted_evidence_must_match_and_not_overlap(self):

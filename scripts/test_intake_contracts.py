@@ -83,7 +83,16 @@ class IntakeContracts(unittest.TestCase):
     def test_explicit_os_positions_preserve_cue(self):
         for source in ["林舟OS：“我知道。”", "OS 林舟：“我知道。”", "林舟 O.S.：「我知道。」"]:
             with self.subTest(source=source):
-                report = self.fixture(source, "林舟(内心OS)：我知道。")
+                report = self.fixture(source, "林舟(内心想法os)：我知道。")
+                self.assertEqual(report["status"], "passed", report)
+                self.assertTrue(any(item["kind"] == "明确声音标签解析" for item in report["scenes"][0]["parsing_transforms"]))
+                report = self.fixture(source, "林舟：我知道。")
+                self.assertEqual(report["status"], "needs_review")
+
+    def test_explicit_offscreen_positions_preserve_cue(self):
+        for source in ["林舟ov：“我知道。”", "ov 林舟：“我知道。”", "林舟VO：「我知道。」", "林舟 V.O.：“我知道。”"]:
+            with self.subTest(source=source):
+                report = self.fixture(source, "林舟(画外音)：我知道。")
                 self.assertEqual(report["status"], "passed", report)
                 self.assertTrue(any(item["kind"] == "明确声音标签解析" for item in report["scenes"][0]["parsing_transforms"]))
                 report = self.fixture(source, "林舟：我知道。")
@@ -93,7 +102,7 @@ class IntakeContracts(unittest.TestCase):
         names = ["记者1", "记者2", "保镖01", "保镖02", "记者一"]
         for name in names:
             with self.subTest(name=name):
-                report = self.fixture(f'{name}OS：“明白。”', f'{name}(OS)：明白。',
+                report = self.fixture(f'{name}OS：“明白。”', f'{name}(内心想法os)：明白。',
                                       "人物：" + "；".join(value + "-基础形象" for value in names) + "；")
                 self.assertEqual(report["status"], "passed", report)
                 self.assertEqual(report["scenes"][0]["speaker_items"][0]["speaker"], name)

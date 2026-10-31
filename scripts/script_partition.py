@@ -15,6 +15,8 @@ import uuid
 PLAN_FILE = 'script-partition.json'
 POLICY = 'partition-v1'
 COUNT_POLICY = 'source-non-whitespace-including-punctuation-v1'
+BOUNDARY_POLICY = 'safe-partition-boundaries-v1'
+PARTITION_MODE = 'count'
 
 
 def require(condition, message):
@@ -200,39 +202,77 @@ def exact_source_map(state):
     return mapped
 
 
-def validate_boundary(row, state, paragraphs, starts, mapped):
+def target_counts(total, participants):
+    require(type(participants) is int and participants > 0, '动画参与人数须为正整数')
+    require(type(total) is int and total >= participants, '原剧本字数不足以形成要求数量的非空分段')
+    return [total * index / participants for index in range(1, participants)]
+
+
+def boundary_template(state, participants):
+    require(type(participants) is int and participants > 0, '动画参与人数须为正整数')
+    sources = source_snapshot(state)
+    _, _, text = source_data(state)
+    total = sum(not char.isspace() for char in text)
+    return {'policy': BOUNDARY_POLICY, 'scope': 'target-local-v1',
+            'sources': sources, 'participants': participants,
+            'targets': [{'index': index, 'target_count': target}
+                        for index, target in enumerate(target_counts(total, participants), 1)],
+            'boundaries': []}
+
+
+def validate_boundary(row, state, paragraphs, starts, mapped, participants):
     require(isinstance(row, dict) and row.get('safe') is True
-            and isinstance(row.get('reason'), str) and row['reason'].strip(), '事件切点必须有实读确认和具体连续性理由')
+            and isinstance(row.get('reason'), str) and row['reason'].strip(),
+            '局部事件切点必须有连续性理由（需提供连续性判断说明）')
     offset = row.get('offset')
     require(type(offset) is int and 0 < offset < state['length'], '事件切点须在标准正文内部')
     raw_offset = source_offset(row.get('source_position'), paragraphs, starts)
     require(mapped[offset - 1] < raw_offset <= mapped[offset], '原文切点与标准正文切点不是精确对应')
     for record in state['records']:
-        require(not (record['kind'] == 'dialogue' and record['start'] < offset < record['end']), '分工切点不得切断一句台词')
-    return {'offset': offset, 'source_offset': raw_offset, 'source_position': row['source_position'],
-            'reason': row['reason'], 'kind': 'reviewed_event'}
+        require(not (record['start'] < offset < record['end']), '分工切点不得切断一条对白或动作记录')
+    target_index = row.get('target_index')
+    require(type(target_index) is int and 1 <= target_index < participants,
+            '局部事件切点必须绑定一个目标切点')
+    side = row.get('side')
+    require(side in ('before', 'after'), '局部事件切点必须标明位于目标点之前或之后')
+    result = {'offset': offset, 'source_offset': raw_offset, 'source_position': row['source_position'],
+              'reason': row['reason'], 'kind': 'local_event', 'target_index': target_index,
+              'side': side}
+    if 'distance' in row:
+        require(type(row['distance']) in (int, float) and row['distance'] >= 0, '切点偏移量必须为非负数')
+        result['distance'] = row['distance']
+    return result
 
 
-def boundaries_for(state, mode, review=None):
+def boundaries_for(state, participants, review=None):
     paragraphs, starts, text = source_data(state)
     mapped = exact_source_map(state)
     boundaries = [{'offset': 0, 'source_offset': 0, 'source_position': [1, 0], 'kind': 'start'}]
-    if mode == 'scene':
-        ordered = sorted(state['ledger']['scenes'], key=lambda item: item['number'])
-        for scene in ordered[1:]:
-            position = [scene['source_range'][0], 0]
-            raw_offset = source_offset(position, paragraphs, starts)
-            offset = min(r['start'] for r in state['records'] if r['scene'] == scene['id'])
-            require(mapped[offset - 1] < raw_offset <= mapped[offset], '已确认场界不能精确映射原文')
-            boundaries.append({'offset': offset, 'source_offset': raw_offset, 'source_position': position,
-                               'kind': 'scene', 'scene_id': scene['id']})
-    else:
-        require(mode == 'balanced', '拆分模式须为scene或balanced')
-        require(isinstance(review, dict) and review.get('policy') == 'safe-partition-boundaries-v1'
-                and review.get('sources') == source_snapshot(state), '安全切点须绑定当前原文、标准稿和复核版本')
+    if participants > 1:
+        require(isinstance(review, dict) and review.get('policy') == BOUNDARY_POLICY
+                and review.get('scope') == 'target-local-v1'
+                and review.get('sources') == source_snapshot(state)
+                and review.get('participants') == participants,
+                '按人数拆分须绑定当前原文、标准稿和人数对应的局部切点审查')
+        _, _, text = source_data(state)
+        total = sum(not char.isspace() for char in text)
+        expected = target_counts(total, participants)
+        targets = review.get('targets')
+        require(isinstance(targets, list) and len(targets) == participants - 1,
+                '局部切点审查缺少完整目标切点')
+        by_index = {row.get('index'): row for row in targets if isinstance(row, dict)}
+        require(set(by_index) == set(range(1, participants)), '目标切点编号不连续')
+        for index, target in enumerate(expected, 1):
+            actual = by_index[index].get('target_count')
+            require(isinstance(actual, (int, float)) and abs(actual - target) < 1e-9,
+                    '目标字数与当前原文或人数不一致')
         rows = review.get('boundaries')
-        require(isinstance(rows, list), '安全切点清单缺少boundaries')
-        boundaries.extend(validate_boundary(row, state, paragraphs, starts, mapped) for row in rows)
+        require(isinstance(rows, list), '局部切点审查缺少boundaries')
+        validated = [validate_boundary(row, state, paragraphs, starts, mapped, participants) for row in rows]
+        for index in range(1, participants):
+            require(any(row['target_index'] == index for row in validated),
+                    f'目标切点{index}没有可用的局部事件边界')
+        boundaries.extend(validated)
     boundaries.append({'offset': state['length'], 'source_offset': len(text),
                        'source_position': [len(paragraphs) + 1, 0], 'kind': 'end'})
     boundaries.sort(key=lambda row: row['offset'])
@@ -244,6 +284,18 @@ def boundaries_for(state, mode, review=None):
     for row in boundaries:
         row['count'] = prefix[row['source_offset']]
     require(all(a['count'] < b['count'] for a, b in zip(boundaries, boundaries[1:])), '合法切点之间不得只有空白')
+    if participants > 1:
+        total = boundaries[-1]['count']
+        expected = target_counts(total, participants)
+        for row in boundaries[1:-1]:
+            target = expected[row['target_index'] - 1]
+            if row['side'] == 'before':
+                require(row['count'] <= target, '标记为目标点之前的候选不能位于目标点之后')
+            else:
+                require(row['count'] >= target, '标记为目标点之后的候选不能位于目标点之前')
+            if 'distance' in row:
+                require(abs(abs(row['count'] - target) - row['distance']) < 1e-9,
+                        '候选切点的偏移量与实际字数不一致')
     return boundaries
 
 
@@ -288,13 +340,53 @@ def excerpts(text):
     return '\n'.join(pieces[:2]), '\n'.join(pieces[-2:])
 
 
-def build_plan(state, participants, mode, review=None):
-    require(type(participants) is int and participants > 0, '动画参与人数须为正整数')
-    if mode == 'balanced' and participants == 1 and review is None:
-        review = boundary_template(state)
-    sources = source_snapshot(state)
-    points = boundaries_for(state, mode, review)
-    indices = balanced_indices([p['count'] for p in points], participants)
+def targeted_indices(points, participants, targets):
+    """Choose one reviewed candidate around each target with a global objective."""
+    require(participants > 0 and len(targets) == participants - 1, '目标切点数量与人数不一致')
+    if participants == 1:
+        return [0, len(points) - 1]
+    by_target = {}
+    for index, point in enumerate(points[1:-1], 1):
+        target_index = point.get('target_index')
+        if target_index is not None:
+            by_target.setdefault(target_index, []).append(index)
+    require(set(by_target) == set(range(1, participants)), '局部事件候选未覆盖全部目标切点')
+    counts = [point['count'] for point in points]
+    total = counts[-1]
+    segment_target = total / participants
+    states = {0: (0.0, [])}
+    for target_index in range(1, participants):
+        next_states = {}
+        target = targets[target_index - 1]
+        for candidate in by_target[target_index]:
+            best = None
+            for previous, (cost, path) in states.items():
+                if previous >= candidate:
+                    continue
+                segment_count = counts[candidate] - counts[previous]
+                local = (segment_count - segment_target) ** 2
+                local += 0.25 * (counts[candidate] - target) ** 2
+                value = (cost + local, path + [candidate])
+                if best is None or value[0] < best[0] or (value[0] == best[0] and value[1] < best[1]):
+                    best = value
+            if best is not None:
+                next_states[candidate] = best
+        states = next_states
+        require(states, '局部事件候选无法组成连续的非空分段')
+    best = None
+    for previous, (cost, path) in states.items():
+        if previous >= len(points) - 1:
+            continue
+        final_count = counts[-1] - counts[previous]
+        value = (cost + (final_count - segment_target) ** 2, path + [len(points) - 1])
+        if best is None or value[0] < best[0] or (value[0] == best[0] and value[1] < best[1]):
+            best = value
+    require(best is not None, '局部事件候选无法覆盖末段')
+    return [0] + best[1]
+
+
+def _assemble_plan(state, participants, points, sources, targets):
+    indices = targeted_indices(points, participants, targets)
     paragraphs, starts, text = source_data(state)
     segments = []
     for index, (a, b) in enumerate(zip(indices, indices[1:]), 1):
@@ -307,13 +399,31 @@ def build_plan(state, participants, mode, review=None):
                          'word_count': right['count'] - left['count'],
                          'start_excerpt': first, 'end_excerpt': last})
     difference = max(s['word_count'] for s in segments) - min(s['word_count'] for s in segments)
-    plan = {'policy': POLICY, 'mode': mode, 'participants': participants, 'sources': sources,
+    selected = [points[index] for index in indices[1:-1]]
+    plan = {'policy': POLICY, 'mode': PARTITION_MODE,
+            'participants': participants, 'sources': sources,
             'count_policy': COUNT_POLICY, 'balance_objective': 'minimum-total-squared-deviation',
-            'total_count': points[-1]['count'], 'difference': difference,
-            'status': 'needs_confirmation' if mode == 'scene' and difference > 2000 else 'confirmed',
-            'boundaries': points, 'segments': segments}
+            'target_counts': targets, 'total_count': points[-1]['count'], 'difference': difference,
+            'selection_policy': 'targeted-local-event-global-v1',
+            'selected_boundaries': [
+                {'target_index': row.get('target_index'), 'target_count': targets[row.get('target_index') - 1],
+                 'actual_count': row['count'], 'side': row.get('side'),
+                 'distance': row.get('distance'), 'reason': row.get('reason')}
+                for row in selected],
+            'status': 'confirmed', 'boundaries': points, 'segments': segments}
     plan['proposal_hash'] = digest(plan)
     return plan
+
+
+def build_plan(state, participants, mode=PARTITION_MODE, review=None):
+    require(type(participants) is int and participants > 0, '动画参与人数须为正整数')
+    require(mode == PARTITION_MODE, '正式分段只支持按人数拆分')
+    sources = source_snapshot(state)
+    _, _, text = source_data(state)
+    total = sum(not char.isspace() for char in text)
+    targets = target_counts(total, participants)
+    points = boundaries_for(state, participants, review)
+    return _assemble_plan(state, participants, points, sources, targets)
 
 
 def _seal(plan):
@@ -362,22 +472,11 @@ def save_plan(project, state, proposal):
     return plan
 
 
-def confirm_plan(project, state, proposal_hash):
-    plan = load_plan(project, state)
-    require(plan is not None and plan['proposal_hash'] == proposal_hash, '确认须绑定当前场景拆分候选，不能确认过期方案')
-    if plan['status'] == 'confirmed':
-        return plan
-    require(plan['mode'] == 'scene' and plan['difference'] > 2000, '当前分段不需要字数差距确认')
-    plan.update(status='confirmed', difference_accepted=True)
-    atomic_json(Path(project) / PLAN_FILE, _seal(plan))
-    return plan
-
-
 def resolve_segment(project, state, label_or_span):
     plan = load_plan(project, state)
     if plan is None:
         return None
-    require(plan['status'] == 'confirmed', '场景拆分字数差距尚未获得忽略确认或改用字数模式')
+    require(plan['status'] == 'confirmed', '分段计划尚未确认')
     for segment in plan['segments']:
         if isinstance(label_or_span, str):
             matched = label_or_span.strip().upper().removesuffix('分段') == segment['label']
@@ -395,44 +494,33 @@ def render_plan(plan):
     for segment in plan['segments']:
         lines.extend([f"{segment['label']}分段：共{segment['word_count']}个字",
                       '开始：' + segment['start_excerpt'], '结束：' + segment['end_excerpt'], ''])
-    if plan['status'] == 'needs_confirmation':
-        lines.extend([f"按照场景均分差距最大为{plan['difference']}字。",
-                      '1. 忽略差距，直接拆分', '2. 按照选项2，根据剧本字数来拆分'])
     return '\n'.join(lines).rstrip() + '\n'
-
-
-def boundary_template(state):
-    return {'policy': 'safe-partition-boundaries-v1', 'sources': source_snapshot(state), 'boundaries': []}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
-    for command in ('plan', 'confirm', 'show', 'resolve', 'boundary-template'):
+    for command in ('plan', 'show', 'resolve', 'boundary-template'):
         command_parser = sub.add_parser(command)
         command_parser.add_argument('--project', type=Path, required=True)
         if command == 'plan':
             command_parser.add_argument('--participants', type=int, required=True)
-            command_parser.add_argument('--mode', choices=('scene', 'balanced'), required=True)
             command_parser.add_argument('--boundaries', type=Path)
-        elif command == 'confirm':
-            command_parser.add_argument('--proposal-hash', required=True)
         elif command == 'resolve':
             command_parser.add_argument('--label', required=True)
         elif command == 'boundary-template':
+            command_parser.add_argument('--participants', type=int, required=True)
             command_parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     try:
         import director
         state = director.load(args.project)
         if args.command == 'plan':
-            proposal = build_plan(state, args.participants, args.mode, read_json(args.boundaries) if args.boundaries else None)
+            proposal = build_plan(state, args.participants, PARTITION_MODE,
+                                  read_json(args.boundaries) if args.boundaries else None)
             plan = save_plan(args.project, state, proposal)
             result = {'status': plan['status'], 'plan_id': plan['plan_id'], 'proposal_hash': plan['proposal_hash'],
                       'plan_file': str((args.project / PLAN_FILE).resolve()), 'text': render_plan(plan)}
-        elif args.command == 'confirm':
-            plan = confirm_plan(args.project, state, args.proposal_hash)
-            result = {'status': plan['status'], 'plan_id': plan['plan_id'], 'text': render_plan(plan)}
         elif args.command == 'show':
             plan = load_plan(args.project, state)
             result = {'status': plan['status'], 'text': render_plan(plan)} if plan else {'status': 'not_partitioned'}
@@ -441,11 +529,11 @@ def main():
             require(segment is not None, '没有与该代号匹配的有效分段')
             result = segment
         else:
-            result = boundary_template(state)
+            result = boundary_template(state, args.participants)
             output = director.validate_output_path(state, args.project, args.output)
             require(not output.exists(), '安全切点输出已存在；请使用新路径，不能覆盖旧输入或决定')
             atomic_json(output, result)
-        if args.command in ('plan', 'confirm') and plan['status'] == 'confirmed' and state.get('phase') != 'range':
+        if args.command == 'plan' and plan['status'] == 'confirmed' and state.get('phase') != 'range':
             state['phase'] = 'range'
             director.save(args.project, state)
         print(json.dumps(result, ensure_ascii=False, indent=2))

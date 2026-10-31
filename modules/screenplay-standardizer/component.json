@@ -2,10 +2,10 @@
   "component": "screenplay-standardizer",
   "bundle_format": 1,
   "files": {
-    "INSTRUCTIONS.md": "16c73faed2f9b33d85a600b0c4756eae93e6358048ca51d42f714abe4cc1d6a5",
+    "INSTRUCTIONS.md": "e8a496fe985330d120216842debbb84c7fdf8c6c7a71a8ae594b214fa815b0ca",
     "references/asset-ledger.md": "3d7de0584de9eaa6c8e50eee0eac949a06ad20565667d97d543ff30467dfa1ea",
     "scripts/asset_impact.py": "5a2e28caa09468111fcbc2609f0e346cd0efbede20f4d12111e6d23531e6de8c",
-    "scripts/asset_ledger.py": "bee1726e6bd83e0081136fab699e18c1d76cbaea98822b31705e87bb99e480fd",
+    "scripts/asset_ledger.py": "69c0781cf474987040648ac2580d87e144988426afda8bbd7ea9f09116e03fbf",
     "scripts/asset_migrate.py": "a8be18a62268c80d11c4a827d9e0a94d40c03ba777e44b1f2024e41cf35200af",
     "scripts/asset_review.py": "db98506e83b1ccd45917b22c91c9fbfb54718574b62a0efef35cb35937ffbd80",
     "scripts/asset_visual_design.py": "b9e81d47869f82ace57ca7e09d252472bec85eb46824c98b20da631575ac3b22",
@@ -19,7 +19,7 @@
     "scripts/project_contract.py": "d2c6b5204f1727ec6f5f96c454c8fa1d53b81b04fdd6dd0b2690814ebad7f2cc",
     "scripts/scene_observations.py": "57a78c81595ebc1024c0fcc7ff070253e298b221355c9fc5c4d8899c04f506cf",
     "scripts/screenplay_io.py": "b4fb2aa2cfa7a4d361d3087be73f8e0c71b7d88798534dc91aa1f0b83a6307ed",
-    "scripts/screenplay_review.py": "6480f0ee3b326ba3e31c0f38a29ed079224f9d9a2d9b2c88cf00ee5bc764ba5d",
-    "scripts/source_compat.py": "73589ac82f3ef473a50042c948bfe8359573424d9a7c31217b73c37571a95264"
+    "scripts/screenplay_review.py": "15ef07a1a9651adbd191d1c8a0d01af561f69f3c33d5de9a86131f9886465e0e",
+    "scripts/source_compat.py": "fba10b32a29fb1684a9f4b0318470d00580ce9add83b743651c1a07dd9901739"
   }
 }

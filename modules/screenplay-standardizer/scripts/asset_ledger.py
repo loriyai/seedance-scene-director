@@ -10,6 +10,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 from asset_visual_design import (PROP_POLICY, GROUP_POLICY, apply_design, apply_group_review,
                                  validate_prop_policy, validate_group_policy,
@@ -248,7 +249,7 @@ def scene_ranges(workdir: Path, count: int, source_count: int) -> list[list[int]
 
 
 def fact_list(records: list[dict], paragraphs: list[str], scenes_by_id: dict, label: str,
-              required_scene: str | None = None) -> None:
+              required_scene: Optional[str] = None) -> None:
     for fact in records:
         if not isinstance(fact, dict):
             raise ValueError(f"{label} 事实必须是对象")

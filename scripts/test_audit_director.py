@@ -145,7 +145,9 @@ class AuditDirectorChecks(unittest.TestCase):
 
     def test_explicit_voice_tags_and_narrator_remain_supported(self):
         for label, voice in [('陈默(OS)', '内心想法'), ('陈默（内心想法）', '内心想法'),
-                              ('陈默（内心OS）', '内心想法'), ('陈默（握紧拳头os）', '内心想法'),
+                              ('陈默（内心OS）', '内心想法'), ('陈默（内心想法os）', '内心想法'),
+                              ('陈默（ov）', '画外音'), ('陈默（VO）', '画外音'), ('陈默（V.O.）', '画外音'),
+                              ('陈默（握紧拳头os）', '说'),
                               ('陈默（画外音）', '画外音'), ('陈默（旁白）', '旁白'), ('旁白', '旁白')]:
             with self.subTest(label=label):
                 text = f'场景1-日-内-房间\n人物：陈默-基础形象；\n{label}：你好。\n'

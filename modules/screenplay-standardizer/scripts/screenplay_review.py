@@ -96,8 +96,21 @@ def explicit_label(value, names):
 
 
 def normalized_cue(value):
+    semantic = source_compat.voice_cue_kind(value)
+    if semantic:
+        return semantic
     value = compact(value).lower()
-    return "内心想法" if value in ("os", "内心os", "内心想法") else value
+    return value
+
+
+def cue_matches(source, target):
+    """Voice aliases map to canonical labels; ordinary cues remain exact."""
+    source_kind = source_compat.voice_cue_kind(source)
+    target_kind = source_compat.voice_cue_kind(target)
+    if source_kind or target_kind:
+        return (source_kind is not None and source_kind == target_kind
+                and target == source_compat.canonical_voice_cue(target))
+    return source == target
 
 
 def draft_parts(path):
@@ -124,8 +137,10 @@ def draft_parts(path):
             speaker = re.sub(r"[（(][^（）()]*[）)]$", "", label).strip()
             kind = "dialogue"
             cue = re.search(r"[（(]([^（）()]*)[）)]$", label)
+            cue_raw = cue.group(0) if cue else ""
             dialogues.append({"line": number, "speaker": speaker, "text": value,
                               "cue": cue.group(1) if cue else "",
+                              "cue_raw": cue_raw,
                               "non_character": bool(cue and cue.group(1) == "非人物播报")})
         else:
             raise ValueError(f"{path.name}:{number} 正文行无法识别")
@@ -343,7 +358,7 @@ def check_fragment_mapping(mapping, template, candidate, names, lines, dialogues
                     or any(char.isalnum() for char in raw[b:])
                     or (a and raw[a - 1].isascii() and raw[a - 1].isalnum())
                     or [c, d] != [low, high]
-                    or normalized_cue(source) != normalized_cue(target_raw[c:d])):
+                    or not cue_matches(source, target_raw[c:d])):
                 raise ValueError("cue 仅接受段末独立声音语法并完整对应声音标签，不能把正文改作提示")
             speaker = fragment.get("speaker")
             dialogue = by_dialogue[number]
@@ -409,14 +424,16 @@ def check_scene(paragraphs, start, end, path, decisions):
     source_hash = sha(json.dumps(paragraphs[start - 1:end], ensure_ascii=False))
     draft_hash = sha(path.read_text(encoding="utf-8-sig"))
 
-    def preserve_cue(source_cue, destinations, paragraph):
+    def preserve_cue(source_cue, source_cue_raw, destinations, paragraph):
         if not source_cue:
             return
         target_dialogues = [item for item in dialogues
                             if any(dest["line"] == item["line"] and dest["kind"] == "dialogue"
                                    for dest in destinations)]
         if (len(target_dialogues) != 1
-                or normalized_cue(target_dialogues[0]["cue"]) != normalized_cue(source_cue)):
+                or not cue_matches(source_cue, target_dialogues[0]["cue"])
+                or (not source_compat.voice_cue_kind(source_cue)
+                    and source_cue_raw != target_dialogues[0]["cue_raw"])):
             missing.append({"paragraph": paragraph, "text": source_cue,
                             "issue": "原文台词括号提示未在对应台词标签完整保留"})
             return
@@ -439,10 +456,13 @@ def check_scene(paragraphs, start, end, path, decisions):
         fragment_templates[paragraph] = (disposition_key, template)
         candidate = TRANSITION.sub("", value)
         candidate, leading_cue = source_compat.strip_leading_voice(candidate)
+        raw_source_label = source_compat.explicit_label(candidate, source_labels)
         source_label = explicit_label(candidate, source_labels)
         if source_label:
             candidate = source_label["text"]
         source_cue = source_label["cue"] if source_label else leading_cue
+        source_cue_raw = (raw_source_label.get("cue_raw", "")
+                          if raw_source_label else leading_cue)
         if disposition_key in decisions.get("fragments", {}):
             mapping = decisions["fragments"][disposition_key]
             try:
@@ -464,7 +484,7 @@ def check_scene(paragraphs, start, end, path, decisions):
                 cursor = finish
             used_targets.update(targets)
             mapped_voices.extend(voices)
-            preserve_cue(source_cue, destinations, paragraph)
+            preserve_cue(source_cue, source_cue_raw, destinations, paragraph)
             paragraph_map.append({"paragraph": paragraph, "source_text": value,
                                   "status": "已映射", "destinations": destinations,
                                   "fragments": copy.deepcopy(mapping["fragments"])})
@@ -515,7 +535,7 @@ def check_scene(paragraphs, start, end, path, decisions):
         finish = found + len(fragment)
         destinations = [{"line": line["line"], "kind": line["kind"]} for line in lines
                         if line["start"] < finish and line["end"] > found]
-        preserve_cue(source_cue, destinations, paragraph)
+        preserve_cue(source_cue, source_cue_raw, destinations, paragraph)
         paragraph_map.append({"paragraph": paragraph, "source_text": value, "status": "已覆盖", "destinations": destinations})
         cursor = finish
     if cursor < len(flat):

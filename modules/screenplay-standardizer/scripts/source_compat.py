@@ -78,7 +78,17 @@ def register_action_markers(workdir, markers, reason):
 QUOTE_PAIRS = {"「": "」", "『": "』", "“": "”", "‘": "’", '"': '"'}
 QUOTE_OPEN = "".join(QUOTE_PAIRS)
 QUOTE_CLOSE = "".join(QUOTE_PAIRS.values())
-VOICE_CUE = r"(?:OS|O\.S\.|画外音)"
+# ``os`` denotes inner thought and ``ov``/``vo`` denote off-screen voice.
+# Parsing accepts these aliases case-insensitively; callers retain the raw
+# spelling and choose the canonical display label at the standardization gate.
+VOICE_CUE = r"(?:OS|O\.S\.|内心(?:想法)?(?:OS)?|OV|VO|V\.O\.|画外音)"
+VOICE_CUE_ALIASES = {
+    "os": "内心想法", "o.s.": "内心想法", "内心": "内心想法",
+    "内心os": "内心想法", "内心想法": "内心想法", "内心想法os": "内心想法",
+    "ov": "画外音", "vo": "画外音", "v.o.": "画外音",
+    "画外音": "画外音",
+}
+CANONICAL_VOICE_CUES = {"内心想法": "内心想法os", "画外音": "画外音"}
 CHAPTER_MARKER = re.compile(r"^第[零〇一二两三四五六七八九十百千万\d]+[章节集回幕]$")
 
 
@@ -89,6 +99,18 @@ def structural_hint(value):
 
 def standalone_voice(value):
     return bool(re.fullmatch(VOICE_CUE + r"\s*[:：]?", value.strip(), re.I))
+
+
+def voice_cue_kind(value):
+    """Classify a supported voice alias without rewriting its source spelling."""
+    if not isinstance(value, str):
+        return None
+    return VOICE_CUE_ALIASES.get(re.sub(r"\s+", "", value).casefold())
+
+
+def canonical_voice_cue(value):
+    """Return the formal standard label for a supported voice alias."""
+    return CANONICAL_VOICE_CUES.get(voice_cue_kind(value))
 
 
 def strip_leading_voice(value):
@@ -102,7 +124,8 @@ def explicit_label(value, names):
         return None
     pattern = (r"^\s*(?:(?P<prefix>" + VOICE_CUE + r")\s*)?"
                r"(?P<speaker>(?:" + known + r")(?:\s*、\s*(?:" + known + r"))*)"
-               r"\s*(?:(?:（(?P<wide>[^（）]*)）|\((?P<ascii>[^()]*)\))|"
+               r"\s*(?:(?P<wide_raw>（(?P<wide>[^（）]*)）)|"
+               r"(?P<ascii_raw>\((?P<ascii>[^()]*)\))|"
                r"(?P<suffix>" + VOICE_CUE + r"))?\s*(?:[：:]\s*|(?=[" + re.escape(QUOTE_OPEN) + r"]))")
     match = re.match(pattern, value, re.I)
     if not match:
@@ -113,8 +136,11 @@ def explicit_label(value, names):
     cues = [match.group(key) for key in ("prefix", "wide", "ascii", "suffix") if match.group(key)]
     # Multiple cue slots are not silently discarded or conflated.
     cue = "，".join(cues)
+    raw_cues = [match.group(key) for key in ("prefix", "wide_raw", "ascii_raw", "suffix") if match.group(key)]
     return {"speaker": "、".join(members), "cue": cue, "text": value[match.end():],
             "source_prefix": value[:match.end()],
+            "cue_raw": "，".join(raw_cues),
+            "cue_kind": voice_cue_kind(cue) if cue else None,
             "compatibility": bool(match.group("prefix") or match.group("suffix"))}
 
 

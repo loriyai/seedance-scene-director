@@ -241,7 +241,7 @@ def dependency(path=None):
 
 def build_records(script_text, ledger, markers=None):
     sys.path.insert(0, str(ROOT / 'modules' / 'screenplay-standardizer' / 'scripts'))
-    from source_compat import action_content
+    from source_compat import action_content, voice_cue_kind
     scenes = {s["number"]: s for s in ledger["scenes"]}
     records, cursor, scene, heading_line = [], 0, None, 0
     for line_no, raw in enumerate(script_text.splitlines(), 1):
@@ -264,9 +264,9 @@ def build_records(script_text, ledger, markers=None):
                 speaker = re.sub(r"[（(][^（）()]*[）)]$", "", label).strip()
                 modifier = re.search(r"[（(]([^（）()]*)[）)]$", label)
                 cue = modifier.group(1).strip() if modifier else ""
-                inner = (re.search(r"(?<![A-Za-z])os(?![A-Za-z])", cue, re.IGNORECASE)
-                         or cue == "内心" or any(word in cue for word in ("内心想法", "内心独白", "心理独白")))
-                voice = ("内心想法" if inner else "画外音" if "画外音" in cue or speaker == "画外音" else
+                voice_kind = voice_cue_kind(cue) or ("画外音" if speaker == "画外音" else None)
+                inner = voice_kind == "内心想法"
+                voice = ("内心想法" if inner else "画外音" if voice_kind == "画外音" or "画外音" in cue else
                          "旁白" if "旁白" in cue or speaker == "旁白" else "说")
                 if cue == audio_sources.ANNOUNCEMENT:
                     source_kind, voice = audio_sources.NON_CHARACTER, audio_sources.ANNOUNCEMENT
