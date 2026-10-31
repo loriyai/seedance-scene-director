@@ -742,7 +742,8 @@ def render_unit(state, unit, reference_text=None):
     _require(isinstance(title, str) and title and not any(c in title for c in "\r\n"), "渲染前须分配单元id/display_name")
     # scene-text-v1 originally rendered visual-only-v2 even for unmarked input.
     # New authoring sets an explicit policy; old receipts retain that old default.
-    header = d.fixed_header(unit.get("header_policy", "visual-only-v2"))
+    header_policy = unit.get("header_policy", "visual-only-v2")
+    header = d.fixed_header(header_policy, state, unit)
     people = "，".join(asset(cid) for cid in authored["character_ids"]) or "无"
     ratio = unit.get('video_ratio')
     _require(ratio in (None, '16:9', '9:16'), '视频比例须为16:9或9:16')

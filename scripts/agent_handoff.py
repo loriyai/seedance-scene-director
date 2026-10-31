@@ -288,7 +288,9 @@ def prepare(project_value, stage, brief_value, escalation_reason=None):
         session = {'path': str(project / 'session.json'),
                    'sha256': object_digest(session_creative_snapshot(read_json(project / 'session.json')))}
         paths = [path for path in paths if path != project / 'session.json']
-    paths += [project / name for name in (('video-style.txt', 'project-contract.json') if modern else ('session.json', 'video-style.txt')) if (project / name).exists()]
+    project_settings = (('video-style.txt', 'video-header.txt', 'project-contract.json') if modern
+                        else ('session.json', 'video-style.txt', 'video-header.txt'))
+    paths += [project / name for name in project_settings if (project / name).exists()]
     references = config['stages'][review_stage if modern and stage == 'review' else stage]['references']
     common = ['references/execution-contract.md', 'agents/model-routing.json'] if modern else ['SKILL.md', 'agents/model-routing.json', 'references/model-routing.md']
     paths += [rule_file(name) for name in common + references]

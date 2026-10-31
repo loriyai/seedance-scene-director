@@ -62,7 +62,7 @@ class CameraConstraintChecks(unittest.TestCase):
             delivery.preview(test.project, draft)
         self.assertEqual(test.snapshot(), before)
 
-    def test_text_receipt_uses_saved_v2_header_and_new_authoring_uses_v3(self):
+    def test_text_receipt_uses_saved_v2_header_and_new_authoring_uses_project_header(self):
         test = self.fixture()
         state, units, _ = delivery.prepare(test.project, test.draft)
         current = dict(units[0], id='new')
@@ -71,9 +71,9 @@ class CameraConstraintChecks(unittest.TestCase):
         old_render = core.render_unit(state, old)
         self.assertEqual(core.render_unit(state, unmarked), old_render)
         self.assertIn('Subtle micro-expressions', old_render)
-        self.assertNotIn('Subtle micro-expressions', core.render_unit(state, current))
-        self.assertNotIn('composed and graceful movements', core.render_unit(state, current))
-        self.assertEqual(current['header_policy'], d.HEADER_POLICY)
+        current_render = core.render_unit(state, current)
+        self.assertIn('测试固定抬头第一行\n测试固定抬头第二行', current_render)
+        self.assertEqual(current['header_policy'], 'custom-v1')
 
     def test_old_fixed_receipt_retry_preserves_saved_output_but_new_commit_is_rejected(self):
         test = self.fixture()

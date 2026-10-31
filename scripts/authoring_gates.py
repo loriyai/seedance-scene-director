@@ -230,7 +230,9 @@ def staging_material(state, unit):
     if not isinstance(current.get('style'), str) or sha(current['style']) != state.get('style_hash'):
         raise ValueError('冻结前预览须填写与已保存video-style.txt摘要一致的style')
     current['black_reference_mode'] = 'none-v1'
-    current['header_policy'] = HEADER_POLICY
+    current['header_policy'] = unit.get('header_policy', HEADER_POLICY)
+    if 'header_text' in unit:
+        current['header_text'] = unit['header_text']
     rendered = render_unit(state, current)
     shots = targets(state, {'units': [unit]})
     fields = {k: v for k, v in unit.items() if k not in

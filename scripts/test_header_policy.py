@@ -51,6 +51,14 @@ class HeaderPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '抬头版本'):
             d.render_unit(self.state, dict(self.unit, header_policy='future-unknown'))
 
+    def test_custom_project_header_renders_exact_text_while_legacy_policy_stays_built_in(self):
+        custom = '用户固定抬头第一行\n用户固定抬头第二行'
+        current = d.render_unit(self.state, dict(self.unit, header_policy='custom-v1', header_text=custom))
+        legacy = d.render_unit(self.state, dict(self.unit, header_policy=d.HEADER_POLICY))
+        self.assertIn('3D国漫;用户固定抬头第一行\n用户固定抬头第二行', current)
+        self.assertNotIn('用户固定抬头第一行', legacy)
+        self.assertIn(d.fixed_header(d.HEADER_POLICY)[0], legacy)
+
     def test_both_assets_are_independently_hash_checked(self):
         folder = self.harness.project / 'header-assets'
         (folder / 'assets').mkdir(parents=True)

@@ -79,6 +79,8 @@ def save_ratio(project, value=None, *, inherit=False):
     style = project / 'video-style.txt'
     if not style.is_file() or not style.read_text(encoding='utf-8-sig').strip():
         raise ValueError('请先确认并保存视频风格，再保存视频比例')
+    from video_header import require_intake as require_header
+    require_header(project)
     if inherit:
         if value is not None:
             raise ValueError('继承比例与指定新比例不能同时使用')
@@ -100,6 +102,8 @@ def require_intake(project):
     style = project / 'video-style.txt'
     if not style.is_file() or not style.read_text(encoding='utf-8-sig').strip():
         raise ValueError('完整剧本须先确认并保存视频风格')
+    from video_header import require_intake as require_header
+    require_header(project)
     return get_ratio(project, required=True)
 
 
@@ -116,9 +120,14 @@ def status(project, state=None):
     saved_style = style.is_file() and bool(style.read_text(encoding='utf-8-sig').strip())
     saved_ratio = (project / RATIO_FILE).is_file()
     ratio = get_ratio(project, state) if saved_ratio else None
-    return {'style_saved': saved_style, 'video_ratio': ratio,
+    from video_header import status as header_status
+    header = header_status(project, state)
+    return {'style_saved': saved_style, 'video_header': header,
+            'video_ratio': ratio,
             'chat_default_ratio': read_default(project),
-            'next_step': 'style' if not saved_style else 'ratio' if not saved_ratio else 'prepare'}
+            'next_step': ('style' if not saved_style else
+                          'header' if not header['header_saved'] else
+                          'ratio' if not saved_ratio else 'prepare')}
 
 
 def get_profile(project, state=None, required=False):

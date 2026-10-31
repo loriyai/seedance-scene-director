@@ -20,18 +20,20 @@ PATH_KEYS = {'path', 'draft', 'output', 'actual_output', 'original_review', 'con
              'assembly_proof', 'review_reuse', 'manifest', 'source', 'script', 'ledger', 'review'}
 CREATIVE_FILES = ('references/storyboard-rules.md', 'references/storyboard-workflow.md',
                   'references/storyboard-text-format.md', 'scripts/ratio_profiles.py',
-                  'assets/fixed-header-visual-v3.txt')
+                  'scripts/video_header.py', 'assets/fixed-header-visual-v3.txt')
 LEGACY_CONTEXT_FILES = ('references/storyboard-rules.md', 'references/storyboard-text-format.md',
                        'scripts/storyboard_text.py', 'scripts/storyboard_text_delivery.py',
                        'scripts/storyboard_context.py', 'scripts/segment_naming.py',
-                       'scripts/script_partition.py', 'scripts/video_settings.py')
+                       'scripts/script_partition.py', 'scripts/video_settings.py',
+                       'scripts/video_header.py')
 
 
 def legacy_context(state, project, runtime):
     import director as d
     from script_partition import load_plan
     from video_settings import get_ratio
-    value = {key: state.get(key) for key in ('files', 'records', 'ledger', 'style_hash', 'units', 'entry')}
+    value = {key: state.get(key) for key in
+             ('files', 'records', 'ledger', 'style_hash', 'header_hash', 'header_policy', 'units', 'entry')}
     value['text_rules'] = {name: d.file_hash(Path(runtime) / name) for name in LEGACY_CONTEXT_FILES}
     value['video_ratio'], value['partition_plan'] = get_ratio(project, state), load_plan(project, state)
     return d.sha(d.packed(value))

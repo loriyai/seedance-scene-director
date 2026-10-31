@@ -1,6 +1,6 @@
 # 纯文本分镜作者格式
 
-新草稿以UTF-8 TXT为唯一作者源，格式名为`scene-text-v1`。文件只包含下列单元和空行，不支持正文外备注、Markdown围栏、规划表、隐式省略号或未识别行。程序遇到未知行立即报错，不静默丢弃。标题、用户已保存风格、视频比例、固定抬头和整份TXT末行数量/时长汇总由交付程序生成，作者不手抄。新交付使用`ratio-summary-v1`，单元和回执冻结`video_ratio`；重新导出旧无比例记录保留原版式。汇总不进入单个单元提示词。
+新草稿以UTF-8 TXT为唯一作者源，格式名为`scene-text-v1`。文件只包含下列单元和空行，不支持正文外备注、Markdown围栏、规划表、隐式省略号或未识别行。程序遇到未知行立即报错，不静默丢弃。标题、用户已保存风格、项目固定抬头、视频比例和整份TXT末行数量/时长汇总由交付程序生成，作者不手抄。新项目的固定抬头来自项目`video-header.txt`，按`custom-v1`保存并绑定到单元；历史单元继续读取其已保存的旧抬头政策。新交付使用`ratio-summary-v1`，单元和回执冻结`video_ratio`；重新导出旧无比例记录保留原版式。汇总不进入单个单元提示词。
 
 `video_ratio`由项目设置统一提供，并在新单元旁冻结对应的`ratio_profile`、版本和摘要：`16:9`绑定`landscape-v1`，`9:16`绑定`portrait-v1`。这些字段属于交付元数据，不进入作者TXT语法、镜头正文或提示词输出；作者依据当前比例配置把构图和运镜落实到实际正文。历史单元可以没有画幅配置字段，读取、渲染和回执导出继续沿用其原协议；替换历史单元时不静默迁移比例。
 
@@ -40,7 +40,7 @@
 
 - `parse(text, state, source_span=None) -> list[dict]`：校验作者文本并派生元数据，含`draft_key`、`source_records`、`span`、`duration`、`main_scene`、`scene_ids`、`character_ids`、`set_ids`、`prop_ids`、`asset_ids`及最小镜头缓存。`source_text`保存该单元唯一规范作者文本；镜头与台词字段只是可重新生成的缓存，不是第二份作者输入。可选`source_span=[start,end]`来自交付层已确认范围或被选中旧单元的确切范围，以`director.portion`裁剪原始记录再校验；作者文本必须完整覆盖此范围，不得任意缩小。它不修改绑定state或原剧本。
 - `validate(state, units) -> dict`：从`source_text`重新解析，拒绝被直接修改或失效的派生字段，返回单元数、镜头数、时长、范围和检查状态。`id/display_name/style`由交付层赋值，不纳入作者字段对比。
-- `render_unit(state, unit, reference_text=None) -> str`：从作者文本生成产品提示词，用已经保存的`style`及已分配的`id/display_name`，沿用现有固定抬头常量。作者单元头、来源ID、声音时间标记不输出；实际声源、语气和原台词嵌回镜头末尾音效之前。可单独重导出已检查的拆句单元。
+- `render_unit(state, unit, reference_text=None) -> str`：从作者文本生成产品提示词，用已经保存的`style`、项目固定抬头及已分配的`id/display_name`。新单元使用`custom-v1`抬头快照；旧单元沿用其历史抬头策略。作者单元头、来源ID、声音时间标记不输出；实际声源、语气和原台词嵌回镜头末尾音效之前。可单独重导出已检查的拆句单元。
 
 `asset_ids`含所有身份引用，包括prompt_only人物；Canvas调用者须从图片边中排除prompt_only。这里只依赖Python标准库和本包director的既有常量/基础函数，不加载旧规划、状态、依赖或逐镜审批；确定的词面诊断不构成语义批准。
 

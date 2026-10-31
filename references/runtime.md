@@ -4,13 +4,14 @@
 
 ## 准备与阶段入口
 
-完整剧本风格确认前只检查文件可访问，不运行依赖检查或分析。先由`director.py style`保存风格，再由`director.py ratio`独立保存视频比例，两项设置完成后记录分段和画布同步意图，之后才运行`scripts/ensure_dependencies.py`与`project-init`。比例已有当前聊天确认默认值时使用`--inherit`，不重复询问；设置和入口记录命令不解析剧本、不生成正式分段或分派云端任务。依赖准备仅缺失PyYAML时在同一解释器安装并验证，已有可用版本不升级，失败报告一次，不提权/循环尝试。
+完整剧本风格确认前只检查文件可访问，不运行依赖检查或分析。先由`director.py style`保存风格，再由`director.py header`保存两行固定抬头，再由`director.py ratio`独立保存视频比例，三项设置完成后记录分段和画布同步意图，之后才运行`scripts/ensure_dependencies.py`与`project-init`。比例已有当前聊天确认默认值时使用`--inherit`，不重复询问；固定抬头不跨项目继承。设置和入口记录命令不解析剧本、不生成正式分段或分派云端任务。依赖准备仅缺失PyYAML时在同一解释器安装并验证，已有可用版本不升级，失败报告一次，不提权/循环尝试。
 
 资产完整顺序及命令唯一见[资产主流程](asset-workflow.md)。内置标准化脚本以 `<skill>/modules/screenplay-standardizer/` 为根，不搜索其他同名Skill，缺文件/摘要损坏时恢复完整包；项目产物不写安装目录。标准化、资产和设计交接按[模型调度](model-routing.md)保留prepare/verify/close；新文字分镜直接交接路径、版本和范围。
 
 ```text
 python <skill>/scripts/director.py intake-status --project <project>
 python <skill>/scripts/director.py style --project <project> --choice 1
+python <skill>/scripts/director.py header --project <project> --file <固定抬头.txt>
 python <skill>/scripts/director.py ratio --project <project> --choice 1
 python <skill>/scripts/director.py ratio --project <project> --inherit
 python <skill>/scripts/director.py status --project <project>
@@ -19,7 +20,7 @@ python <skill>/scripts/director.py locate --project <project> --segment A
 python <skill>/scripts/director.py range --project <project> --start <起点整数> --end <终点整数>
 ```
 
-设置命令按实际选择执行，不同时执行示例中的两种ratio保存方式。`--choice 1`为16:9，`--choice 2`为9:16；比例保存后记录分段方式、人数或自定义范围、同步选择和画布网址。比例保存后由统一画幅配置绑定`landscape-v1`或`portrait-v1`，新分镜单元冻结该配置，历史回执仍按原格式读取。正式分段计划的生成、目标切点、局部连续性审查、全局择点、摘要与精确范围接口统一见[剧本分工规则](script-partition.md)。范围和异常确认按[工作流](storyboard-workflow.md#范围定位与历史检查)。原位rebind未实现，来源/台账变化用[绑定变更边界](binding-changes.md)，不能手改session摘要。
+设置命令按实际选择执行，不同时执行示例中的两种ratio保存方式。`header --file`要求输入两行非空固定抬头并独立保存为项目`video-header.txt`；`--choice 1`为16:9，`--choice 2`为9:16；比例保存后记录分段方式、人数或自定义范围、同步选择和画布网址。比例保存后由统一画幅配置绑定`landscape-v1`或`portrait-v1`，新分镜单元冻结该配置，历史回执仍按原格式读取。正式分段计划的生成、目标切点、局部连续性审查、全局择点、摘要与精确范围接口统一见[剧本分工规则](script-partition.md)。范围和异常确认按[工作流](storyboard-workflow.md#范围定位与历史检查)。原位rebind未实现，来源/台账变化用[绑定变更边界](binding-changes.md)，不能手改session摘要。
 
 ## 文本分镜接口
 
@@ -33,7 +34,7 @@ python <skill>/scripts/director.py range --project <project> --start <起点整�
 
 跨电脑交接、导入已上传项目包和本机路径重定位统一使用[项目迁移](project-portability.md)中的`director.py project`接口。恢复后先读取`project resume`；绑定内容未变的位置迁移不走原位rebind，不手改会话、原审摘要或批次编号。
 
-先按项目文件选择入口。已有`session.json`的绑定项目运行`director.py status`；尚未bind的新项目先用`intake-status`核对风格和比例，再读取入口记录、`project-contract.json`、已保存来源/阶段产物及`pipeline_metrics.py status --project <project>`，不能把缺少session当作损坏或因此重复初始化。入口记录与workflow版本保存在项目工作流设置中；分工计划和视频比例均由各自保存接口维护，不能手改session中的摘要或编号。
+先按项目文件选择入口。已有`session.json`的绑定项目运行`director.py status`；尚未bind的新项目先用`intake-status`核对风格、固定抬头和比例，再读取入口记录、`project-contract.json`、已保存来源/阶段产物及`pipeline_metrics.py status --project <project>`，不能把缺少session当作损坏或因此重复初始化。入口记录与workflow版本保存在项目工作流设置中；分工计划、固定抬头和视频比例均由各自保存接口维护，不能手改session中的摘要或编号。
 
 绑定项目以`status.recovery`中的session前台阶段、当前输入对应队列及提交记录为准；`intake-state.json`仅是历史快照，不用其旧计数、next_step或失败描述决定续接。查询只读、不连接云端、不改变phase、不解除暂停。phase只表前台位置，不代表外部授权；后台worker状态独立，已排队或单步ACK不计完整节点完成，完成事件不覆盖正在创作的phase。
 

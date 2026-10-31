@@ -24,7 +24,7 @@ REQUIRED_FILES = (
     'scripts/batch_naming.py', 'scripts/shot_review.py', 'scripts/storyboard_preflight.py',
     'scripts/staging_preflight.py', 'scripts/dialogue_layout.py',
     'scripts/speech_timing_audit.py', 'scripts/audio_sources.py',
-    'scripts/ratio_profiles.py',
+    'scripts/ratio_profiles.py', 'scripts/video_header.py',
     'scripts/prop_reference_review.py', 'scripts/group_reference_review.py',
     'references/asset-workflow.md',
     'modules/screenplay-standardizer/INSTRUCTIONS.md',

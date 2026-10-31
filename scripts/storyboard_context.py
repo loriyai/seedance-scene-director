@@ -14,7 +14,7 @@ import storyboard_text as text_core
 def context_hash(state, project=None):
     from project_paths import semantic_files
     data = {key: state.get(key) for key in
-            ('files', 'records', 'ledger', 'style_hash', 'units', 'entry')}
+            ('files', 'records', 'ledger', 'style_hash', 'header_hash', 'header_policy', 'units', 'entry')}
     data['files'] = semantic_files(state)
     data['context_policy'] = 'content-context-v2'
     required = ('references/storyboard-rules.md', 'references/storyboard-text-format.md',
@@ -22,6 +22,7 @@ def context_hash(state, project=None):
                 'scripts/storyboard_authoring_gate.py', 'scripts/storyboard_context.py',
                 'scripts/segment_naming.py', 'scripts/script_partition.py',
                 'scripts/video_settings.py', 'scripts/ratio_profiles.py',
+                'scripts/video_header.py',
                 'scripts/project_paths.py', 'scripts/project_continuation.py',
                 'references/storyboard-workflow.md', 'references/execution-contract.md')
     data['text_rules'] = {name: d.file_hash(d.ROOT / name) for name in required}
@@ -31,6 +32,9 @@ def context_hash(state, project=None):
         ratio = get_ratio(project, state)
         data['video_ratio'] = ratio
         data['ratio_profile'] = ratio_profiles.profile_summary(ratio)
+        from video_header import read as read_header
+        header = read_header(project, state, required=bool(state.get('header_hash')))
+        data['video_header'] = d.sha(header) if header is not None else None
         data['partition_plan'] = load_plan(project, state)
         from project_continuation import deliveries, related, sha
         from project_paths import resolve
@@ -44,9 +48,11 @@ def context_hash(state, project=None):
 
 def scene_context(project, scene_id, span=None):
     from video_settings import get_ratio
+    from video_header import read as read_header
     project = Path(project).resolve()
     state = d.load(project)
     ratio = get_ratio(project, state)
+    header = read_header(project, state, required=bool(state.get('header_hash')))
     d.require(state.get('style_hash'), '请先保存本项目风格')
     records, _, scenes, assets = text_core._context(state)
     d.require(scene_id in scenes, f'场次不存在：{scene_id}')
@@ -118,10 +124,13 @@ def scene_context(project, scene_id, span=None):
         'source_lines': {'first': first, 'last': last, 'text': '\n'.join(lines[first - 1:last])},
         'records': selected, 'allowed_asset_ids': allowed, 'assets': projected,
         'style': (project / 'video-style.txt').read_text(encoding='utf-8-sig').strip(),
+        'video_header': header,
         'video_ratio': ratio,
         'ratio_profile': ratio_profiles.profile_summary(ratio),
         'versions': {'session_revision': state['revision'], 'files': copy.deepcopy(state['files']),
-                     'style_sha256': state['style_hash'], 'context_sha256': context_hash(state, project)},
+                     'style_sha256': state['style_hash'],
+                     'header_sha256': state.get('header_hash') or (d.sha(header) if header is not None else None),
+                     'context_sha256': context_hash(state, project)},
         'neighbours': neighbours, 'local_neighbours': local_neighbours, 'semantic_review': 'not_performed',
         'limits': '仅派生本场资料；局部范围的完整记录及source_lines提供阅读上下文，不扩大span。'
                   '外观设计不代表当前剧情状态；未交付的前场末态须由写者另行提供，程序不推断接触、持物或通路。',

@@ -22,6 +22,7 @@ from storyboard_context import context_hash, scene_context
 import storyboard_metrics
 import segment_naming
 from video_settings import get_ratio
+from video_header import read as read_header, POLICY as HEADER_POLICY
 
 POLICY = 'scene-text-v1'
 EXPORT_FORMAT = 'ratio-summary-v1'
@@ -46,6 +47,7 @@ def check_incremental(project, draft, span=None):
     project, draft = Path(project).resolve(), Path(draft).resolve()
     state = d.load(project)
     d.require(state.get('style_hash'), '请先保存本项目风格')
+    header = read_header(project, state, required=bool(state.get('header_hash')))
     ratio = get_ratio(project, state)
     profile = ratio_profiles.profile_summary(ratio)
     raw = draft.read_bytes()
@@ -85,6 +87,8 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
     project, draft = Path(project).resolve(), Path(draft).resolve()
     state = d.load(project)
     d.require(state.get('style_hash'), '请先保存本项目风格')
+    header = read_header(project, state, required=bool(state.get('header_hash')))
+    header_policy = HEADER_POLICY if header is not None else d.HEADER_POLICY
     draft_bytes = draft.read_bytes()
     raw = draft_bytes.decode('utf-8-sig')
     parse_span = list(span) if span is not None else None
@@ -128,9 +132,14 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
     ratio = get_ratio(project, state)
     for unit in units:
         unit.update(style=style, output_format=POLICY,
-                    header_policy=d.HEADER_POLICY, black_reference_mode=d.BLACK_REFERENCE_MODE,
+                    header_policy=header_policy,
+                    black_reference_mode=d.BLACK_REFERENCE_MODE,
                     export_format=EXPORT_FORMAT,
                     voice_display_policy=text_core.VOICE_DISPLAY_POLICY)
+        if header is not None:
+            unit['header_text'] = header
+        else:
+            unit.pop('header_text', None)
         ratio_profiles.apply_to_unit(unit, ratio)
         if replace_ids:
             old = previous[unit['id']]
@@ -145,6 +154,11 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
                     # Historical units may predate the profile registry.  Do
                     # not silently attach a new profile while replacing them.
                     unit.pop(key, None)
+            for key in ('header_policy', 'header_text'):
+                if key in old:
+                    unit[key] = copy.deepcopy(old[key])
+                else:
+                    unit.pop(key, None)
         if unit.get('ratio_profile') is not None:
             ratio_profiles.require_unit_profile(unit)
     plan = segment_naming.active_plan(project, state)
@@ -158,7 +172,8 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
     info['camera_constraints'] = camera
     info['warnings'].extend(camera['warnings'])
     binding = {'draft_sha256': hashlib.sha256(draft_bytes).hexdigest(),
-               'context_sha256': context_hash(state, project)}
+               'context_sha256': context_hash(state, project),
+               'header_sha256': d.sha(header)}
     profiles = [ratio_profiles.profile_summary(unit['video_ratio']) for unit in units
                 if unit.get('video_ratio') is not None]
     info = {**info, **binding, 'scenes': selected, 'span': actual_span,
@@ -328,6 +343,7 @@ def commit(project, draft, request_id, review, output, span=None,
     mode = 'replace' if replace_ids else 'append'
     request_hash = digest({'policy': POLICY, 'draft_sha256': info['draft_sha256'],
                            'mode': mode, 'replace_ids': replace_ids or [], 'span': info['span'],
+                           'header_sha256': info.get('header_sha256'),
                            'video_ratios': info.get('video_ratios', []),
                            'ratio_profiles': [p['profile_id'] for p in info.get('ratio_profiles', [])]})
     previous_receipt = next((r for r in state['receipts'] if r['request_id'] == request_id), None)

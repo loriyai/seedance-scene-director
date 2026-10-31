@@ -162,7 +162,8 @@ def image_inventory(folder):
 
 def input_scope(session, kind, selected_ids):
     # Appending a new range does not invalidate an already frozen sync job.
-    scope = {k: session.get(k) for k in ("files", "drafts", "style_hash", "ledger", "video_style")}
+    scope = {k: session.get(k) for k in
+             ("files", "drafts", "style_hash", "header_hash", "header_policy", "ledger", "video_style")}
     if kind in ("videos", "references"):
         units = {u["id"]: u for u in session["units"]}
         d.require(all(i in units for i in selected_ids), "任务分镜已被移除")

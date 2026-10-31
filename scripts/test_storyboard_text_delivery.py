@@ -56,6 +56,8 @@ class TextDeliveryIntegration(unittest.TestCase):
                  'prop_ids': []}]}
         (self.project / 'script.txt').write_text(self.script, encoding='utf-8')
         (self.project / 'video-style.txt').write_text('3D国漫\n', encoding='utf-8')
+        self.header = '测试固定抬头第一行\n测试固定抬头第二行'
+        (self.project / 'video-header.txt').write_text(self.header + '\n', encoding='utf-8')
         d.write_json(self.project / 'source.json', {'paragraphs': [{'id': 1, 'text': self.script}]})
         d.write_json(self.project / 'review.json', {'fixture_only': True, 'scenes': []})
         d.write_json(self.project / 'ledger.json', self.ledger)
@@ -64,6 +66,7 @@ class TextDeliveryIntegration(unittest.TestCase):
         records, length = d.build_records(self.script, self.ledger)
         self.state = {
             'schema_version': 1, 'phase': 'range', 'style_hash': d.sha('3D国漫'),
+            'header_hash': d.sha(self.header), 'header_policy': 'custom-v1',
             'revision': 0, 'ranges': [], 'units': [], 'receipts': [], 'next_numbers': {},
             'length': length, 'entry': {'min': 4, 'durations': []},
             'ledger': copy.deepcopy(self.ledger), 'records': records,

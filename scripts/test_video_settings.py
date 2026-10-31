@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import director as d
 import video_settings as settings
+import video_header
 
 
 class VideoSettingsTests(unittest.TestCase):
@@ -21,13 +22,16 @@ class VideoSettingsTests(unittest.TestCase):
     def style(self, project=None):
         project = project or self.project
         project.mkdir(parents=True, exist_ok=True)
-        return d.set_style(SimpleNamespace(project=project, choice='1', file=None))
+        result = d.set_style(SimpleNamespace(project=project, choice='1', file=None))
+        video_header.save(project, '测试固定抬头第一行\n测试固定抬头第二行')
+        return result
 
     def test_each_intake_gate_only_saves_its_setting(self):
-        self.assertEqual(self.style()['next_step'], 'ratio')
-        self.assertEqual({p.name for p in self.project.iterdir()}, {'video-style.txt'})
+        self.assertEqual(self.style()['next_step'], 'header')
+        self.assertEqual({p.name for p in self.project.iterdir()}, {'video-style.txt', 'video-header.txt'})
         settings.save_ratio(self.project, '9:16')
-        self.assertEqual({p.name for p in self.project.iterdir()}, {'video-style.txt', 'video-ratio.txt'})
+        self.assertEqual({p.name for p in self.project.iterdir()},
+                         {'video-style.txt', 'video-header.txt', 'video-ratio.txt'})
         self.assertFalse((self.project / 'session.json').exists())
         self.assertFalse((self.project / 'project-contract.json').exists())
         self.assertEqual(settings.require_intake(self.project), '9:16')
@@ -78,6 +82,17 @@ class VideoSettingsTests(unittest.TestCase):
         (self.project / settings.RATIO_FILE).unlink()
         with self.assertRaisesRegex(ValueError, '尚未保存'):
             settings.get_ratio(self.project, state)
+
+    def test_header_is_independent_two_line_input_and_external_edits_are_detected(self):
+        self.style()
+        saved = video_header.status(self.project)
+        self.assertTrue(saved['header_saved'])
+        self.assertEqual(saved['header_policy'], 'custom-v1')
+        self.assertEqual((self.project / 'video-header.txt').read_text(encoding='utf-8'),
+                         '测试固定抬头第一行\n测试固定抬头第二行\n')
+        (self.project / 'video-header.txt').write_text('被外部改动的第一行\n被外部改动的第二行\n', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '固定抬头文件被外部更改'):
+            video_header.read(self.project, {'header_hash': saved['header_hash']})
 
     def test_legacy_default_is_read_only_but_new_workflow_requires_ratio(self):
         self.assertEqual(settings.get_ratio(self.project), '16:9')

@@ -21,6 +21,7 @@ import continuity
 import batch_naming
 import audio_sources
 import video_settings
+import video_header
 HEADER_SHA = "8001822afdf324cbbfa3eb284b2a03ccbde084b2e70fa66763a26b5c738e5962"
 HEADER_POLICY = "visual-only-v3"
 VISUAL_V2_HEADER_SHA = "8001822afdf324cbbfa3eb284b2a03ccbde084b2e70fa66763a26b5c738e5962"
@@ -317,6 +318,8 @@ def bind(args):
     style = style_path.read_text(encoding="utf-8-sig").strip() if style_path.is_file() else None
     if style is not None:
         validate_style(style)
+    header_path = project / video_header.HEADER_FILE
+    header = video_header.read(project, required=False) if header_path.is_file() else None
     if ledger.get("image_design_version"):
         require(style is not None, "已完成美术设计的台账须先保存对应视频风格")
         require(style == ledger.get("visual_style", {}).get("text"),
@@ -326,6 +329,8 @@ def bind(args):
              "drafts": report["fingerprint"]["drafts"], "length": length, "records": records,
              "ledger": ledger, "entry": {"min": args.min_duration, "max": 30, "durations": args.durations},
              "style_hash": sha(style) if style is not None else None,
+             "header_hash": video_header.digest(header) if header is not None else None,
+             "header_policy": video_header.POLICY if header is not None else None,
              "storyboard_authoring_policy": "shot-by-shot-v1",
              "ranges": [], "units": [], "next_numbers": {}, "receipts": []}
     if (project / video_settings.RATIO_FILE).exists() or (project / video_settings.WORKFLOW_FILE).exists():
@@ -346,7 +351,7 @@ def bind(args):
     return {"status": "bound", "project": str(project), "phase": state["phase"], "length": length}
 
 
-def load(project, verify_style=True, verify_ratio=True):
+def load(project, verify_style=True, verify_ratio=True, verify_header=True):
     from project_paths import state_view, io_path
     project = io_path(project)
     state = read_json(project / "session.json")
@@ -367,6 +372,11 @@ def load(project, verify_style=True, verify_ratio=True):
     require(current == state["drafts"], "逐场稿已变化；请重新复核绑定")
     if verify_style and state["style_hash"]:
         require(sha((project / "video-style.txt").read_text(encoding="utf-8-sig").strip()) == state["style_hash"], "风格文件被外部更改；请用style命令更新")
+    if state.get('header_hash'):
+        header = video_header.read(project, state, required=True, verify=verify_header)
+        state['_header_text'] = header
+        if verify_header:
+            require(video_header.digest(header) == state['header_hash'], '固定抬头文件被外部更改；请用header命令更新')
     if verify_ratio:
         video_settings.get_ratio(project, state)
     return state
@@ -376,7 +386,9 @@ def save(project, state):
     from project_paths import assert_writable, state_view
     assert_writable(project)
     state["revision"] += 1
-    write_json(project / "session.json", state_view(project, state, storing=True))
+    persistent = copy.deepcopy(state)
+    persistent.pop('_header_text', None)
+    write_json(project / "session.json", state_view(project, persistent, storing=True))
 
 
 def validate_style(style):
@@ -399,7 +411,19 @@ def set_style(args, state=None):
                               in {"assets", "screenplay"} else "range")
         save(args.project, state)
     return {"status": "style_saved", "style_file": str((args.project / "video-style.txt").resolve()),
-            "next_step": 'ratio' if state is None else state.get('phase')}
+            "next_step": 'header' if state is None else state.get('phase')}
+
+
+def set_header(args, state=None):
+    require(args.file is not None, '自定义固定抬头须指定--file')
+    result = video_header.save_file(args.project, args.file, state)
+    if state is not None:
+        state['_header_text'] = video_header.read(args.project, state, required=True)
+        if state.get('phase') == 'header':
+            state['phase'] = 'ratio'
+        save(args.project, state)
+        result['next_step'] = state.get('phase')
+    return result
 
 
 def set_ratio(args, state=None):
@@ -579,8 +603,12 @@ def milliseconds(value):
     return int(number)
 
 
-def fixed_header(policy=None):
+def fixed_header(policy=None, state=None, unit=None):
     # Unmarked stored units retain their original header on every re-export.
+    if policy == video_header.POLICY:
+        text = (unit or {}).get('header_text') or (state or {}).get('_header_text')
+        require(text, '当前分镜缺少已保存的项目固定抬头')
+        return video_header.validate(text).splitlines()
     versions = {None: ("fixed-header.txt", HEADER_SHA),
                 "visual-only-v2": ("fixed-header-visual-v2.txt", VISUAL_V2_HEADER_SHA),
                 HEADER_POLICY: ("fixed-header-visual-v3.txt", VISUAL_HEADER_SHA)}
@@ -913,7 +941,6 @@ def require_workflow(request):
 def validate(state, request, partial=False):
     require(not any(u.get('output_format') == 'scene-text-v1' for u in state.get('units', [])),
             '项目已有文字稿；新增及选定修改使用storyboard_text_delivery.py，旧回执仍可render，不回填旧结构化门槛')
-    fixed_header(HEADER_POLICY)
     require(state["style_hash"], "尚未选择并保存视频风格")
     require(request.get("mode") in ("append", "replace"), "mode须为append或replace")
     require(isinstance(request.get("request_id"), str) and request["request_id"].strip(), "缺少幂等request_id")
@@ -928,6 +955,9 @@ def validate(state, request, partial=False):
                     "新生成/修改的有声单元须在预览前登记speech_render_policy=explicit-cues-v1；历史回执仅保留读取和渲染")
     request = resolved_request(state, request)
     units = request["units"]
+    for unit in units:
+        policy = unit.get('header_policy', state.get('header_policy') or HEADER_POLICY)
+        fixed_header(policy, state, unit)
     from shot_dependencies import validate_request as validate_dependencies, scope_warning
     validate_dependencies(request)
     from storyboard_preflight import validate as validate_preflight
@@ -984,7 +1014,8 @@ def render_unit(state, unit, reference_text=None):
     relevant = set(unit["character_ids"] + scene_asset_ids(state, unit["scene_ids"]))
     relevant.update(pid for scene in state["ledger"]["scenes"] if scene["id"] in unit["scene_ids"] for pid in scene["prop_ids"])
     catalog = reference_catalog(state, relevant)
-    header = fixed_header(unit.get("header_policy"))
+    policy = unit.get('header_policy')
+    header = fixed_header(policy, state, unit)
     structured_format = unit.get("output_format") == OUTPUT_FORMAT
     current_format = unit.get("output_format") in ("reference-v2", OUTPUT_FORMAT)
     reference_format = unit.get("output_format") in ("reference-v1", "reference-v2", OUTPUT_FORMAT)
@@ -1158,7 +1189,9 @@ def commit(args, state):
         for index, unit in enumerate(units, 1):
             unit["style"] = style
             unit["black_reference_mode"] = BLACK_REFERENCE_MODE
-            unit["header_policy"] = HEADER_POLICY
+            unit["header_policy"] = working.get('header_policy') or HEADER_POLICY
+            if working.get('_header_text'):
+                unit['header_text'] = working['_header_text']
             if request["mode"] == "append":
                 main = unit["main_scene"]
                 number = working["next_numbers"].get(main, 1)
@@ -1179,6 +1212,11 @@ def commit(args, state):
                     unit.pop(field, None)
                     if field in old:
                         unit[field] = old[field]
+                for field in ('header_policy', 'header_text'):
+                    if field in old:
+                        unit[field] = copy.deepcopy(old[field])
+                    else:
+                        unit.pop(field, None)
                 working["units"][working["units"].index(old)] = unit
         if request["mode"] == "append":
             working["ranges"].append({"span": request["span"], "batch_id": request["request_id"],
@@ -1225,19 +1263,22 @@ def main():
     p.add_argument("--require-designed", action="store_true", help="新项目图片资产交付必须具备全部有效设计；旧事实台账兼容读取不自动升级")
     p.add_argument("--min-duration", type=int, default=4)
     p.add_argument("--durations", type=int, nargs="+")
-    for command in ('style', 'ratio', 'intake-status', 'phase', 'status', 'locate', 'range', 'check', 'commit', 'render'):
+    for command in ('style', 'header', 'ratio', 'intake-status', 'phase', 'status', 'locate', 'range', 'check', 'commit', 'render'):
         p = sub.add_parser(command)
         p.add_argument("--project", type=Path, required=True)
         if command == "style":
             p.add_argument("--choice", choices=("1", "2", "3"), required=True)
             p.add_argument("--file", type=Path)
+        elif command == "header":
+            p.add_argument("--file", type=Path, required=True,
+                           help='两行固定抬头文本文件；原样保存为项目video-header.txt')
         elif command == 'ratio':
             selection = p.add_mutually_exclusive_group(required=True)
             selection.add_argument('--choice', choices=('1', '2'))
             selection.add_argument('--inherit', action='store_true', help='沿用当前聊天已确认比例并独立保存到本项目')
         elif command == "phase":
             p.add_argument('--value', choices=('asset_choice', 'canvas_url', 'partition_choice', 'partition_count',
-                           'partition_confirm', 'image_choice', 'image_folder', 'style', 'ratio', 'range',
+                           'partition_confirm', 'image_choice', 'image_folder', 'style', 'header', 'ratio', 'range',
                            'nodes_choice', 'followup', 'complete'), required=True)
         elif command == "locate":
             selection = p.add_mutually_exclusive_group(required=True)
@@ -1275,10 +1316,13 @@ def main():
             result = bind(args)
         else:
             args.project = args.project.resolve()
-            state = (None if args.command in ('style', 'ratio', 'intake-status') and not (args.project / 'session.json').exists()
-                     else load(args.project, verify_style=args.command != 'style', verify_ratio=args.command != 'ratio'))
+            state = (None if args.command in ('style', 'header', 'ratio', 'intake-status') and not (args.project / 'session.json').exists()
+                     else load(args.project, verify_style=args.command != 'style',
+                               verify_ratio=args.command != 'ratio', verify_header=args.command != 'header'))
             if args.command == "style":
                 result = set_style(args, state)
+            elif args.command == 'header':
+                result = set_header(args, state)
             elif args.command == 'ratio':
                 result = set_ratio(args, state)
             elif args.command == 'intake-status':
