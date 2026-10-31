@@ -4,10 +4,16 @@ from pathlib import Path
 import director as d
 import canvas as c
 import canvas_jobs as jobs
+from project_paths import state_view
 
 
 def summarize(project, state, queue=None):
     project = Path(project)
+    # Callers may hold the in-memory session object produced before the
+    # project path was canonicalized (notably on macOS, where /var resolves
+    # through /private/var). The recovery view is read-only, so normalize a
+    # defensive copy before recomputing frozen input digests.
+    state = state_view(project, state)
     queue = jobs.status(project) if queue is None else queue
     binding = c.read_state(project).get('binding')
     manifests = {job['job_id']: job for job in jobs.manifests(project)}

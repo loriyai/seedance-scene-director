@@ -109,7 +109,6 @@ def targets(state, request, *, cue_policy=CUE_POLICY):
                 cues.append('1至6秒摄影选择：1至4秒按观看重点、动作路径和信息揭示比较固定与运动；'
                             '5至6秒不得全程固定，须有实际观看作用的相机位移或转向；移焦与主体动作不算。'
                             '相邻两镜不得均固定；缺少选择须待补，不得由程序回填，也不得以无意义微移或拖慢表演规避。')
-                cues.append('逐镜光照字段：核对主光、辅光、侧逆轮廓光、环境遮蔽、色彩溢出、连续性六项按顺序完整表达，且每项都落到当前画框可见的方向、阴影、高光、轮廓、反射或材质结果。')
             if '固定' in camera:
                 if (cue_policy == LEGACY_CUE_POLICY
                         and unit.get('review_dependencies', {}).get('policy') in ('shot-dependencies-v2', 'shot-dependencies-v3')

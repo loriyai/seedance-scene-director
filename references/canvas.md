@@ -73,7 +73,7 @@ python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind videos 
 
 1. 创建video业务节点，立即保存CLI分配的真实节点ID和本步官方确认；此时不要求默认name/title/caption已等于最终分镜编号。
 2. 在该真实ID上改名，name/title/caption逐字设为已提交单元display_name（旧单元无此字段时为原ID）。
-3. 设置generation.durationMs，数值为单元duration秒乘1000。新单元的video_ratio必须为16:9或9:16，并随单元及后台任务冻结；新建视频的initialData.generation.ratio使用该值，同一真实ID未完成初始化时继续核对及写入。已完成或复用的视频和没有video_ratio的历史单元保留原比例，不追加比例写入或验收条件。嵌套generation从最新内容合并，保留modelKey、resolution、prompt、references及其他配置，不修改已有媒体的实际durationMs。
+3. 设置generation.durationMs，数值为单元duration秒乘1000。新单元的video_ratio必须为16:9或9:16，并随单元、对应画幅配置及后台任务冻结；新建视频的initialData.generation.ratio使用该值，同一真实ID未完成初始化时继续核对及写入。已完成或复用的视频和没有video_ratio的历史单元保留原比例，不追加比例写入或验收条件。嵌套generation从最新内容合并，保留modelKey、resolution、prompt、references及其他配置，不修改已有媒体的实际durationMs。
 4. 新none-v1直接写入已编码图片资产引用的提示词；对历史edge-only-v1单元先按真实黑幕源节点和目标节点检查或建立独立reference连线，记录本次连线写入的官方确认；再从当前有效单元渲染完整提示词，以真实节点ID编码其他资产引用，通过官方提示词命令写入。正文不含黑幕标签，连线子步骤失败或ACK不明须停止后续写入并沿同一真实ID核对续接。
 
 每步记录命令和官方确认；四步全部获得确认后统一读取目标视频，核对name/title/caption、generation.durationMs、本轮初始化适用的generation.ratio、完整generation.prompt、真实节点标签及reference连线，并按下文引用规则核对适用媒体引用条目。单节点JSON回执保存于`canvas/video-write-receipts/`，记录真实节点ID、各步骤确认和名称、时长、提示词、引用的核对结果。最终全部核对通过才保存整节点完成回执；核心名称、时长或提示词未通过时返回`UNCERTAIN_WRITE`并保存`uncertain`回执，核心字段通过但引用尚未通过时保存`partial`回执，不标整节点完成。历史串行videos不检查图片是否就绪；新批量任务及显式references的缺图片单独记录待补，不判定为节点引用失败。各步骤确认不能代替整节点回执。创建阶段不做最终名称回读门槛，最终名称检查在改名、时长和提示词都完成后执行。复用已有视频跳过已确认的创建步骤，在同一真实ID上续接其余步骤。

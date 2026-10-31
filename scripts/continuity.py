@@ -4,10 +4,70 @@ The optional contract is replayed without changing units or legacy receipts.
 New-request callers decide when the contract is required.
 """
 import copy
+import re
 
 
 VERSION = 1
 MODES = {"visible", "offscreen", "occluded", "absent"}
+
+# scene-text-v1 keeps continuity in the visible shot prose.  These are
+# authoring-template cues, not a ban on real continuity wording: a concrete
+# action such as “接续上一单元的转身” remains valid.  The parser owns the
+# syntax, while this module owns the continuity wording policy.
+TEXT_CONTINUITY_POLICY = "scene-text-continuity-v1"
+_GENERIC_TEXT_CUES = (
+    ("GENERIC_CONTINUITY_CUE", re.compile(r"保持原文状态(?:开口|说话|继续)?")),
+    ("GENERIC_CONTINUITY_CUE", re.compile(r"表情与动作承接前镜")),
+    ("GENERIC_CONTINUITY_CUE", re.compile(r"承接[^。！？；]{0,48}(?:上一镜|前镜)")),
+    ("GENERIC_CONTINUITY_CUE", re.compile(r"承接[^。！？；]{0,48}(?:站位|环境|空间)")),
+)
+
+
+def _prompt_shot_body(shot):
+    """Return visible shot prose, excluding the transition metadata and SFX."""
+    text = shot.get("text", "") if isinstance(shot, dict) else ""
+    if "）" in text:
+        text = text.split("）", 1)[1]
+    if "音效：" in text:
+        text = text.rsplit("音效：", 1)[0]
+    return text.strip()
+
+
+def prompt_continuity_issues(unit):
+    """Find generic continuity placeholders in scene-text-v1 shot prose.
+
+    This is deliberately lexical and conservative.  It blocks known
+    authoring templates before preview/assembly, while leaving semantic
+    continuity and concrete action wording to the writer and independent
+    reviewer.
+    """
+    issues = []
+    if not isinstance(unit, dict):
+        return issues
+    key = unit.get("draft_key", "当前单元")
+    for index, shot in enumerate(unit.get("shots", []), 1):
+        body = _prompt_shot_body(shot)
+        for code, pattern in _GENERIC_TEXT_CUES:
+            match = pattern.search(body)
+            if match:
+                issues.append({
+                    "policy": TEXT_CONTINUITY_POLICY,
+                    "code": code,
+                    "unit": key,
+                    "shot": index,
+                    "cue": match.group(0),
+                    "message": "镜头正文含模板化连续性说明；改写为当前可见姿态、位置、持物、视线或动作相位。",
+                })
+                break
+    return issues
+
+
+def validate_prompt_continuity(units):
+    """Return blocking prompt-continuity issues for newly authored units."""
+    issues = []
+    for unit in units:
+        issues.extend(prompt_continuity_issues(unit))
+    return issues
 
 
 def require(condition, message):

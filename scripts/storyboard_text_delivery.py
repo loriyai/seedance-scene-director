@@ -15,7 +15,9 @@ import sys
 sys.dont_write_bytecode = True
 import director as d
 import batch_naming
+import ratio_profiles
 import storyboard_text as text_core
+import storyboard_authoring_gate
 from storyboard_context import context_hash, scene_context
 import storyboard_metrics
 import segment_naming
@@ -23,6 +25,51 @@ from video_settings import get_ratio
 
 POLICY = 'scene-text-v1'
 EXPORT_FORMAT = 'ratio-summary-v1'
+
+
+def require_dialogue_capacity(units):
+    """Reject impossible speech capacity; never redistribute author timings."""
+    from speech_timing_audit import text_dialogue_capacity
+    report = text_dialogue_capacity(units)
+    d.require(not report['errors'], '台词容量下限：' + '; '.join(
+        f'{row["unit"]}/镜头{row["shot"]}：{row["code"]}' for row in report['errors']))
+    return report
+
+
+def check_incremental(project, draft, span=None):
+    """Read only an authored scene prefix; not a preview or delivery approval.
+
+    Incomplete source tails and a final 1–3 second in-progress unit can be
+    inspected without inventing text, padding time, recording preview events,
+    allocating IDs or changing the default complete-scene validation.
+    """
+    project, draft = Path(project).resolve(), Path(draft).resolve()
+    state = d.load(project)
+    d.require(state.get('style_hash'), '请先保存本项目风格')
+    ratio = get_ratio(project, state)
+    profile = ratio_profiles.profile_summary(ratio)
+    raw = draft.read_bytes()
+    units = text_core.parse_incremental(raw.decode('utf-8-sig'), state, span)
+    camera = text_core.camera_constraints(units, *text_core.camera_context(state, units))
+    require_camera_constraints(camera)
+    capacity = require_dialogue_capacity(units)
+    selected = list(dict.fromkeys(sid for unit in units for sid in unit['scene_ids']))
+    actual_span = [units[0]['span'][0], units[-1]['span'][1]]
+    return {
+        'status': 'incremental_checked', 'validation_scope': 'authored_prefix_only',
+        'semantic_review': 'not_performed', 'delivery_eligible': False,
+        'requires_complete_scene_preview': True, 'unit_count': len(units),
+        'shot_count': sum(len(unit['shots']) for unit in units),
+        'total_duration': sum(unit['duration'] for unit in units),
+        'span': actual_span, 'scenes': selected,
+        'draft_sha256': hashlib.sha256(raw).hexdigest(),
+        'context_sha256': context_hash(state, project),
+        'video_ratio': ratio,
+        'ratio_profile': profile,
+        'camera_constraints': camera, 'dialogue_capacity': capacity,
+        'warnings': camera['warnings'],
+        'limits': '仅检查已经逐镜写出的前缀；没有推断动作覆盖、补写后文或审阅通过。完整场景仍须正常preview及独立主审。',
+    }
 
 
 def now():
@@ -33,7 +80,8 @@ def digest(value):
     return d.sha(d.packed(value))
 
 
-def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True):
+def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
+            authoring_trace=None):
     project, draft = Path(project).resolve(), Path(draft).resolve()
     state = d.load(project)
     d.require(state.get('style_hash'), '请先保存本项目风格')
@@ -53,6 +101,11 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True):
         d.require(span is None or list(span) == parse_span, '--span与指定修改单元范围不同')
     units = text_core.parse(raw, state, source_span=parse_span)
     info = text_core.validate(state, units)
+    authoring = storyboard_authoring_gate.validate(
+        project, state, draft_bytes, units, context_hash(state, project), authoring_trace,
+        draft_path=draft)
+    storyboard_authoring_gate.require(authoring)
+    info['dialogue_capacity'] = require_dialogue_capacity(units)
     selected = list(dict.fromkeys(sid for unit in units for sid in unit['scene_ids']))
     actual_span = [units[0]['span'][0], units[-1]['span'][1]]
     if replace_ids:
@@ -76,14 +129,24 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True):
     for unit in units:
         unit.update(style=style, output_format=POLICY,
                     header_policy=d.HEADER_POLICY, black_reference_mode=d.BLACK_REFERENCE_MODE,
-                    video_ratio=ratio, export_format=EXPORT_FORMAT)
+                    export_format=EXPORT_FORMAT,
+                    voice_display_policy=text_core.VOICE_DISPLAY_POLICY)
+        ratio_profiles.apply_to_unit(unit, ratio)
         if replace_ids:
             old = previous[unit['id']]
             # A targeted edit retains its original numbering and video shape;
             # changing a default cannot silently change an existing unit.
-            for key in (*segment_naming.IDENTITY_FIELDS, 'display_name', 'batch_label', 'batch_index', 'video_ratio'):
+            for key in (*segment_naming.IDENTITY_FIELDS, 'display_name', 'batch_label', 'batch_index',
+                        'video_ratio', 'ratio_profile', 'ratio_profile_version',
+                        'ratio_profile_digest'):
                 if key in old:
                     unit[key] = copy.deepcopy(old[key])
+                elif key in ('video_ratio', 'ratio_profile', 'ratio_profile_version', 'ratio_profile_digest'):
+                    # Historical units may predate the profile registry.  Do
+                    # not silently attach a new profile while replacing them.
+                    unit.pop(key, None)
+        if unit.get('ratio_profile') is not None:
+            ratio_profiles.require_unit_profile(unit)
     plan = segment_naming.active_plan(project, state)
     identities = segment_naming.assignments(state, plan, units) if not replace_ids else None
     if identities:
@@ -96,8 +159,14 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True):
     info['warnings'].extend(camera['warnings'])
     binding = {'draft_sha256': hashlib.sha256(draft_bytes).hexdigest(),
                'context_sha256': context_hash(state, project)}
+    profiles = [ratio_profiles.profile_summary(unit['video_ratio']) for unit in units
+                if unit.get('video_ratio') is not None]
     info = {**info, **binding, 'scenes': selected, 'span': actual_span,
+            'video_ratios': list(dict.fromkeys(unit.get('video_ratio') for unit in units
+                                               if unit.get('video_ratio') is not None)),
+            'ratio_profiles': list({profile['profile_id']: profile for profile in profiles}.values()),
             'semantic_review': 'not_performed',
+            'authoring_gate': authoring,
             'history': d.range_review(state, actual_span, project=project) if not replace_ids else None}
     from project_continuation import review_bridge
     bridge = review_bridge(project, binding['draft_sha256'], binding['context_sha256'])
@@ -112,6 +181,8 @@ def require_camera_constraints(report):
 
 
 def verify_review(report, info):
+    d.require(info.get('validation_scope') != 'authored_prefix_only',
+              '增量检查不能作为完整场景审阅或交付依据')
     d.require(isinstance(report, dict), '场次审阅须为JSON对象')
     for key in ('draft_sha256', 'context_sha256'):
         bridge = info.get('review_bridge')
@@ -128,6 +199,20 @@ def verify_review(report, info):
         d.require(row.get('status') == 'passed' and row.get('issues') == [],
                   f'{row.get("scene_id")} 仍有未关闭问题')
         d.require(isinstance(row.get('basis'), str) and row['basis'].strip(), '缺少实际成稿审阅及问题关闭说明')
+    gate = info.get('authoring_gate', {})
+    if gate.get('enforced'):
+        d.require(report.get('semantic_review') == 'performed',
+                  '新逐镜写作政策要求语义审阅明确标记为performed')
+        d.require(report.get('authoring_trace_sha256') == gate.get('trace_sha256'),
+                  '审阅未绑定当前逐镜写作侧车')
+        d.require(report.get('authoring_gate_digest') == gate.get('gate_digest'),
+                  '审阅未绑定当前逐镜写作闸门结果')
+        d.require(report.get('shot_count') == gate.get('shot_count'),
+                  '审阅镜头总数与逐镜写作稿不一致')
+        expected_shots = gate.get('shot_keys', [])
+        reviewed = report.get('reviewed_shots')
+        d.require(reviewed == expected_shots,
+                  '审阅必须按当前稿件顺序列出全部镜头；不能用通用场级passed代替逐镜阅读')
     return copy.deepcopy(report)
 
 
@@ -169,11 +254,13 @@ def write_preview(target, payload):
             raise
 
 
-def preview(project, draft, output=None, span=None, replace_ids=None, activity_id=None):
+def preview(project, draft, output=None, span=None, replace_ids=None, activity_id=None,
+            authoring_trace=None):
     from project_paths import assert_writable
     assert_writable(project)
     project, draft = Path(project).resolve(), Path(draft).resolve()
-    state, units, info = prepare(project, draft, span, replace_ids)
+    state, units, info = prepare(project, draft, span, replace_ids,
+                                 authoring_trace=authoring_trace)
     payload = render_units(state, units, preview=True).encode('utf-8')
     artifact = {key: info[key] for key in ('draft_sha256', 'context_sha256', 'span', 'scenes')}
     artifact.update(draft=str(draft), output_sha256=hashlib.sha256(payload).hexdigest())
@@ -231,15 +318,18 @@ def timing(project):
 
 
 def commit(project, draft, request_id, review, output, span=None,
-           replace_ids=None, range_confirmation=None):
+           replace_ids=None, range_confirmation=None, authoring_trace=None):
     from project_paths import assert_writable
     assert_writable(project)
     project = Path(project).resolve()
     d.require(isinstance(request_id, str) and request_id.strip(), 'request_id不能为空')
-    state, units, info = prepare(project, draft, span, replace_ids, check_camera=False)
+    state, units, info = prepare(project, draft, span, replace_ids, check_camera=False,
+                                 authoring_trace=authoring_trace)
     mode = 'replace' if replace_ids else 'append'
     request_hash = digest({'policy': POLICY, 'draft_sha256': info['draft_sha256'],
-                           'mode': mode, 'replace_ids': replace_ids or [], 'span': info['span']})
+                           'mode': mode, 'replace_ids': replace_ids or [], 'span': info['span'],
+                           'video_ratios': info.get('video_ratios', []),
+                           'ratio_profiles': [p['profile_id'] for p in info.get('ratio_profiles', [])]})
     previous_receipt = next((r for r in state['receipts'] if r['request_id'] == request_id), None)
     if previous_receipt:
         d.require(previous_receipt.get('policy') == POLICY and previous_receipt['request_hash'] == request_hash,
@@ -315,11 +405,17 @@ def commit(project, draft, request_id, review, output, span=None,
         receipt = {'policy': POLICY, 'request_id': request_id, 'request_hash': request_hash,
                    'mode': mode, 'output': str(target), 'units': copy.deepcopy(units),
                    'display_format': d.RECEIPT_DISPLAY_FORMAT, 'export_format': EXPORT_FORMAT,
-                   'video_ratios': list(dict.fromkeys(unit['video_ratio'] for unit in units)),
+                   'video_ratios': list(dict.fromkeys(unit.get('video_ratio') for unit in units
+                                                     if unit.get('video_ratio') is not None)),
+                   'ratio_profiles': list(dict.fromkeys(
+                       unit['ratio_profile'] for unit in units if unit.get('ratio_profile'))),
                    'final_review': final_review,
+                   'authoring_gate': copy.deepcopy(info.get('authoring_gate')),
                    'committed_at': now()}
         if len(receipt['video_ratios']) == 1:
             receipt['video_ratio'] = receipt['video_ratios'][0]
+        if len(receipt['ratio_profiles']) == 1:
+            receipt['ratio_profile'] = receipt['ratio_profiles'][0]
         if mode == 'append' and plan is None:
             receipt.update(batch_scope=str(scope), batch_label=batch_label)
         elif plan:
@@ -348,6 +444,11 @@ def main():
         p.add_argument('--draft', type=Path, required=True)
         p.add_argument('--span', type=int, nargs=2)
         p.add_argument('--replace-ids', nargs='+')
+        p.add_argument('--authoring-trace', type=Path,
+                       help='逐镜写作侧车；省略时读取<draft>.authoring.json')
+        if name == 'check':
+            p.add_argument('--incremental', action='store_true',
+                           help='只读检查当前场已写前缀；不生成实际稿、编号或审阅通过')
         if name != 'check':
             p.add_argument('--output', type=Path, required=name == 'commit')
         if name == 'preview':
@@ -381,12 +482,18 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == 'check':
-            state, units, result = prepare(args.project, args.draft, args.span, args.replace_ids)
+            if args.incremental:
+                d.require(not args.replace_ids, '增量检查不接受--replace-ids；指定修改使用正常check/preview')
+                result = check_incremental(args.project, args.draft, args.span)
+            else:
+                state, units, result = prepare(args.project, args.draft, args.span, args.replace_ids,
+                                               authoring_trace=args.authoring_trace)
         elif args.command == 'preview':
-            result = preview(args.project, args.draft, args.output, args.span, args.replace_ids, args.activity_id)
+            result = preview(args.project, args.draft, args.output, args.span, args.replace_ids,
+                             args.activity_id, args.authoring_trace)
         elif args.command == 'commit':
             result = commit(args.project, args.draft, args.request_id, args.review, args.output,
-                            args.span, args.replace_ids, args.range_confirmation)
+                            args.span, args.replace_ids, args.range_confirmation, args.authoring_trace)
         elif args.command == 'render':
             state = d.load(args.project)
             receipt = next((r for r in state['receipts'] if r['request_id'] == args.request_id), None)

@@ -3,6 +3,7 @@ from pathlib import Path
 import uuid
 
 import director as d
+import project_paths
 
 
 KIND_NAMES = {"role": "角色节点", "scene": "场景节点", "image": "道具图片节点", "video": "视频节点"}
@@ -154,7 +155,8 @@ def collect_issues(session, state, doc, units, failures=(), inspect_media=True):
 def write_reference_report(project, session, state, doc, units, failures=(), output=None, inspect_media=True):
     """Write a user TXT and a resumable JSON record without changing prompt files."""
     c = api()
-    project = Path(project).resolve()
+    project = project_paths.absolute_path(project)
+    canonical_project = project.resolve()
     issues = collect_issues(session, state, doc, units, failures, inspect_media)
     missing_images = [issue for issue in issues if issue["reason"] == "missing_image"]
     missing_videos = [issue for issue in issues if issue["reason"] == "missing_video"]
@@ -163,14 +165,16 @@ def write_reference_report(project, session, state, doc, units, failures=(), out
     display_units = lambda ids: "，".join(unit_names.get(uid, uid) for uid in ids)
     if output is None:
         receipt_output = next((r.get("output") for r in reversed(session.get("receipts", [])) if r.get("output")), None)
-        directory = Path(receipt_output).resolve().parent if receipt_output else project / "reports"
+        directory = project_paths.absolute_path(receipt_output).parent if receipt_output else project / "reports"
         output = directory / (project.name + "_资产与引用检查_" + uuid.uuid4().hex[:8] + ".txt")
-    output = Path(output).resolve()
-    protected = [Path(r["output"]).resolve() for r in session.get("receipts", []) if r.get("output")]
-    protected += [Path(v["path"]).resolve() for v in session.get("files", {}).values() if isinstance(v, dict) and v.get("path")]
-    d.require(output.suffix.lower() == ".txt" and output not in protected,
+    output = project_paths.absolute_path(output)
+    canonical_output = output.resolve()
+    protected = [project_paths.absolute_path(r["output"]).resolve() for r in session.get("receipts", []) if r.get("output")]
+    protected += [project_paths.absolute_path(v["path"]).resolve() for v in session.get("files", {}).values() if isinstance(v, dict) and v.get("path")]
+    d.require(output.suffix.lower() == ".txt" and canonical_output not in protected,
               "检查报告须为独立TXT，不能覆盖剧本、台账或分镜提示词")
-    d.require(d.ROOT != output and d.ROOT not in output.parents and output.parent != (project / "canvas").resolve(),
+    d.require(d.ROOT != canonical_output and d.ROOT not in canonical_output.parents
+              and canonical_output.parent != (canonical_project / "canvas").resolve(),
               "用户检查报告不能写入Skill或画布后台状态目录")
     lines = ["小云雀资产与引用检查记录", "画布ID：" + str(state.get("binding", {}).get("canvas_id", "未绑定")),
              "本次分镜：" + (display_units(u["id"] for u in units) or "无"), "",

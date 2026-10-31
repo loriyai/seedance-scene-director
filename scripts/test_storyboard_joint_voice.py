@@ -50,6 +50,7 @@ class JointVoiceTests(unittest.TestCase):
         state, draft, _, _ = self.joint()
         for wrong in (draft.replace('别动，等我回来。', '别动，等我回来！'),
                       draft.replace('}说', '}内心想法'),
+                      draft.replace('}说', '}内心想法os'),
                       draft.replace('@{CHAR0001}、@{CHAR0002}说', '阿青、路人-群像说')):
             with self.assertRaises(ValueError):
                 core.parse(wrong, state)

@@ -19,7 +19,8 @@ MAX_FILE_BYTES = 256 * 1024 ** 2
 PATH_KEYS = {'path', 'draft', 'output', 'actual_output', 'original_review', 'context', 'preview',
              'assembly_proof', 'review_reuse', 'manifest', 'source', 'script', 'ledger', 'review'}
 CREATIVE_FILES = ('references/storyboard-rules.md', 'references/storyboard-workflow.md',
-                  'references/storyboard-text-format.md', 'assets/fixed-header-visual-v3.txt')
+                  'references/storyboard-text-format.md', 'scripts/ratio_profiles.py',
+                  'assets/fixed-header-visual-v3.txt')
 LEGACY_CONTEXT_FILES = ('references/storyboard-rules.md', 'references/storyboard-text-format.md',
                        'scripts/storyboard_text.py', 'scripts/storyboard_text_delivery.py',
                        'scripts/storyboard_context.py', 'scripts/segment_naming.py',
@@ -48,8 +49,10 @@ def make_review_bridge(project, state, point, runtime):
         return inherited
     if report['context_sha256'] == current:
         return None
-    if any(d.file_hash(Path(runtime) / name) != d.file_hash(d.ROOT / name) for name in CREATIVE_FILES):
-        return None
+    for name in CREATIVE_FILES:
+        runtime_file = Path(runtime) / name
+        if not runtime_file.is_file() or d.file_hash(runtime_file) != d.file_hash(d.ROOT / name):
+            return None
     if report['context_sha256'] != legacy_context(state, project, runtime):
         return None
     return {'policy': 'legacy-path-binding-equivalence-v1', 'draft_sha256': point['artifacts']['draft']['sha256'],

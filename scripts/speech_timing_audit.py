@@ -1,8 +1,68 @@
 """Backend-only fragment timing diagnostics; never render or alter dialogue."""
 import re
 import math
+from decimal import Decimal, InvalidOperation
+import unicodedata
 
 from dialogue_layout import pause_seconds, SPEEDS, PAUSE_RANGES
+
+
+TEXT_DIALOGUE_CAPACITY_POLICY = 'scene-text-dialogue-capacity-v1'
+
+
+def text_dialogue_capacity(units):
+    """Check the mechanical fastest-speech lower bound for authored text.
+
+    The complete shot window is compared against all of its exact dialogue
+    fragments combined.  This pure diagnostic never edits speech, timing,
+    cuts or any creative prose, and a checked result is not semantic approval
+    or proof that the dialogue sounds natural at the chosen delivery.
+    """
+    errors = []
+    checked, skipped = 0, 0
+    for unit in units:
+        key = unit.get('draft_key', unit.get('id', '当前单元'))
+        for number, shot in enumerate(unit.get('shots', []), 1):
+            parts = shot.get('dialogue_parts', [])
+            if not parts:
+                skipped += 1
+                continue
+            texts = [part.get('text') for part in parts]
+            if not all(isinstance(text, str) for text in texts):
+                raise ValueError(f'{key}/镜头{number}：台词容量检查须有原文text字符串')
+            try:
+                values = [shot.get(field) for field in ('start', 'end')]
+                if any(isinstance(value, bool) for value in values):
+                    raise ValueError('布尔值不是秒数')
+                start, end = (Decimal(str(value)) for value in values)
+                if not start.is_finite() or not end.is_finite() or end <= start:
+                    raise ValueError('时间窗须为有限正时长')
+            except (InvalidOperation, ValueError) as exc:
+                raise ValueError(f'{key}/镜头{number}：台词容量检查须有合法起止秒数') from exc
+            text = ''.join(texts)
+            characters = sum(unicodedata.category(char)[0] in ('L', 'N') for char in text)
+            commas = sum(char in '，、,' for char in text)
+            endings = sum(char in '。！？!?' for char in text)
+            minimum = (Decimal(characters) / Decimal(6)
+                       + Decimal(commas) / Decimal(10)
+                       + Decimal(endings) / Decimal(5))
+            duration = end - start
+            checked += 1
+            if duration < minimum:
+                errors.append({
+                    'code': 'DIALOGUE_CAPACITY', 'unit': key, 'shot': number,
+                    'minimum': float(minimum), 'duration': float(duration),
+                    'deficit': float(minimum - duration),
+                    'dialogue_characters': characters,
+                    'comma_or_pause_count': commas,
+                    'sentence_end_count': endings,
+                    'kind': '镜头时长低于台词机械最低时长，须由作者重分镜窗或切点；程序不自动改稿。',
+                })
+    return {'policy': TEXT_DIALOGUE_CAPACITY_POLICY,
+            'status': 'blocked' if errors else 'checked',
+            'errors': errors, 'checked_dialogue_shots': checked,
+            'skipped_no_dialogue_shots': skipped,
+            'semantic_review': 'not_performed'}
 
 
 def audit(unit):

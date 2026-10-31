@@ -28,16 +28,17 @@ def fixture(dialogue='别动，等我回来。', voice='说'):
 人物：@{{CHAR0001}}；
 场景：@{{SET0001}}；时间：白天；天气：未明示；
 人物站位：@{{CHAR0001}}站在门边朝向窗外。
-·00秒-03秒[镜头1-交代]：（@{{CHAR0001}}的中景；转场：硬切）机位向右平移，保持人物左前方平视，广角保留门框与窗边纵深，人物居左，门框在后景，人物与门框清晰，光照：主光：左前方冷白窗光，偏硬，照亮左脸并在右颊形成窄阴影；辅光：地面灰蓝反射，低强度，保留眼窝暗部；侧逆轮廓光：右后方微弱冷光，勾勒发丝和肩线；环境遮蔽：门槛与衣袖接触处保留柔和阴影；色彩溢出：窗外冷蓝落在门框边缘，无明显彩色光斑；连续性：本镜建立场景基线；镜头向右平移，@{{CHAR0001}}停在门边。音效：无。
+·00秒-03秒[镜头1-交代]：（@{{CHAR0001}}的中景；转场：硬切）镜头向右平移，人物居左，门框在后景，人物与门框清晰，窗外柔光；@{{CHAR0001}}停在门边。音效：无。
 声音[L000004,0.2-2.8]：@{{CHAR0001}}{voice}（压低音量）：“{dialogue}”
-·03秒-05秒[镜头2-等待]：（@{{CHAR0001}}的近景；转场：硬切）侧后方平视固定机位保持视线关系，中长焦轻微压缩肩部与窗框距离，肩部在前景、窗框在后景，窗框略柔而可辨，光照：主光：沿用左前方冷白窗光，照亮脸部左侧并保持右颊阴影；辅光：沿用低强度灰蓝地面反射，暗部不抬平；侧逆轮廓光：沿用右后方微弱冷光，保持发丝边缘；环境遮蔽：沿用门槛与衣袖接触阴影；色彩溢出：沿用窗框边缘冷蓝反射，无新增色源；连续性：沿用上一镜光照基线；@{{CHAR0001}}看向窗外。音效：无。
+·03秒-05秒[镜头2-等待]：（@{{CHAR0001}}的近景；转场：硬切）侧后方固定机位保留视线方向，肩部在前景，窗框清晰，沿用窗外柔光；@{{CHAR0001}}看向窗外。音效：无。
 '''
     return state, text
 
 
 def renderable(unit):
     unit = copy.deepcopy(unit)
-    unit.update(id='场景1-分镜1', display_name='A01-场景1-分镜1', style='3D国漫写实厚涂风格')
+    unit.update(id='场景1-分镜1', display_name='A01-场景1-分镜1', style='3D国漫写实厚涂风格',
+                voice_display_policy=st.VOICE_DISPLAY_POLICY)
     return unit
 
 
@@ -71,15 +72,118 @@ class StoryboardTextTests(unittest.TestCase):
         self.assertEqual(report['semantic_review'], 'not_performed')
         self.assertEqual(self.state, original)
 
-    def test_each_shot_requires_ordered_six_part_lighting_clause(self):
-        valid = st.parse(self.text, self.state)
-        self.assertEqual(len(valid[0]['shots']), 2)
-        bad_order = self.text.replace('光照：主光：', '光照：辅光：', 1)
-        with self.assertRaisesRegex(ValueError, '光照字段须按'):
-            st.parse(bad_order, self.state)
-        missing = self.text.replace('环境遮蔽：门槛与衣袖接触处保留柔和阴影；', '', 1)
-        with self.assertRaisesRegex(ValueError, '光照字段须按'):
-            st.parse(missing, self.state)
+    def test_roster_and_focal_refs_cannot_replace_global_character_ref(self):
+        invalid = self.text.replace(
+            '人物站位：@{CHAR0001}站在门边朝向窗外。',
+            '人物站位：阿青站在门边朝向窗外。')
+        before = copy.deepcopy(self.state)
+        with self.assertRaisesRegex(ValueError, '人物站位.*BARE_CHARACTER_NAME'):
+            st.parse(invalid, self.state)
+        self.assertIn('人物：@{CHAR0001}', invalid)
+        self.assertIn('（@{CHAR0001}的中景', invalid)
+        self.assertEqual(self.state, before)
+
+    def test_focal_ref_cannot_replace_body_character_ref(self):
+        invalid = self.text.replace('@{CHAR0001}停在门边。', '阿青停在门边。')
+        with self.assertRaisesRegex(ValueError, '镜头1正文.*BARE_CHARACTER_NAME'):
+            st.parse(invalid, self.state)
+
+    def test_surname_subject_is_diagnostic_and_never_auto_completed(self):
+        state = copy.deepcopy(self.state)
+        state['ledger']['characters'][0].update(name='陈默-基础形象', source_entry='陈默-基础形象', source_speaker='阿青')
+        for shorthand in ('陈在其右双手托盆。', '陈左手握杯。', '陈仍托着盆。'):
+            text = self.text.replace('@{CHAR0001}站在门边朝向窗外。', shorthand)
+            units = st._parse_units(text, state)
+            original = copy.deepcopy(units)
+            issues = st.character_reference_issues(state, units)
+            self.assertEqual(issues[0]['code'], 'AMBIGUOUS_CHARACTER_SHORTHAND')
+            self.assertTrue(issues[0]['review_required'])
+            self.assertEqual(issues[0]['asset_candidates'], ['CHAR0001'])
+            self.assertEqual(units, original)
+            with self.subTest(shorthand=shorthand), self.assertRaisesRegex(ValueError, 'AMBIGUOUS_CHARACTER_SHORTHAND'):
+                st.parse(text, state)
+
+    def test_global_binding_does_not_bind_a_new_shot_pronoun(self):
+        text = self.text.replace('@{CHAR0001}停在门边。', '他看向窗外。')
+        with self.assertRaisesRegex(ValueError, 'UNBOUND_CHARACTER_PRONOUN'):
+            st.parse(text, self.state)
+
+    def test_same_sentence_bound_parts_and_subject_pronoun_are_legal(self):
+        text = self.text.replace(
+            '@{CHAR0001}停在门边。',
+            '@{CHAR0001}停在门边，肩膀后沉，右手垂在身侧，他仍看向窗外。')
+        units = st.parse(text, self.state)
+        self.assertEqual(st.character_reference_issues(self.state, units), [])
+
+    def test_subject_binding_resets_at_sentence_boundary(self):
+        text = self.text.replace('@{CHAR0001}停在门边。', '@{CHAR0001}停在门边。他转头。')
+        with self.assertRaisesRegex(ValueError, 'UNBOUND_CHARACTER_PRONOUN'):
+            st.parse(text, self.state)
+
+    def test_new_personal_target_requires_its_own_reference(self):
+        state = copy.deepcopy(self.state)
+        state['ledger']['scenes'][0]['character_ids'].append('CHAR0003')
+        for body, expected in (('@{CHAR0001}看向阿白。', 'BARE_CHARACTER_NAME'),
+                               ('@{CHAR0001}向她伸手。', 'AMBIGUOUS_CHARACTER_TARGET')):
+            text = self.text.replace('@{CHAR0001}停在门边。', body)
+            with self.subTest(body=body), self.assertRaisesRegex(ValueError, expected):
+                st.parse(text, state)
+
+    def test_explicit_two_person_relation_is_legal(self):
+        state = copy.deepcopy(self.state)
+        state['ledger']['scenes'][0]['character_ids'].append('CHAR0003')
+        text = self.text.replace('人物：@{CHAR0001}；', '人物：@{CHAR0001}，@{CHAR0003}；')
+        text = text.replace('@{CHAR0001}停在门边。', '@{CHAR0001}看向@{CHAR0003}，右手垂在身侧。')
+        units = st.parse(text, state)
+        self.assertEqual(st.character_reference_issues(state, units), [])
+
+    def test_multiple_bound_people_do_not_resolve_a_pronoun_automatically(self):
+        state = copy.deepcopy(self.state)
+        state['ledger']['scenes'][0]['character_ids'].append('CHAR0003')
+        text = self.text.replace('人物：@{CHAR0001}；', '人物：@{CHAR0001}，@{CHAR0003}；')
+        text = text.replace('@{CHAR0001}停在门边。', '@{CHAR0001}与@{CHAR0003}隔门相对，他转头。')
+        with self.assertRaisesRegex(ValueError, 'AMBIGUOUS_CHARACTER_PRONOUN'):
+            st.parse(text, state)
+
+    def test_prompt_only_name_and_bound_pronoun_remain_plain_text(self):
+        text = self.text.replace('人物：@{CHAR0001}；', '人物：@{CHAR0001}，@{CHAR0002}；')
+        text = text.replace('@{CHAR0001}停在门边。', '路人站在门边，他看向窗外。')
+        units = st.parse(text, self.state)
+        self.assertEqual(st.character_reference_issues(self.state, units), [])
+
+    def test_original_dialogue_names_surnames_and_pronouns_are_unchanged(self):
+        spoken = '阿青，你看，陈在其右双手托盆，他转头了。'
+        state, text = fixture(spoken)
+        units = st.parse(text, state)
+        self.assertEqual(units[0]['shots'][0]['dialogue_parts'][0]['text'], spoken)
+        self.assertIn('：“' + spoken + '”', st.render_unit(state, renderable(units[0])))
+        self.assertEqual(st.character_reference_issues(state, units), [])
+
+    def test_quoted_visual_literal_is_not_a_character_reference(self):
+        text = self.text.replace('@{CHAR0001}停在门边。', '@{CHAR0001}停在门边，纸上写着“阿青”。')
+        self.assertEqual(st.character_reference_issues(self.state, st.parse(text, self.state)), [])
+
+    def test_single_character_names_are_not_matched_inside_ordinary_words(self):
+        state = copy.deepcopy(self.state)
+        state['ledger']['characters'][0].update(name='光-基础形象', source_entry='王-基础形象', source_speaker='阿青')
+        text = self.text.replace('@{CHAR0001}停在门边。', '@{CHAR0001}停在门边，灯光照亮霸王纹饰和王座。')
+        self.assertEqual(st.character_reference_issues(state, st.parse(text, state)), [])
+
+    def test_latin_alias_is_a_word_not_a_name_substring(self):
+        state = copy.deepcopy(self.state)
+        state['ledger']['characters'][0].update(name='Ann-基础形象')
+        text = self.text.replace('@{CHAR0001}停在门边。', '@{CHAR0001}停在Annex招牌旁。')
+        self.assertEqual(st.character_reference_issues(state, st.parse(text, state)), [])
+        with self.assertRaisesRegex(ValueError, 'BARE_CHARACTER_NAME'):
+            st.parse(text.replace('Annex招牌旁', 'Ann身侧'), state)
+
+    def test_same_named_appearances_are_candidates_not_a_guessed_binding(self):
+        state = copy.deepcopy(self.state)
+        state['ledger']['characters'].append({'id': 'CHAR0004', 'name': '阿青-戴面具', 'source_entry': '阿青-基础形象'})
+        state['ledger']['scenes'][0]['character_ids'].append('CHAR0004')
+        text = self.text.replace('@{CHAR0001}停在门边。', '阿青停在门边。')
+        issues = st.character_reference_issues(state, st._parse_units(text, state))
+        self.assertEqual(issues[0]['asset_candidates'], ['CHAR0001', 'CHAR0004'])
 
     def test_render_keeps_product_layout_and_strips_author_markers(self):
         unit = renderable(st.parse(self.text, self.state)[0])
@@ -123,7 +227,14 @@ class StoryboardTextTests(unittest.TestCase):
     def test_inner_voice_survives_exactly(self):
         state, text = fixture(voice='内心想法')
         output = st.render_unit(state, renderable(st.parse(text, state)[0]))
-        self.assertIn('@阿青-基础形象 内心想法（压低音量）', output)
+        self.assertIn('@阿青-基础形象 内心想法os（压低音量）', output)
+
+    def test_new_inner_voice_label_is_accepted_and_canonicalized(self):
+        state, text = fixture(voice='内心想法os')
+        unit = st.parse(text, state)[0]
+        self.assertEqual(unit['shots'][0]['dialogue_parts'][0]['voice'], '内心想法')
+        output = st.render_unit(state, renderable(unit))
+        self.assertIn('@阿青-基础形象 内心想法os（压低音量）', output)
 
     def test_invalid_ids_sc_refs_and_bare_names_rejected(self):
         for value in ('@{CHAR9999}', '@{SC0001}', '@阿青', '@{SET9999}', '@{PROP0002}'):
@@ -256,7 +367,7 @@ class StoryboardTextTests(unittest.TestCase):
     def test_historical_structural_parse_retains_every_camera_wording_and_duration(self):
         for wording, label in (('固定机位', 'fixed'), ('镜头向右平移', 'moving'), ('窗框清晰', 'unknown')):
             with self.subTest(wording=wording):
-                draft = self.action_draft([1, 2, 3, 4, 5, 6]).replace('机位向右平移', wording)
+                draft = self.action_draft([1, 2, 3, 4, 5, 6]).replace('镜头向右平移', wording)
                 units = st.parse(draft, self.state)
                 stats = st.validate(self.state, units)['observations']['camera_wording']
                 self.assertEqual(stats['basis'], 'lexical_leading_camera_clause_only')
@@ -330,7 +441,7 @@ class StoryboardTextTests(unittest.TestCase):
 人物：@{CHAR0001}；
 场景：@{SET0001}；时间：白天；天气：未明示；
 人物站位：@{CHAR0001}仍站在门边。
-·00秒-04秒[镜头1-等待]：（@{CHAR0001}的中景；转场：硬切）向窗边平移并停在肩后，窗框在后景，窗框清晰，光照：主光：左前方冷白窗光，偏软，照亮肩后空间；辅光：地面灰蓝反射，低强度，保留窗框暗部；侧逆轮廓光：右后方微弱冷光，勾勒肩线；环境遮蔽：肩部与窗框接触区域保留柔和阴影；色彩溢出：窗外冷蓝落在窗框边缘，无明显彩色光斑；连续性：建立本单元光照基线；@{CHAR0001}看向窗外。音效：无。
+·00秒-04秒[镜头1-等待]：（@{CHAR0001}的中景；转场：硬切）向窗边平移并停在肩后，窗框在后景，窗框清晰，柔光；@{CHAR0001}看向窗外。音效：无。
 声音[L000004,0.1-3.8]：@{CHAR0001}说：“等我回来。”
 '''
         units = st.parse(intro + second, self.state)
@@ -370,14 +481,40 @@ class StoryboardTextTests(unittest.TestCase):
             with self.subTest(text=text[:50]), self.assertRaises(ValueError):
                 st.parse(text, state)
 
+    def test_generic_continuity_template_in_first_shot_is_rejected(self):
+        invalid = self.text.replace(
+            '@{CHAR0001}停在门边。',
+            '相机保持中景，承接主峰空地站位与上一镜动作。')
+        with self.assertRaisesRegex(ValueError, r'GENERIC_CONTINUITY_CUE'):
+            st.parse(invalid, self.state)
+
+    def test_generic_continuity_template_in_later_shot_is_rejected(self):
+        invalid = self.text.replace(
+            '@{CHAR0001}看向窗外。',
+            '保持原文状态开口，表情与动作承接前镜。')
+        with self.assertRaisesRegex(ValueError, r'GENERIC_CONTINUITY_CUE'):
+            st.parse(invalid, self.state)
+
+    def test_concrete_cross_unit_action_continuity_remains_allowed(self):
+        text = '''## SC0001 / u01 / L000003-L000003
+人物：@{CHAR0001}；
+场景：@{SET0001}；时间：白天；天气：未明示；
+人物站位：@{CHAR0001}站在门边。
+·00秒-06秒[镜头1-开始]：（@{CHAR0001}的中景；转场：硬切）向门边推近，人物居左，门边清晰，柔光；@{CHAR0001}从门侧转身。音效：无。
+'''
+        second = text.replace('/ u01 /', '/ u02 /').replace(
+            '从门侧转身', '接续上一单元的转身')
+        units = st.parse(text + second, self.state)
+        self.assertEqual(len(units), 2)
+
     def test_long_action_can_continue_across_units_without_invented_character_splits(self):
         text = '''## SC0001 / u01 / L000003-L000003
 人物：@{CHAR0001}；
 场景：@{SET0001}；时间：白天；天气：未明示；
 人物站位：@{CHAR0001}站在门边。
-·00秒-06秒[镜头1-开始]：（@{CHAR0001}的中景；转场：硬切）向门边推近，人物居左，门边清晰，光照：主光：左前方暖白室内光，偏软，照亮人物正面；辅光：地面反射低强度补足衣襟暗部；侧逆轮廓光：右后方微弱暖光勾勒肩线；环境遮蔽：门槛与鞋底接触处保留柔和阴影；色彩溢出：门边木色轻微反射到衣袖，无明显彩色光斑；连续性：本镜建立室内光照基线；@{CHAR0001}从门侧转身。音效：无。
-·06秒-12秒[镜头2-接续]：（@{CHAR0001}的中景；转场：硬切）沿人物方向跟移，人物居左，门边清晰，光照：主光：沿用左前方暖白室内光，保持正面受光；辅光：沿用低强度地面反射，保留衣襟暗部；侧逆轮廓光：沿用右后方暖光，保持肩线；环境遮蔽：沿用门槛与鞋底接触阴影；色彩溢出：沿用门边木色反射，无新增色源；连续性：沿用上一镜光照基线；@{CHAR0001}接续转身。音效：无。
-·12秒-16秒[镜头3-临界]：（@{CHAR0001}的中景；转场：硬切）向肩后移动，人物居左，门边清晰，光照：主光：随相机向肩后移动仍来自左前方，人物右脸阴影加深；辅光：沿用地面低强度反射，暗部保持可读；侧逆轮廓光：右后方暖光勾勒发丝与肩线；环境遮蔽：肩部与门边接触区域保留柔和阴影；色彩溢出：门边木色仅落在近侧衣袖；连续性：相机改变观察侧但未改变光源方向；@{CHAR0001}继续原动作。音效：无。
+·00秒-06秒[镜头1-开始]：（@{CHAR0001}的中景；转场：硬切）向门边推近，人物居左，门边清晰，柔光；@{CHAR0001}从门侧转身。音效：无。
+·06秒-12秒[镜头2-接续]：（@{CHAR0001}的中景；转场：硬切）沿人物方向跟移，人物居左，门边清晰，柔光；@{CHAR0001}接续转身。音效：无。
+·12秒-16秒[镜头3-临界]：（@{CHAR0001}的中景；转场：硬切）向肩后移动，人物居左，门边清晰，柔光；@{CHAR0001}继续原动作。音效：无。
 '''
         second = text.replace('/ u01 /', '/ u02 /').replace('从门侧转身', '接续上一单元的转身').replace('继续原动作', '完成原动作')
         units = st.parse(text + second, self.state)

@@ -594,7 +594,7 @@ def notify_desktop(text, warning=False):
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     try:
         process = subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-                                   creationflags=subprocess.CREATE_NO_WINDOW, stdin=subprocess.DEVNULL,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), stdin=subprocess.DEVNULL,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as exc:
         return {"status": "start_failed", "attempted_at": attempted_at, "error": c.safe_message(exc)}

@@ -10,6 +10,7 @@ import json
 import sys
 from pathlib import Path
 import director
+import project_paths
 from authoring_gates import (DRAFT_POLICY, digest, staging_pending, staging_material,
                              stable_identifier, validate_draft_identity)
 
@@ -426,8 +427,9 @@ def related_view(view_path, selected=None, shot=None, previous=None):
 
 def _output(path):
     root = Path(__file__).resolve().parent.parent
-    output = path.resolve()
-    if output == root or root in output.parents:
+    output = project_paths.absolute_path(path)
+    canonical_output = output.resolve()
+    if canonical_output == root or root in canonical_output.parents:
         raise ValueError('工作记录不能写入Skill包内')
     if output.exists():
         raise FileExistsError('staging输出已存在；请使用新文件名')

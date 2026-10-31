@@ -20,6 +20,11 @@ def canonical(value):
     return Path(text).resolve()
 
 
+def absolute_path(value):
+    """Return an absolute path while preserving symlink spelling for displays."""
+    return Path(os.path.abspath(os.fspath(value)))
+
+
 def io_path(value, force=False):
     path = canonical(value)
     text = str(path)
@@ -84,14 +89,21 @@ def resolve(project, value):
     meta = read_metadata(project)
     if meta is None:
         return Path(value).resolve()
+    raw_value = str(value)
     prefix = 'project://' + meta['project_id'] + '/'
-    if value.startswith(prefix):
-        return destination(project, value[len(prefix):])
-    if value in meta['path_map']:
-        return destination(project, meta['path_map'][value])
-    normalized = value.replace('\\', '/').rstrip('/')
+    if raw_value.startswith(prefix):
+        return destination(project, raw_value[len(prefix):])
+    if raw_value in meta['path_map']:
+        return destination(project, meta['path_map'][raw_value])
+    # Manifest keys are canonicalized at export time.  macOS commonly exposes
+    # the same temporary tree as both /var and /private/var; compare the
+    # canonical spelling as a fallback without changing user-facing paths.
+    canonical_value = str(canonical(raw_value)) if Path(raw_value).is_absolute() else None
+    if canonical_value in meta['path_map']:
+        return destination(project, meta['path_map'][canonical_value])
+    normalized = (canonical_value or raw_value).replace('\\', '/').rstrip('/')
     for origin, member in sorted(meta.get('directory_map', {}).items(), key=lambda item: -len(item[0])):
-        prefix_path = origin.replace('\\', '/').rstrip('/')
+        prefix_path = str(canonical(origin)).replace('\\', '/').rstrip('/')
         if normalized == prefix_path or normalized.startswith(prefix_path + '/'):
             suffix = normalized[len(prefix_path):].lstrip('/')
             return destination(project, member + ('/' + suffix if suffix else ''))

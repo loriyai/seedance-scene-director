@@ -18,6 +18,7 @@ from urllib.parse import urlparse, parse_qs, urlencode
 sys.dont_write_bytecode = True
 import director as d
 import canvas_media as media
+import ratio_profiles
 
 KINDS = {"role": "biz/role", "scene": "biz/scene", "image": "biz/image", "video": "biz/video", "audio": "biz/audio", "text": "biz/text"}
 NODE_ASSET_TAG = re.compile(r"<node-asset\b[^>]*>([^<]*)</node-asset>")
@@ -1288,6 +1289,10 @@ def desired_videos(session, state, doc, units, bind_references=False, failures=N
     pending = [row for row in pending if row.get("key") != "BLACK"]
     wanted = []
     for unit in units:
+        if unit.get("video_ratio") is not None and unit.get("ratio_profile") is not None:
+            ratio_profiles.require_unit_profile(unit)
+        else:
+            ratio_profiles.profile_for_unit(unit)
         unit_refs = dict(refs)
         black, black_kind, black_issue = ((None, None, None) if no_black(unit) else black_reference(state, doc, unit["id"]))
         if flags[unit["id"]] and not no_black(unit):
@@ -1315,6 +1320,7 @@ def desired_videos(session, state, doc, units, bind_references=False, failures=N
         wanted.append({"key": unit["id"], "name": unit.get("display_name", unit["id"]), "kind": "video", "version": unit["version"],
                        "duration": unit["duration"], "prompt": prompt, "references_bound": flags[unit["id"]],
                        **({"video_ratio": unit["video_ratio"]} if "video_ratio" in unit else {}),
+                       **({"ratio_profile": unit["ratio_profile"]} if unit.get("ratio_profile") else {}),
                        "reference_keys": sorted(reference_keys), "black_node_id": black if black_issue is None or black_issue.get("reason") in ("missing_image", "missing_video") else None,
                        "black_node_kind": black_kind, "black_reference_mode": unit.get("black_reference_mode")})
     used = set().union(*(set(item["reference_keys"]) for item in wanted)) if wanted else set()
@@ -1704,6 +1710,9 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
             # the ratio frozen in this submitted unit. Reuse never changes ratio.
             if "video_ratio" in item:
                 d.require(item["video_ratio"] in ("16:9", "9:16"), "视频比例须为16:9或9:16")
+                if item.get("ratio_profile") is not None:
+                    d.require(item["ratio_profile"] == ratio_profiles.profile_id_for_ratio(item["video_ratio"]),
+                              "视频节点画幅配置与分镜比例不一致")
                 if not node_id or mapping and mapping.get("stage") in ("allocated", "writing"):
                     item["settings"]["ratio"] = item["video_ratio"]
             changed_settings = []

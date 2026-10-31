@@ -326,10 +326,15 @@ def bind(args):
              "drafts": report["fingerprint"]["drafts"], "length": length, "records": records,
              "ledger": ledger, "entry": {"min": args.min_duration, "max": 30, "durations": args.durations},
              "style_hash": sha(style) if style is not None else None,
+             "storyboard_authoring_policy": "shot-by-shot-v1",
              "ranges": [], "units": [], "next_numbers": {}, "receipts": []}
     if (project / video_settings.RATIO_FILE).exists() or (project / video_settings.WORKFLOW_FILE).exists():
         ratio = video_settings.get_ratio(project, required=True)
-        state.update(video_ratio=ratio, video_ratio_hash=video_settings.digest(ratio))
+        profile = video_settings.get_profile(project, state, required=True)
+        state.update(video_ratio=ratio, video_ratio_hash=video_settings.digest(ratio),
+                     video_ratio_profile=profile['profile_id'],
+                     video_ratio_profile_version=profile['profile_version'],
+                     video_ratio_profile_digest=profile['profile_digest'])
     if contract:
         state['delivery_contract'] = contract
         if contract['scope'] != 'workflow':
@@ -401,7 +406,11 @@ def set_ratio(args, state=None):
     value = video_settings.RATIOS.get(getattr(args, 'choice', None))
     result = video_settings.save_ratio(args.project, value, inherit=getattr(args, 'inherit', False))
     if state is not None:
-        state.update(video_ratio=result['video_ratio'], video_ratio_hash=video_settings.digest(result['video_ratio']))
+        profile = video_settings.profile_for_ratio(result['video_ratio'])
+        state.update(video_ratio=result['video_ratio'], video_ratio_hash=video_settings.digest(result['video_ratio']),
+                     video_ratio_profile=profile['profile_id'],
+                     video_ratio_profile_version=profile['profile_version'],
+                     video_ratio_profile_digest=profile['profile_digest'])
         if state.get('phase') == 'ratio':
             state['phase'] = 'range'
         save(args.project, state)

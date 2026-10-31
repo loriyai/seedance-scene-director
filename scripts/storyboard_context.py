@@ -7,6 +7,7 @@ import copy
 from pathlib import Path
 
 import director as d
+import ratio_profiles
 import storyboard_text as text_core
 
 
@@ -18,15 +19,18 @@ def context_hash(state, project=None):
     data['context_policy'] = 'content-context-v2'
     required = ('references/storyboard-rules.md', 'references/storyboard-text-format.md',
                 'scripts/storyboard_text.py', 'scripts/storyboard_text_delivery.py',
-                 'scripts/storyboard_context.py', 'scripts/segment_naming.py',
-                 'scripts/script_partition.py', 'scripts/video_settings.py',
-                 'scripts/project_paths.py', 'scripts/project_continuation.py',
-                 'references/storyboard-workflow.md')
+                'scripts/storyboard_authoring_gate.py', 'scripts/storyboard_context.py',
+                'scripts/segment_naming.py', 'scripts/script_partition.py',
+                'scripts/video_settings.py', 'scripts/ratio_profiles.py',
+                'scripts/project_paths.py', 'scripts/project_continuation.py',
+                'references/storyboard-workflow.md', 'references/execution-contract.md')
     data['text_rules'] = {name: d.file_hash(d.ROOT / name) for name in required}
     if project is not None:
         from video_settings import get_ratio
         from script_partition import load_plan
-        data['video_ratio'] = get_ratio(project, state)
+        ratio = get_ratio(project, state)
+        data['video_ratio'] = ratio
+        data['ratio_profile'] = ratio_profiles.profile_summary(ratio)
         data['partition_plan'] = load_plan(project, state)
         from project_continuation import deliveries, related, sha
         from project_paths import resolve
@@ -42,6 +46,7 @@ def scene_context(project, scene_id, span=None):
     from video_settings import get_ratio
     project = Path(project).resolve()
     state = d.load(project)
+    ratio = get_ratio(project, state)
     d.require(state.get('style_hash'), '请先保存本项目风格')
     records, _, scenes, assets = text_core._context(state)
     d.require(scene_id in scenes, f'场次不存在：{scene_id}')
@@ -113,7 +118,8 @@ def scene_context(project, scene_id, span=None):
         'source_lines': {'first': first, 'last': last, 'text': '\n'.join(lines[first - 1:last])},
         'records': selected, 'allowed_asset_ids': allowed, 'assets': projected,
         'style': (project / 'video-style.txt').read_text(encoding='utf-8-sig').strip(),
-        'video_ratio': get_ratio(project, state),
+        'video_ratio': ratio,
+        'ratio_profile': ratio_profiles.profile_summary(ratio),
         'versions': {'session_revision': state['revision'], 'files': copy.deepcopy(state['files']),
                      'style_sha256': state['style_hash'], 'context_sha256': context_hash(state, project)},
         'neighbours': neighbours, 'local_neighbours': local_neighbours, 'semantic_review': 'not_performed',

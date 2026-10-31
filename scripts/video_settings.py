@@ -5,8 +5,11 @@ import os
 from pathlib import Path
 import tempfile
 
-RATIOS = {'1': '16:9', '2': '9:16'}
-LABELS = {'16:9': '横屏16:9', '9:16': '竖屏9:16'}
+import ratio_profiles
+
+RATIOS = dict(ratio_profiles.CHOICES)
+LABELS = {ratio: ratio_profiles.profile_for_ratio(ratio)['label']
+          for ratio in ratio_profiles.CHOICES.values()}
 RATIO_FILE = 'video-ratio.txt'
 DEFAULTS_FILE = 'video-defaults.json'
 WORKFLOW_FILE = 'workflow-settings.json'
@@ -14,9 +17,11 @@ WORKFLOW_POLICY = 'intake-flow-v2'
 
 
 def validate_ratio(value):
-    if value not in LABELS:
-        raise ValueError('视频比例须为16:9或9:16')
-    return value
+    return ratio_profiles.validate_ratio(value)
+
+
+def profile_for_ratio(value):
+    return ratio_profiles.profile_for_ratio(validate_ratio(value))
 
 
 def digest(value):
@@ -57,6 +62,14 @@ def get_ratio(project, state=None, required=False):
     value = validate_ratio(path.read_text(encoding='utf-8-sig').strip())
     if configured and digest(value) != state['video_ratio_hash']:
         raise ValueError('视频比例文件被外部更改；请用ratio命令更新')
+    if configured and state.get('video_ratio_profile'):
+        expected = ratio_profiles.profile_for_ratio(value)
+        if (state['video_ratio_profile'] != expected['profile_id']
+                or (state.get('video_ratio_profile_version') is not None
+                    and state['video_ratio_profile_version'] != expected['profile_version'])
+                or (state.get('video_ratio_profile_digest') is not None
+                    and state['video_ratio_profile_digest'] != expected['profile_digest'])):
+            raise ValueError('视频比例画幅配置与项目状态不一致；请用ratio命令更新')
     return value
 
 
@@ -106,3 +119,8 @@ def status(project, state=None):
     return {'style_saved': saved_style, 'video_ratio': ratio,
             'chat_default_ratio': read_default(project),
             'next_step': 'style' if not saved_style else 'ratio' if not saved_ratio else 'prepare'}
+
+
+def get_profile(project, state=None, required=False):
+    """Resolve the storyboard profile selected by the saved project ratio."""
+    return profile_for_ratio(get_ratio(project, state, required=required))

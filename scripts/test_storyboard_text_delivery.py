@@ -127,11 +127,7 @@ class TextDeliveryIntegration(unittest.TestCase):
                 f'场景：@{{{set_id}}}；时间：白天；天气：未明示；',
                 '人物站位：@{CHAR0001}在画面左侧。',
                 f'·00秒-04秒[镜头1-{label}]：（@{{CHAR0001}}的中景；转场：硬切）'
-                f'相机向右横移，人物与门框保持清晰，广角保留门框纵深；'
-                '光照：主光：左前方柔和室内光，照亮人物正面；辅光：地面低强度反射，保留衣襟暗部；'
-                '侧逆轮廓光：右后方微弱暖光勾勒肩线；环境遮蔽：鞋底与地面接触处保留柔和阴影；'
-                '色彩溢出：木桌暖色轻微反射到衣袖，无明显彩色光斑；连续性：本镜建立场景光照基线；'
-                f'{action}音效：衣料轻响。'])
+                f'相机向右横移，人物与门框保持清晰；{action}音效：衣料轻响。'])
             if record['kind'] == 'dialogue':
                 rows.append(f'声音[{record["id"]},0.2-2.8]：@{{CHAR0001}}说：“{record["text"]}”')
             rows.append('')
@@ -168,6 +164,24 @@ class TextDeliveryIntegration(unittest.TestCase):
                                 timeout=30)
         self.assertEqual(result.returncode, 0 if success else 1, result.stdout + result.stderr)
         return json.loads(result.stdout if result.stdout.strip() else result.stderr)
+
+    def test_portrait_profile_is_frozen_without_changing_text_template(self):
+        (self.project / 'video-ratio.txt').write_text('9:16\n', encoding='utf-8')
+        _, units, info = delivery.prepare(self.project, self.draft)
+        self.assertEqual(info['video_ratios'], ['9:16'])
+        self.assertEqual({unit['ratio_profile'] for unit in units}, {'portrait-v1'})
+        rendered = delivery.render_units(d.load(self.project), units, preview=True)
+        self.assertIn('竖屏9:16', rendered)
+        historical = copy.deepcopy(units)
+        for unit in historical:
+            for key in ('ratio_profile', 'ratio_profile_version', 'ratio_profile_digest'):
+                unit.pop(key, None)
+        self.assertEqual(rendered, delivery.render_units(d.load(self.project), historical, preview=True))
+
+        result = self.commit_fixture(request_id='portrait-profile')
+        self.assertEqual(result['status'], 'committed')
+        receipt = d.load(self.project)['receipts'][-1]
+        self.assertEqual(receipt['ratio_profile'], 'portrait-v1')
 
     def test_check_and_preview_are_read_only_for_session_and_history(self):
         before = self.snapshot()
@@ -323,16 +337,10 @@ class TextDeliveryIntegration(unittest.TestCase):
             '场景：@{SET0001}，@{SET0002}；时间：白天；天气：未明示；',
             '人物站位：@{CHAR0001}从@{SET0001}走到@{SET0002}。',
             '·00秒-04秒[镜头1-房间]：（@{CHAR0001}的中景；转场：硬切）'
-            '侧面平视固定机位，广角保留桌面纵深；光照：主光：左前方柔和室内光，照亮人物与桌面；'
-            '辅光：地面低强度反射，保留桌下暗部；侧逆轮廓光：右后方微弱暖光勾勒肩线；'
-            '环境遮蔽：手与杯子接触处保留柔和阴影；色彩溢出：木桌暖色轻微反射到杯壁；'
-            '连续性：本镜沿用场景光照基线；@{CHAR0001}把@{PROP0001}放在桌上。音效：杯底轻响。',
+            '固定机位；@{CHAR0001}把@{PROP0001}放在桌上。音效：杯底轻响。',
             f'声音[{records[1]["id"]},0.2-2.8]：@{{CHAR0001}}说：“{records[1]["text"]}”',
             '·04秒-08秒[镜头2-走廊]：（@{CHAR0001}的中景；转场：硬切）'
-            '相机向右横移，广角保留走廊纵深；光照：主光：左前方柔和室内光，照亮人物前侧；'
-            '辅光：地面低强度反射，保留衣襟暗部；侧逆轮廓光：右后方微弱暖光勾勒肩线；'
-            '环境遮蔽：鞋底与地面接触处保留柔和阴影；色彩溢出：墙面暖色轻微反射到衣袖；'
-            '连续性：沿用上一镜光照基线；@{CHAR0001}走到@{SET0002}尽头。音效：脚步声。'])
+            '镜头平移；@{CHAR0001}走到@{SET0002}尽头。音效：脚步声。'])
         draft = self.write_draft('cross-adjacent.txt', cross + '\n' + self.authored_text([records[3]]))
         _, units, info = delivery.prepare(self.project, draft)
         self.assertEqual(info['status'], 'checked')
@@ -405,16 +413,10 @@ class TextDeliveryIntegration(unittest.TestCase):
             '场景：@{SET0001}，@{SET0002}；时间：白天；天气：未明示；',
             '人物站位：@{CHAR0001}从@{SET0001}走到@{SET0002}。',
             '·00秒-04秒[镜头1-房间]：（@{CHAR0001}的中景；转场：硬切）'
-            '侧面平视固定机位，广角保留桌面纵深；光照：主光：左前方柔和室内光，照亮人物与桌面；'
-            '辅光：地面低强度反射，保留桌下暗部；侧逆轮廓光：右后方微弱暖光勾勒肩线；'
-            '环境遮蔽：手与杯子接触处保留柔和阴影；色彩溢出：木桌暖色轻微反射到杯壁；'
-            '连续性：本镜沿用场景光照基线；@{CHAR0001}把@{PROP0001}放在桌上。音效：杯底轻响。',
+            '侧面固定机位；@{CHAR0001}把@{PROP0001}放在桌上。音效：杯底轻响。',
             f'声音[{records[1]["id"]},0.2-2.8]：@{{CHAR0001}}说：“{records[1]["text"]}”',
             '·04秒-08秒[镜头2-走廊]：（@{CHAR0001}的中景；转场：硬切）'
-            '相机向右横移，广角保留走廊纵深；光照：主光：左前方柔和室内光，照亮人物前侧；'
-            '辅光：地面低强度反射，保留衣襟暗部；侧逆轮廓光：右后方微弱暖光勾勒肩线；'
-            '环境遮蔽：鞋底与地面接触处保留柔和阴影；色彩溢出：墙面暖色轻微反射到衣袖；'
-            '连续性：沿用上一镜光照基线；@{CHAR0001}走到@{SET0002}尽头。音效：脚步声。',
+            '相机向右横移；@{CHAR0001}走到@{SET0002}尽头。音效：脚步声。',
             f'声音[{records[3]["id"]},4.2-6.8]：@{{CHAR0001}}说：“{records[3]["text"]}”'])
         draft = self.write_draft('cross-scene.txt', text)
         span = [0, self.state['length']]

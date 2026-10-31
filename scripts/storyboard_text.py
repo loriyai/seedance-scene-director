@@ -10,16 +10,15 @@ import re
 
 
 OUTPUT_FORMAT = "scene-text-v1"
+VOICE_DISPLAY_POLICY = "inner-voice-os-v1"
 HEADER = re.compile(r"## (SC\d{4,}) / ([A-Za-z][A-Za-z0-9_-]*) / (L\d{6,})-(L\d{6,})")
 REFERENCE = re.compile(r"@\{((?:CHAR|SET|PROP)\d{4,})\}")
 SHOT = re.compile(r"·(\d{2})秒-(\d{2})秒\[镜头(\d+)-([^\[\]]+)\]：（(.+)；转场：([^（）]+)）(.+)音效：(.+)。")
 VOICE = re.compile(
     r"声音\[(L\d{6,}),(\d+(?:\.\d{1,3})?)-(\d+(?:\.\d{1,3})?)\]："
     r"(@\{CHAR\d{4,}\}(?:、@\{CHAR\d{4,}\})*|[^@{}（）：“]+?)"
-    r"(内心想法|画外音|旁白|非人物播报|说)(（[^（）]+）)?：“(.*)”")
+    r"(内心想法os|内心想法|画外音|旁白|非人物播报|说)(（[^（）]+）)?：“(.*)”")
 FRAMINGS = ("大远景", "大全景", "远景", "全景", "中景", "中近景", "近景", "特写")
-LIGHTING_FIELDS = ("主光", "辅光", "侧逆轮廓光", "环境遮蔽", "色彩溢出", "连续性")
-LIGHTING_FIELD_RE = re.compile("|".join(re.escape(field) for field in LIGHTING_FIELDS) + r"\s*[：:]")
 PROJECTION_FIELDS = (
     "output_format", "draft_key", "author_key", "main_scene", "source_records", "span",
     "duration", "character_ids", "scene_ids", "prop_ids", "asset_ids", "set_ids",
@@ -49,6 +48,135 @@ def _refs(text, context):
     return list(dict.fromkeys(found))
 
 
+def _character_aliases(asset):
+    """Use ledger labels, never invent short names or rewrite author prose."""
+    aliases = set()
+    for field in ("source_speaker", "source_entry", "name"):
+        value = asset.get(field)
+        if not isinstance(value, str):
+            continue
+        for label in (value.strip(), re.split(r"[-（(]", value, maxsplit=1)[0].strip()):
+            if label and not any(c in label for c in "@{}\r\n") and any(c.isalpha() for c in label):
+                aliases.add(label)
+    return aliases
+
+
+def _mask_quoted_prose(value):
+    """Quoted literals are data, just like the separate source voice rows."""
+    result, closing = list(value), []
+    pairs = {'“': '”', '「': '」', '『': '』', '"': '"'}
+    for index, char in enumerate(value):
+        if closing:
+            result[index] = ' '
+            if char == closing[-1]:
+                closing.pop()
+            elif char in pairs and char != '"':
+                closing.append(pairs[char])
+        elif char in pairs:
+            result[index] = ' '
+            closing.append(pairs[char])
+    return ''.join(result)
+
+
+def character_reference_issues(state, units):
+    """Conservative missing-reference diagnostics for newly authored prose.
+
+    Existing @ validation checks only references which were actually written.
+    Here known bare names are rejected, while obvious surname/pronoun subject
+    ambiguities require author revision rather than guessed name completion.
+    Roster, focal bracket and earlier sentences cannot bind the current prose.
+    This lexical guard does not prove that every unnamed entity was detected.
+    It neither changes text nor applies to historical receipt rendering.
+    """
+    characters = {a['id']: a for a in state.get('ledger', {}).get('characters', [])}
+    scenes = {s['id']: s for s in state.get('ledger', {}).get('scenes', [])}
+    issues = []
+    for unit in units:
+        scope = set(unit.get('character_ids', []))
+        for sid in unit.get('scene_ids', []):
+            if sid in scenes:
+                scope.update(scene_asset_ids(scenes[sid])['characters'])
+        aliases, surnames = {}, {}
+        for aid in sorted(scope & set(characters)):
+            asset = characters[aid]
+            for alias in _character_aliases(asset):
+                aliases.setdefault(alias, set()).add(aid)
+                # A one-character ledger name or a plausible shortened CJK
+                # subject is diagnostic only, not an asserted legal surname.
+                if re.fullmatch(r'[\u4e00-\u9fff]{1,4}', alias):
+                    surnames.setdefault(alias[0], set()).add(aid)
+        if not aliases:
+            continue
+        tokens = sorted(aliases, key=lambda name: (-len(name), name))
+        # Longer known ledger labels shield their substrings (王 vs 霸王).
+        token_re = re.compile('|'.join(re.escape(name) for name in tokens if len(name) > 1)) if any(len(n) > 1 for n in tokens) else None
+        fields = [('global', None, unit.get('global', ''))]
+        for index, shot in enumerate(unit.get('shots', []), 1):
+            match = SHOT.fullmatch(shot.get('text', ''))
+            if match:
+                fields.append(('body', index, match.group(7)))
+        for field, shot_index, value in fields:
+            prose = _mask_quoted_prose(value)
+            for sentence in re.split(r'[。！？!?\r\n]', prose):
+                references = [(m.start(), m.group(1)) for m in REFERENCE.finditer(sentence)
+                              if m.group(1) in characters]
+                masked = REFERENCE.sub(lambda m: ' ' * len(m.group(0)), sentence)
+                bound_plain = []
+                base = {'unit': unit.get('draft_key', '当前单元'), 'field': field,
+                        'shot': shot_index, 'semantic_review': 'not_performed'}
+
+                def add(code, mention, candidates, review_required):
+                    issues.append({**base, 'code': code, 'mention': mention,
+                                   'asset_candidates': sorted(candidates),
+                                   'review_required': review_required,
+                                   'message': '人物站位/动作正文须明确引用当前主体或对象；名单与景别不能代替正文引用，不自动补名。'})
+
+                # Dialogue is separate from shot prose, and prompt_only names
+                # remain plain text by contract.  No blanket name replacement.
+                if token_re:
+                    for match in token_re.finditer(masked):
+                        alias = match.group(0)
+                        # Latin names are words, not substrings of other words.
+                        if alias.isascii() and ((match.start() and re.match(r'[A-Za-z0-9_]', masked[match.start()-1])) or
+                                                (match.end() < len(masked) and re.match(r'[A-Za-z0-9_]', masked[match.end()]))):
+                            continue
+                        ids = aliases[alias]
+                        required = {aid for aid in ids if characters[aid].get('visual_mode') != 'prompt_only'}
+                        if required:
+                            add('BARE_CHARACTER_NAME', alias, required, False)
+                        else:
+                            bound_plain.append((match.start(), ids))
+                    masked = token_re.sub(lambda m: ' ' * len(m.group(0)), masked)
+
+                for short, candidates in sorted(surnames.items()):
+                    required = {aid for aid in candidates if characters[aid].get('visual_mode') != 'prompt_only'}
+                    if not required:
+                        continue
+                    # Do not search a single character anywhere in the prose:
+                    # 灯光, 王座, 霸王 and other ordinary words are not subjects.
+                    predicate = (r'在(?:其|他|她|画|左|右|前|后|身|旁|门|窗)|双手|两手|左手|右手|'
+                                 r'左膝|右膝|左脚|右脚|手中|掌中|身侧|'
+                                 r'仍(?:站|坐|托|握|捧)|的(?:头|肩|手|左|右|脸|眼|身)')
+                    pattern = re.compile(r'(?:^|[，,；;：:\s])(' + re.escape(short) + r')(?=' + predicate + ')')
+                    for match in pattern.finditer(masked):
+                        add('AMBIGUOUS_CHARACTER_SHORTHAND', short, required, True)
+
+                pronouns = re.compile(r'(?<!其)(?:他|她)(?:们)?(?=的|在|向|从|把|将|抬|转|站|坐|看|握|伸|双|左|右|仍|正|身|肩|手|头|脸|眼)|其(?=左|右|身|手|头|肩|前|后)')
+                for match in pronouns.finditer(masked):
+                    prior = {aid for offset, aid in references if offset < match.start()}
+                    for offset, ids in bound_plain:
+                        if offset < match.start():
+                            prior.update(ids)
+                    target = re.search(r'(?:向|朝|看向|看着|握住|牵住|抓住|扶住|拉住|推开|抱住|打向|击向)$', masked[:match.start()])
+                    if target:
+                        add('AMBIGUOUS_CHARACTER_TARGET', match.group(0), scope, True)
+                    elif not prior:
+                        add('UNBOUND_CHARACTER_PRONOUN', match.group(0), scope, True)
+                    elif len(prior) > 1:
+                        add('AMBIGUOUS_CHARACTER_PRONOUN', match.group(0), prior, True)
+    return issues
+
+
 def _listed_refs(text, prefix, context):
     if prefix == "CHAR" and text == "无":
         return []
@@ -62,24 +190,6 @@ def _listed_refs(text, prefix, context):
         ids.append(match.group(1))
     _require(len(ids) == len(set(ids)), f"{context}：名单重复")
     return ids
-
-
-def _lighting_error(text):
-    """Return a mechanical error for the required six-part lighting clause."""
-    header = re.search(r"光照\s*[：:]", text)
-    if header is None:
-        return "每镜须包含光照：主光、辅光、侧逆轮廓光、环境遮蔽、色彩溢出、连续性"
-    tail = text[header.end():]
-    markers = list(LIGHTING_FIELD_RE.finditer(tail))
-    names = [match.group(0).split("：", 1)[0].split(":", 1)[0].strip() for match in markers]
-    if names != list(LIGHTING_FIELDS):
-        return "光照字段须按主光、辅光、侧逆轮廓光、环境遮蔽、色彩溢出、连续性顺序各出现一次"
-    for index, marker in enumerate(markers):
-        end = markers[index + 1].start() if index + 1 < len(markers) else len(tail)
-        value = tail[marker.end():end].strip(" \t；;，,。")
-        if not value:
-            return f"光照字段{LIGHTING_FIELDS[index]}不可为空"
-    return None
 
 
 def _context(state):
@@ -168,8 +278,6 @@ def _parse_units(text, state):
             _require(framing is not None, f"{context}：景别须绑定主体并采用规定景别名称")
             _require(_refs(focal, context), f"{context}：景别主体须使用稳定资产引用")
             _require(all(s.strip() for s in (label, focal, transition, body, sound)), f"{context}：镜头字段不可为空")
-            lighting_error = _lighting_error(body)
-            _require(lighting_error is None, f"{context}：{lighting_error}")
             _require("：“" not in line, f"{context}：台词只写在声音来源行，不可直接重复写入镜头正文")
             _require(line.count("音效：") == 1, f"{context}：每镜只能有一个末尾音效字段")
             unit["shots"].append({"start": int(start), "end": int(end), "text": line,
@@ -178,10 +286,13 @@ def _parse_units(text, state):
         elif stage == 4 and line.startswith("声音["):
             match = VOICE.fullmatch(line)
             _require(match is not None, f"{context}：声音行格式错误；使用 声音[L000007,0.2-2.8]：@{{CHAR0001}}说：“原台词”")
-            rid, start, end, source, voice, direction, spoken = match.groups()
+            rid, start, end, source, voice_label, direction, spoken = match.groups()
             _require(spoken and _compact(spoken), f"{context}：台词片段不可为空或仅含标点")
             part = {"record": rid, "start": _seconds(start), "end": _seconds(end),
-                    "voice": voice, "direction": direction or "", "text": spoken}
+                    # Internal records keep the canonical voice enum.  The
+                    # new scene-text export label is rendered separately.
+                    "voice": "内心想法" if voice_label == "内心想法os" else voice_label,
+                    "direction": direction or "", "text": spoken}
             if source.startswith("@{"):
                 ids = [match.group(1) for match in REFERENCE.finditer(source)]
                 if len(ids) == 1:
@@ -220,7 +331,7 @@ def _speaker(asset):
     return asset.get("source_speaker", fallback)
 
 
-def _check(units, state):
+def _check(units, state, *, allow_partial_tail=False):
     records, record_map, scenes, assets = _context(state)
     keys, previous_last, ordered_dialogue, actual_order = set(), None, [], []
     chunks, units_by_record = {}, {}
@@ -276,7 +387,8 @@ def _check(units, state):
                 units_by_record.setdefault(rid, {}).setdefault(key, []).append(part["text"])
                 actual_order.append(rid)
                 local_dialogue.append(rid)
-        _require(4 <= cursor <= 30, f"{key}：单元总时长须为4～30秒")
+        minimum = 1 if allow_partial_tail and unit is units[-1] else 4
+        _require(minimum <= cursor <= 30, f"{key}：单元总时长须为{minimum}～30秒")
         expected_dialogue = [r["id"] for r in selected if r["kind"] == "dialogue"]
         _require(list(dict.fromkeys(local_dialogue)) == expected_dialogue,
                  f"{key}：原文台词遗漏或顺序变化；每条来源台词须有实际片段")
@@ -286,6 +398,15 @@ def _check(units, state):
         _require(set(used) <= allowed and set(used) <= set(assets), f"{key}：引用资产不存在、未列入人物名单或不属于来源场次：{sorted(set(used) - (allowed & set(assets)))}")
         unit["prop_ids"] = list(dict.fromkeys(aid for aid in used if aid.startswith("PROP")))
         unit["asset_ids"] = list(dict.fromkeys(unit["character_ids"] + expected_sets + unit["prop_ids"]))
+    for issue in character_reference_issues(state, units):
+        place = '人物站位' if issue['field'] == 'global' else f'镜头{issue["shot"]}正文'
+        _require(False, f'{issue["unit"]}/{place}：{issue["code"]}（{issue["mention"]}）；{issue["message"]}')
+    # Continuity wording is checked at the authored-text choke point.  The
+    # transition field may say “动作接续”; only generic continuity prose in
+    # the visible shot body is blocked here.
+    from continuity import validate_prompt_continuity
+    for issue in validate_prompt_continuity(units):
+        _require(False, f'{issue["unit"]}/镜头{issue["shot"]}：{issue["code"]}；{issue["message"]}')
     collapsed = [rid for i, rid in enumerate(actual_order) if not i or rid != actual_order[i - 1]]
     _require(collapsed == ordered_dialogue, "台词片段顺序与原文不同，或同一台词被其他台词打断")
     for rid in ordered_dialogue:
@@ -347,6 +468,42 @@ def parse(text, state, source_span=None):
     if source_span is not None:
         _require([units[0]["span"][0], units[-1]["span"][1]] == list(source_span),
                  "作者文本须完整覆盖指定source_span，不能遗漏范围首尾记录")
+    return units
+
+
+def parse_incremental(text, state, source_span=None):
+    """Inspect only an authored scene prefix, without completing any content.
+
+    A final spoken fragment may stop at an exact source prefix and the last
+    unfinished unit may be shorter than four seconds.  No default parse or
+    delivery constraint is relaxed: callers must use the full route before
+    preview/review.  Source clipping here is a read-only validation view.
+    """
+    context = _slice_state(state, source_span)
+    units = _parse_units(text, context)
+    records, record_map, _, _ = _context(context)
+    scene_ids = {sid for unit in units for sid in unit['scene_ids']}
+    _require(len(scene_ids) == 1, "增量检查只允许当前单场的连续前缀")
+    sid = next(iter(scene_ids))
+    first = record_map[units[0]['source_records'][0]][1]
+    expected_first = next(record for record in records if record['scene'] == sid)
+    _require(first['id'] == expected_first['id'], "增量草稿须从当前场首记录开始；局部起点须明确source_span")
+    last = record_map[units[-1]['source_records'][-1]][1]
+    end = last['end']
+    if last['kind'] == 'dialogue':
+        fragment = ''.join(part['text'] for unit in units for shot in unit['shots']
+                           for part in shot['dialogue_parts'] if part['record'] == last['id'])
+        _require(bool(_compact(fragment)) and last['text'].startswith(fragment),
+                 f'{last["id"]}：增量末条台词必须是原话逐字前缀')
+        end = last['start'] + len(_compact(fragment))
+    prefix = _slice_state(context, [first['start'], end])
+    if last['kind'] == 'dialogue':
+        # Full delivery owns boundary punctuation in the preceding fragment.
+        # An unfinished tail may stop before that punctuation; inspect exactly
+        # the written prefix, without appending it or changing the source.
+        prefix = dict(prefix, records=[dict(record, text=fragment) if record['id'] == last['id']
+                                       else record for record in prefix['records']])
+    _check(units, prefix, allow_partial_tail=True)
     return units
 
 
@@ -556,6 +713,7 @@ def observations(state, units):
 def render_unit(state, unit, reference_text=None):
     """Render one previously checked unit; quoted speech never enters callbacks."""
     import director as d
+    import ratio_profiles
     parsed = _parse_units(unit["source_text"], state)
     _require(len(parsed) == 1, "单元source_text须恰好包含一个单元")
     authored = parsed[0]
@@ -573,6 +731,11 @@ def render_unit(state, unit, reference_text=None):
         _refs(value, authored["draft_key"])
         return REFERENCE.sub(lambda match: asset(match.group(1)), value)
 
+    def display_voice(value):
+        if unit.get("voice_display_policy") == VOICE_DISPLAY_POLICY and value == "内心想法":
+            return "内心想法os"
+        return value
+
     style = unit.get("style", "")
     d.validate_style(style)
     title = unit.get("display_name") or unit.get("id")
@@ -583,6 +746,12 @@ def render_unit(state, unit, reference_text=None):
     people = "，".join(asset(cid) for cid in authored["character_ids"]) or "无"
     ratio = unit.get('video_ratio')
     _require(ratio in (None, '16:9', '9:16'), '视频比例须为16:9或9:16')
+    # New deliveries freeze a ratio profile alongside the ratio.  Historical
+    # units without these fields remain renderable under their saved policy.
+    if unit.get('video_ratio') is not None and unit.get('ratio_profile') is not None:
+        ratio_profiles.require_unit_profile(unit)
+    else:
+        ratio_profiles.profile_for_unit(unit)
     ratio_label = '' if ratio is None else ('横屏16:9' if ratio == '16:9' else '竖屏9:16')
     lines = [f'{title}（时长：{authored["duration"]}秒）{ratio_label}', style + ";" + header[0], header[1],
              "人物：" + people + "；",
@@ -603,6 +772,6 @@ def render_unit(state, unit, reference_text=None):
                 source = "、".join(_speaker(assets[cid]) for cid in part["character_ids"])
             else:
                 source = asset(part["character_id"])
-            line += source + part["voice"] + part["direction"] + '：“' + part["text"] + '”'
+            line += source + display_voice(part["voice"]) + part["direction"] + '：“' + part["text"] + '”'
         lines.append(line + "音效：" + replace(sound))
     return "\n".join(lines) + "\n"
