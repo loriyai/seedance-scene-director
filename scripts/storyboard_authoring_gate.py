@@ -2,10 +2,11 @@
 
 The final TXT format remains unchanged.  New projects bind a side-car trace
 which records one authoring decision per shot.  The trace is deliberately
-small: it binds the source beat, visible change, natural timing estimate and
-any justified hold/exception.  It cannot prove how a model produced text,
-but it prevents a draft with no shot-level decisions from entering preview or
-commit and makes stale/generic attestations fail closed.
+small: it binds the source beat, visible change, natural timing estimate,
+unit organization and any justified hold/exception.  It cannot prove how a
+model produced text, but it prevents a draft with no shot-level decisions or
+unit-boundary proof from entering preview or commit and makes stale/generic
+attestations fail closed.
 """
 from __future__ import annotations
 
@@ -16,8 +17,15 @@ from pathlib import Path
 
 
 POLICY = "shot-by-shot-v1"
-VERSION = 1
+VERSION = 3
 TRACE_SUFFIX = ".authoring.json"
+UNIT_ORGANIZATION_POLICY = "prefer_26_30_with_exception_proof_v1"
+UNIT_DECISIONS = {"target_26_30", "short_exception"}
+SHORT_REASON_CODES = {
+    "scene_boundary", "selected_range_end", "merge_exceeds_30",
+    "incompatible_generation", "semantic_cut", "candidate_not_compatible",
+}
+CANDIDATE_REASON_CODES = {"semantic_cut", "candidate_not_compatible"}
 
 GENERIC = {
     "通过", "已检查", "符合要求", "符合剧情", "无问题", "同前", "同上",
@@ -38,6 +46,13 @@ TEMPLATE_PHRASES = (
 )
 TEMPLATE_PATTERN = re.compile(r"在当前[^；。]{0,30}关系中完成：")
 VOICE_AMBIGUITY = re.compile(r"脑海声|脑内声|系统声")
+GENERIC_STATION = re.compile(r"不同景层保持可见关系|保持可见关系|后景人物做有意义反应|相邻人物或当前道具")
+GENERIC_CAMERA = re.compile(r"相关动作的进入相位起拍|镜头平滑跟随后在动作结果处停稳|镜头沿视线缓慢微移呈现听者关系")
+GENERIC_LIGHT = re.compile(r"环境光方向与主体明暗落点保持连续|均匀漫射日光落在.+暗部保留真实层次")
+DEPTH_WORDS = re.compile(r"景深|焦外|虚化|焦点")
+CONCRETE_LIGHT = re.compile(r"左侧|右侧|前方|后方|侧面|逆光|顶光|低位|漫射|阴影|明部|暗部|高光|轮廓")
+MAIN_FILL_LIGHT = re.compile(r"主光\s*[:：].{1,80}(?:辅光|环境反射|反射光|补光)\s*[:：]", re.S)
+CONCRETE_CUT = re.compile(r"切出|接入|动作锚点|视线锚点|声音先行|结果读清|落点")
 
 
 def _digest(value):
@@ -113,6 +128,55 @@ def _trace_payload(trace):
     return {key: value for key, value in trace.items() if key not in ("trace_sha256",)}
 
 
+def _validate_unit_organization(trace, state, units):
+    """Require a trace decision for every unit-duration boundary."""
+    from storyboard_text import observations
+
+    errors = []
+    organization = trace.get("unit_organization")
+    if not isinstance(organization, dict):
+        return [{"code": "AUTHORING_UNIT_ORGANIZATION",
+                 "message": "侧车必须提供逐单元26～30秒优先与短单元例外证明"}], None
+    if organization.get("policy") != UNIT_ORGANIZATION_POLICY:
+        errors.append({"code": "AUTHORING_UNIT_ORGANIZATION",
+                       "message": "侧车未声明当前26～30秒优先规则"})
+    rows = organization.get("units")
+    expected_keys = [unit["draft_key"] for unit in units]
+    if not isinstance(rows, list) or [row.get("draft_key") for row in rows if isinstance(row, dict)] != expected_keys:
+        errors.append({"code": "AUTHORING_UNIT_ORGANIZATION",
+                       "message": "逐单元组织证明必须按作者稿单元顺序逐条提供"})
+        rows = rows if isinstance(rows, list) else []
+
+    summary = observations(state, units).get("preferred_target_summary", {})
+    candidate_units = set(summary.get("review_required_units", []))
+    by_key = {row.get("draft_key"): row for row in rows if isinstance(row, dict)}
+    for unit in units:
+        key = unit["draft_key"]
+        duration = unit["duration"]
+        row = by_key.get(key)
+        if row is None:
+            errors.append({"code": "AUTHORING_UNIT_ORGANIZATION", "unit": key,
+                           "message": "缺少本单元的时长组织决定"})
+            continue
+        if row.get("duration_seconds") != duration:
+            errors.append({"code": "AUTHORING_UNIT_ORGANIZATION", "unit": key,
+                           "message": "组织证明中的单元时长必须等于作者稿单元时长"})
+        decision = row.get("decision")
+        expected_decision = "target_26_30" if 26 <= duration <= 30 else "short_exception"
+        if decision != expected_decision or decision not in UNIT_DECISIONS:
+            errors.append({"code": "AUTHORING_UNIT_ORGANIZATION", "unit": key,
+                           "message": f"{key}须标记为{expected_decision}"})
+        if expected_decision == "short_exception":
+            reason_code = row.get("reason_code")
+            if reason_code not in SHORT_REASON_CODES or not _concrete(row.get("reason")):
+                errors.append({"code": "AUTHORING_UNIT_SHORT_REASON", "unit": key,
+                               "message": "4～25秒单元必须提供规范原因代码和具体证据"})
+            if key in candidate_units and reason_code not in CANDIDATE_REASON_CODES:
+                errors.append({"code": "AUTHORING_UNIT_CANDIDATE_REVIEW", "unit": key,
+                               "message": "存在可在30秒内组合的相邻候选，必须证明为何不能合并"})
+    return errors, summary
+
+
 def validate(project, state, draft_bytes, units, expected_context_sha256,
              explicit_trace=None, draft_path=None):
     """Validate the required authoring trace for a new bound project.
@@ -160,8 +224,16 @@ def validate(project, state, draft_bytes, units, expected_context_sha256,
         errors.append({"code": "AUTHORING_TRACE_SHOT_COVERAGE",
                        "message": "侧车必须按作者稿顺序一镜一条，不能漏镜、重镜或跳镜"})
 
+    organization_errors, organization_summary = _validate_unit_organization(trace, state, units)
+    errors.extend(organization_errors)
+
     durations = []
     normalized = []
+    transitions = []
+    sounds = []
+    station_lines = []
+    cue_seen = set()
+    all_observation_zero = True
     for key, unit, index, shot in expected:
         row = rows.get(key)
         if not isinstance(row, dict):
@@ -186,6 +258,10 @@ def validate(project, state, draft_bytes, units, expected_context_sha256,
             timing = {}
         duration = shot["end"] - shot["start"]
         durations.append(duration)
+        match_transition = re.search(r"；转场：([^）]+）)", shot.get("text", ""))
+        transitions.append(match_transition.group(1).rstrip("）") if match_transition else "")
+        match_sound = re.search(r"音效：(.+?)。$", shot.get("text", ""))
+        sounds.append(match_sound.group(1).strip() if match_sound else "")
         if timing.get("duration_seconds") != duration:
             errors.append({"code": "AUTHORING_TRACE_DURATION", "shot": key,
                            "message": "侧车选择时长必须等于作者稿镜窗"})
@@ -219,6 +295,8 @@ def validate(project, state, draft_bytes, units, expected_context_sha256,
             if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
                 errors.append({"code": "AUTHORING_TRACE_TIMING", "shot": key,
                                "field": field, "message": "自然时长依据必须分别估计台词、动作和观看负荷"})
+        if timing.get("observation_seconds", 0) > 0:
+            all_observation_zero = False
         if not _concrete(timing.get("cut_reason")):
             errors.append({"code": "AUTHORING_TRACE_CUT", "shot": key,
                            "message": "每镜必须说明本镜切出的具体观看落点"})
@@ -244,11 +322,11 @@ def validate(project, state, draft_bytes, units, expected_context_sha256,
         if duration + 0.25 < total_required:
             errors.append({"code": "AUTHORING_TRACE_OVERLOAD", "shot": key,
                            "message": "镜窗不足以承载台词、动作和观看负荷"})
-        if duration > total_required + 1.5 and not (_concrete(row.get("hold_reason")) or row.get("exception")):
+        if duration > total_required + 1.5 and not _concrete(row.get("hold_reason")):
             errors.append({"code": "AUTHORING_TRACE_EMPTY_TAIL", "shot": key,
                            "message": "镜窗长于实际负荷，必须说明来源成立的保持或观察理由"})
         if (isinstance(completion, (int, float)) and duration - completion > 1.0
-                and not (tail_load or _concrete(row.get("hold_reason")) or row.get("exception"))):
+                and not (tail_load or _concrete(row.get("hold_reason")))):
             errors.append({"code": "AUTHORING_TRACE_EMPTY_TAIL", "shot": key,
                            "message": "关键变化完成后仍有镜尾，必须写明继续观看的具体负荷"})
 
@@ -259,6 +337,24 @@ def validate(project, state, draft_bytes, units, expected_context_sha256,
         if any(phrase in body for phrase in TEMPLATE_PHRASES) or TEMPLATE_PATTERN.search(body):
             errors.append({"code": "AUTHORING_TEMPLATE_PHRASE", "shot": key,
                            "message": "最终镜头正文含固定句壳，必须改写为本镜具体人物、动作、视线和声音执行"})
+        if GENERIC_CAMERA.search(body):
+            errors.append({"code": "AUTHORING_GENERIC_CAMERA", "shot": key,
+                           "message": "摄影正文使用泛化运镜句，必须写起移时机、方向、途中关系和终点落点"})
+        if (GENERIC_LIGHT.search(body) or not CONCRETE_LIGHT.search(body)
+                or not MAIN_FILL_LIGHT.search(body)):
+            errors.append({"code": "AUTHORING_LIGHTING_UNDER_SPECIFIED", "shot": key,
+                           "message": "每镜必须写主光、辅光/环境反射的具体方向与主体/道具明暗落点，不能使用抽象连续句"})
+        if not DEPTH_WORDS.search(body):
+            errors.append({"code": "AUTHORING_DEPTH_MISSING", "shot": key,
+                           "message": "每镜必须落实景深、焦外、虚化或焦点关系"})
+        actor_ids = row.get("actor_ids")
+        if not isinstance(actor_ids, list) or not actor_ids:
+            errors.append({"code": "AUTHORING_ACTOR_MISSING", "shot": key,
+                           "message": "每镜侧车必须记录实际动作执行者或可见表演主体"})
+        if not _concrete(row.get("focus_note")):
+            errors.append({"code": "AUTHORING_FOCUS_EVIDENCE", "shot": key,
+                           "message": "每镜必须说明主焦点与观看理由，不能只按场景首人物取焦点"})
+        cue_seen.update(str(value) for value in row.get("source_cues", []) if value)
         if VOICE_AMBIGUITY.search(body):
             non_character = any(part.get("source_kind") == "non_character" for part in shot.get("dialogue_parts", []))
             if non_character and not _concrete(row.get("voice_source_note")):
@@ -273,17 +369,38 @@ def validate(project, state, draft_bytes, units, expected_context_sha256,
                            row.get("beat"), row.get("visual_change"),
                            row.get("timing_basis", {}).get("cut_reason") if isinstance(row.get("timing_basis"), dict) else ""))
 
+        if GENERIC_STATION.search(unit.get("global", "")):
+            station_lines.append(unit.get("draft_key"))
+
     if durations and len(durations) >= 6:
         most = max(durations.count(value) for value in set(durations))
-        if most / len(durations) >= 0.8 and not _concrete(trace.get("timing_distribution_basis")):
+        if most / len(durations) >= 0.65 and not _concrete(trace.get("timing_distribution_basis")):
             errors.append({"code": "AUTHORING_UNIFORM_TIMING", "message":
                            "镜长高度集中，必须提供题材/来源支持的节奏依据；不能默认批量分配4秒或5秒"})
+
+    if station_lines:
+        errors.append({"code": "AUTHORING_GENERIC_STATION", "units": station_lines,
+                       "message": "人物站位不能使用不同景层保持可见关系等抽象占位"})
+    if transitions and len(transitions) >= 6 and len(set(transitions)) == 1:
+        if transitions[0] == "硬切" or not _concrete(trace.get("transition_distribution_basis")):
+            errors.append({"code": "AUTHORING_UNIFORM_TRANSITION",
+                           "message": "全场统一转场必须有逐镜锚点和明确理由；不能批量使用硬切"})
+    if sounds and len(sounds) >= 6 and len(set(sounds)) == 1:
+        errors.append({"code": "AUTHORING_UNIFORM_SOUND",
+                       "message": "全场统一音效不能代替实际声源；请按动作、距离、方向和来源声音逐镜判断"})
+    if expected and all_observation_zero:
+        errors.append({"code": "AUTHORING_OBSERVATION_EMPTY",
+                       "message": "全稿观看负荷全部为零，侧车不能证明自然镜尾和观察关系"})
+    cue_contract = trace.get("source_cue_coverage")
+    if not isinstance(cue_contract, dict) or not _concrete(cue_contract.get("status")):
+        errors.append({"code": "AUTHORING_SOURCE_CUE_COVERAGE",
+                       "message": "侧车必须记录源文括号动作、表演和发声方式的覆盖状态"})
 
     for left, right in zip(normalized, normalized[1:]):
         left_key, left_body, left_exc, left_beat, left_change, left_cut = left
         right_key, right_body, right_exc, right_beat, right_change, right_cut = right
         repeated_decision = (left_beat == right_beat and left_change == right_change and left_cut == right_cut)
-        if (_similar(left_body, right_body) >= 0.86 or repeated_decision) and not (left_exc or right_exc):
+        if (_similar(left_body, right_body) >= 0.78 or repeated_decision):
             errors.append({"code": "AUTHORING_TEMPLATE_REUSE", "shots": [left_key, right_key],
                            "message": "相邻镜头摄影/动作骨架高度重复，缺少逐镜独立观看依据"})
 
@@ -296,6 +413,7 @@ def validate(project, state, draft_bytes, units, expected_context_sha256,
             "status": "passed" if not errors else "blocked", "errors": errors,
             "trace_path": str(path), "trace_sha256": trace_sha256,
             "shot_count": len(expected_keys), "shot_keys": expected_keys,
+            "preferred_target_summary": organization_summary,
             "gate_digest": payload["gate_digest"]}
 
 

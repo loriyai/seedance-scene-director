@@ -465,6 +465,20 @@ class TextDeliveryIntegration(unittest.TestCase):
             delivery.commit(self.project, self.draft, 'fictional-first', self.review, self.output)
         self.assertEqual(self.output.read_text(encoding='utf-8'), 'externally changed')
 
+    def test_bound_project_keeps_replaced_historical_scene_text_receipt_renderable(self):
+        self.commit_fixture()
+        state = d.load(self.project)
+        receipt = copy.deepcopy(state['receipts'][0])
+        state['storyboard_authoring_policy'] = 'shot-by-shot-v1'
+        state['units'][0]['source_text'] = state['units'][0]['source_text'].replace(
+            '把@{PROP0001}放在桌上', '把@{PROP0001}推到桌边')
+        d.write_json(self.project / 'session.json', state)
+        current = d.load(self.project)
+        with self.assertRaisesRegex(ValueError, '必须先通过storyboard_authoring_gate'):
+            delivery.render_units(current, receipt['units'])
+        rendered = delivery.render_units(current, receipt['units'], historical_receipt=receipt)
+        self.assertIn('把消息发给@群里。', rendered)
+
     def test_failed_delivery_write_can_recover_from_saved_receipt(self):
         self.write_synthetic_review_fixture()
         atomic_text = d.atomic_text

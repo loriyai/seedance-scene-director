@@ -306,6 +306,14 @@ class AuditDirectorChecks(unittest.TestCase):
         self.assertTrue(output.is_file())
         d.load(self.project)
 
+    def test_new_scene_text_project_cannot_use_legacy_reference_entry(self):
+        self.state['storyboard_authoring_policy'] = 'shot-by-shot-v1'
+        with self.assertRaisesRegex(ValueError, 'storyboard_text_delivery.py'):
+            d.validate(self.state, self.request())
+
+    def test_legacy_project_without_scene_text_policy_keeps_reference_entry(self):
+        self.assertEqual(d.validate(self.state, self.request()), [])
+
     def test_unsafe_old_receipt_cannot_be_rendered_into_state(self):
         receipt = {'output': str(self.project / 'canvas' / 'state.json'), 'units': []}
         with self.assertRaisesRegex(ValueError, '交付路径不能覆盖'):

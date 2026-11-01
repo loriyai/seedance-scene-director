@@ -674,7 +674,7 @@ def camera_context(state, units, replace_ids=None):
 
 
 def observations(state, units):
-    """Read-only statistics for checked units; no preferences become failures."""
+    """Read-only statistics; unit-organization decisions are gated by the authoring trace."""
     durations = [unit["duration"] for unit in units]
     distribution = Counter(durations)
     camera = {}
@@ -700,18 +700,80 @@ def observations(state, units):
             candidates.append({"units": [left["draft_key"], right["draft_key"]],
                                "source_scene": next(iter(scenes)), "combined_duration": combined,
                                "review": "human_review_only"})
+    candidate_units = sorted({key for row in candidates for key in row["units"]})
+    target_units = [unit["draft_key"] for unit in units if 26 <= unit["duration"] <= 30]
+    short_units = [unit["draft_key"] for unit in units if 4 <= unit["duration"] <= 25]
     return {"mode": "non_blocking", "unit_duration_seconds": {
                 "distribution": {str(key): distribution[key] for key in sorted(distribution)},
                 "mean": sum(durations) / len(durations) if durations else None,
                 "min": min(durations) if durations else None, "max": max(durations) if durations else None},
             "same_scene_adjacent_candidates": candidates,
+            "preferred_target_summary": {
+                "policy": "prefer_26_30_with_exception_proof_v1",
+                "preferred_range_seconds": [26, 30],
+                "target_unit_count": len(target_units),
+                "target_units": target_units,
+                "short_unit_count": len(short_units),
+                "short_units": short_units,
+                "candidate_boundary_count": len(candidates),
+                "review_required_units": candidate_units,
+            },
             "camera_wording": {"basis": "lexical_leading_camera_clause_only",
                                "semantic_review": "not_performed",
                                "by_shot_duration_seconds": dict(sorted(camera.items(), key=lambda row: int(row[0])))}}
 
 
-def render_unit(state, unit, reference_text=None):
-    """Render one previously checked unit; quoted speech never enters callbacks."""
+def _persisted_scene_text_unit(state, unit):
+    """Return whether *unit* exactly matches a saved scene-text unit.
+
+    New bound projects may render only units authorized by the current
+    authoring gate, or units already persisted in the project state (the
+    latter is the compatibility path for receipt re-rendering).  The saved
+    projection must match exactly so an ID cannot be reused to render altered
+    text or metadata.
+    """
+    source = unit.get("source_text")
+    if not isinstance(source, str):
+        return False
+    unit_id = unit.get("id")
+    draft_key = unit.get("draft_key")
+    for saved in state.get("units", []):
+        if saved.get("output_format") != OUTPUT_FORMAT:
+            continue
+        same_identity = ((unit_id and saved.get("id") == unit_id) or
+                         (draft_key and saved.get("draft_key") == draft_key))
+        if same_identity and saved == unit:
+            return True
+    return False
+
+
+def _require_render_authorization(state, unit, authoring_gate=None):
+    """Enforce the current authoring gate at the render boundary.
+
+    Legacy projects remain compatible.  In a newly bound scene-text project,
+    an unpersisted unit must carry the passed result from ``prepare``; direct
+    calls with a freshly parsed unit are rejected.
+    """
+    if (state.get("storyboard_authoring_policy") != "shot-by-shot-v1" or
+            unit.get("output_format") != OUTPUT_FORMAT):
+        return
+    if _persisted_scene_text_unit(state, unit):
+        return
+    gate = authoring_gate or {}
+    _require(gate.get("enforced") is True and
+             gate.get("policy") == "shot-by-shot-v1" and
+             gate.get("status") == "passed",
+             "新绑定项目的未提交分镜必须先通过storyboard_authoring_gate；请使用storyboard_text_delivery.py的prepare/preview流程")
+    draft_key = unit.get("draft_key")
+    shot_keys = gate.get("shot_keys") or []
+    _require(isinstance(draft_key, str) and any(
+        str(key).startswith(draft_key + "#") for key in shot_keys),
+             "渲染单元未包含在当前逐镜写作闸门结果中；请重新prepare并逐镜复审")
+
+
+def render_unit(state, unit, reference_text=None, *, authoring_gate=None):
+    """Render one checked unit; quoted speech never enters callbacks."""
+    _require_render_authorization(state, unit, authoring_gate)
     import director as d
     import ratio_profiles
     parsed = _parse_units(unit["source_text"], state)

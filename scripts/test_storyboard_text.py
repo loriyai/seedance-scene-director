@@ -197,6 +197,28 @@ class StoryboardTextTests(unittest.TestCase):
         self.assertNotIn('SC0001 / u01', output)
         self.assertNotIn('@{', output)
 
+    def test_bound_project_direct_render_requires_current_authoring_gate(self):
+        state = copy.deepcopy(self.state)
+        state['storyboard_authoring_policy'] = 'shot-by-shot-v1'
+        unit = renderable(st.parse(self.text, state)[0])
+        with self.assertRaisesRegex(ValueError, '必须先通过storyboard_authoring_gate'):
+            st.render_unit(state, unit)
+        gate = {'enforced': True, 'policy': 'shot-by-shot-v1', 'status': 'passed',
+                'shot_keys': ['SC0001/u01#1', 'SC0001/u01#2']}
+        output = st.render_unit(state, unit, authoring_gate=gate)
+        self.assertIn('A01-场景1-分镜1（时长：5秒）', output)
+
+    def test_bound_project_allows_exact_persisted_unit_for_receipt_render(self):
+        state = copy.deepcopy(self.state)
+        state['storyboard_authoring_policy'] = 'shot-by-shot-v1'
+        unit = renderable(st.parse(self.text, state)[0])
+        state['units'] = [copy.deepcopy(unit)]
+        self.assertIn('A01-场景1-分镜1（时长：5秒）', st.render_unit(state, unit))
+        changed = copy.deepcopy(unit)
+        changed['source_text'] = changed['source_text'].replace('门边', '窗边')
+        with self.assertRaisesRegex(ValueError, '必须先通过storyboard_authoring_gate'):
+            st.render_unit(state, changed)
+
     def test_literal_at_braces_and_markers_in_dialogue_never_reach_callback(self):
         spoken = '给我@阿白 #12 @{CHAR9999} 声音[L000001,1-2]：“原样”。'
         state, text = fixture(spoken)
@@ -313,6 +335,16 @@ class StoryboardTextTests(unittest.TestCase):
         self.assertEqual(stats['same_scene_adjacent_candidates'], [{
             'units': ['SC0001/u01', 'SC0001/u02'], 'source_scene': 'SC0001',
             'combined_duration': 30, 'review': 'human_review_only'}])
+        self.assertEqual(stats['preferred_target_summary'], {
+            'policy': 'prefer_26_30_with_exception_proof_v1',
+            'preferred_range_seconds': [26, 30],
+            'target_unit_count': 1,
+            'target_units': ['SC0001/u01'],
+            'short_unit_count': 1,
+            'short_units': ['SC0001/u02'],
+            'candidate_boundary_count': 1,
+            'review_required_units': ['SC0001/u01', 'SC0001/u02'],
+        })
         self.assertEqual(stats['camera_wording']['by_shot_duration_seconds'], {
             '2': {'fixed': 0, 'moving': 1, 'mixed_or_unclear': 0, 'unknown': 0},
             '4': {'fixed': 0, 'moving': 1, 'mixed_or_unclear': 0, 'unknown': 0},

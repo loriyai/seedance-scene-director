@@ -938,7 +938,25 @@ def require_workflow(request):
         "B流程新单元须登记workflow_policy=scene-review-b-v2；不升级未选旧单元")
 
 
+def require_reference_entry_compatibility(state, request):
+    """Keep the legacy reference-v3 writer out of new scene-text projects.
+
+    ``director.py`` remains the reader/renderer for historical receipts.  A
+    newly bound project using the shot-by-shot scene-text policy must enter
+    through ``storyboard_text_delivery.py`` so its authoring sidecar and
+    per-shot gate cannot be skipped by the old structured endpoint.
+    """
+    if state.get("storyboard_authoring_policy") != "shot-by-shot-v1":
+        return
+    units = request.get("units", []) if isinstance(request, dict) else []
+    if any(isinstance(unit, dict) and unit.get("output_format") == OUTPUT_FORMAT
+           for unit in units):
+        require(False,
+                "新绑定项目必须使用storyboard_text_delivery.py；旧reference-v3提交入口仅保留历史回执读取和渲染")
+
+
 def validate(state, request, partial=False):
+    require_reference_entry_compatibility(state, request)
     require(not any(u.get('output_format') == 'scene-text-v1' for u in state.get('units', [])),
             '项目已有文字稿；新增及选定修改使用storyboard_text_delivery.py，旧回执仍可render，不回填旧结构化门槛')
     require(state["style_hash"], "尚未选择并保存视频风格")
@@ -1004,10 +1022,11 @@ def validate(state, request, partial=False):
     return [scope_warning(warning, prospective) for warning in warnings]
 
 
-def render_unit(state, unit, reference_text=None):
+def render_unit(state, unit, reference_text=None, *, authoring_gate=None):
     if unit.get("output_format") == "scene-text-v1":
         from storyboard_text import render_unit as render_text_unit
-        return render_text_unit(state, unit, reference_text)
+        return render_text_unit(state, unit, reference_text,
+                                authoring_gate=authoring_gate)
     convert = reference_text or (lambda text: text)
     chars = {c["id"]: c["name"] for c in state["ledger"]["characters"]}
     scenes = {s["id"]: s["heading"] for s in state["ledger"]["scenes"]}

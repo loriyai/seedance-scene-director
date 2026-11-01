@@ -11,15 +11,20 @@ class StoryboardAuthoringGateTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.project = Path(self.temp.name)
-        self.state = {'storyboard_authoring_policy': gate.POLICY}
+        self.state = {
+            'storyboard_authoring_policy': gate.POLICY,
+            'records': [{'id': 'L000001', 'scene': 'SC0001', 'kind': 'action',
+                         'start': 0, 'end': 4}],
+        }
         self.draft = b'authored draft\n'
         self.units = [{
             'draft_key': 'SC0001/u01',
             'source_records': ['L000001'],
             'span': [0, 4],
+            'duration': 4,
             'shots': [{
                 'start': 0, 'end': 4,
-                'text': '·00秒-04秒[镜头1-窗外]：（@{CHAR0001}的中景；转场：硬切）@{CHAR0001}抬头，视线落向窗外，肩膀随呼吸轻微起伏。音效：无。',
+                'text': '·00秒-04秒[镜头1-窗外]：（@{CHAR0001}的中景；转场：硬切）@{CHAR0001}抬头，视线落向窗外，肩膀随呼吸轻微起伏；浅景深让@{CHAR0001}清晰、窗外焦外；主光：左侧窗外漫射日光落在左脸，辅光：院墙反射托住右脸暗部。音效：无。',
                 'dialogue_parts': [],
             }],
         }]
@@ -37,11 +42,23 @@ class StoryboardAuthoringGateTest(unittest.TestCase):
             'context_sha256': self.context,
             'source_span': [0, 4],
             'timing_distribution_basis': '本镜持续观察窗外变化，动作和观察均在镜内完成。',
+            'unit_organization': {
+                'policy': gate.UNIT_ORGANIZATION_POLICY,
+                'units': [{
+                    'draft_key': 'SC0001/u01',
+                    'duration_seconds': 4,
+                    'decision': 'short_exception',
+                    'reason_code': 'selected_range_end',
+                    'reason': '本测试选定范围在该单元结束，范围内没有可承接的后续来源。',
+                }],
+            },
             'units': [{
                 'draft_key': 'SC0001/u01',
                 'shots': [{
                     'shot_key': 'SC0001/u01#1',
                     'source_records': ['L000001'],
+                    'actor_ids': ['CHAR0001'],
+                    'focus_note': '主焦点是抬头并看向窗外的CHAR0001，观众先读清视线变化。',
                     'beat': '观众读清人物从抬头到看向窗外的变化。',
                     'visual_change': '头部抬起，视线落到窗外，肩膀保持呼吸起伏。',
                     'gaze_target': '窗外',
@@ -61,6 +78,7 @@ class StoryboardAuthoringGateTest(unittest.TestCase):
                     },
                 }],
             }],
+            'source_cue_coverage': {'status': '无源文括号动作；本镜动作与观察已逐镜落实。'},
         }
         for key, value in updates.items():
             trace[key] = value
@@ -100,6 +118,35 @@ class StoryboardAuthoringGateTest(unittest.TestCase):
         # any uniform-timing claim can be trusted.
         report = gate.validate(self.project, self.state, self.draft, self.units, self.context, path)
         self.assertEqual(report['status'], 'blocked')
+
+    def test_short_unit_requires_organization_proof(self):
+        path = self.write_trace()
+        trace = json.loads(path.read_text(encoding='utf-8'))
+        trace.pop('unit_organization')
+        path.write_text(json.dumps(trace, ensure_ascii=False), encoding='utf-8')
+        report = gate.validate(self.project, self.state, self.draft, self.units, self.context, path)
+        self.assertIn('AUTHORING_UNIT_ORGANIZATION', {item['code'] for item in report['errors']})
+
+    def test_candidate_short_unit_requires_incompatibility_reason(self):
+        second = dict(self.units[0])
+        second['draft_key'] = 'SC0001/u02'
+        second['span'] = [4, 8]
+        second['duration'] = 4
+        second['shots'] = [dict(second['shots'][0], start=0, end=4)]
+        self.units.append(second)
+        path = self.write_trace()
+        trace = json.loads(path.read_text(encoding='utf-8'))
+        trace['unit_organization']['units'].append({
+            'draft_key': 'SC0001/u02',
+            'duration_seconds': 4,
+            'decision': 'short_exception',
+            'reason_code': 'selected_range_end',
+            'reason': '测试范围结束。',
+        })
+        path.write_text(json.dumps(trace, ensure_ascii=False), encoding='utf-8')
+        report = gate.validate(self.project, self.state, self.draft, self.units, self.context, path)
+        codes = {item['code'] for item in report['errors']}
+        self.assertIn('AUTHORING_UNIT_CANDIDATE_REVIEW', codes)
 
 
 if __name__ == '__main__':

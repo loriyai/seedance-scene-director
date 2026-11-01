@@ -238,10 +238,35 @@ def safe_output(state, project, output, inputs=()):
     return result
 
 
-def render_units(state, units, preview=False):
+def _historical_render_state(state, receipt):
+    """Make a verified historical receipt renderable after a replacement.
+
+    A replacement may remove the old unit from ``state['units']`` while the
+    receipt remains the source of truth for re-export.  Verify the receipt
+    against the saved session before projecting its exact units into a
+    read-only render state; this is not a general authorization bypass.
+    """
+    d.require(isinstance(receipt, dict), '历史回执格式无效')
+    request_id = receipt.get('request_id')
+    saved = next((row for row in state.get('receipts', [])
+                  if row.get('request_id') == request_id), None)
+    d.require(saved is not None and saved == receipt,
+              '历史回执未与项目中保存的回执一致；不能直接重导出')
+    projected = copy.deepcopy(state)
+    current = projected.setdefault('units', [])
+    for unit in receipt.get('units', []):
+        if unit not in current:
+            current.append(copy.deepcopy(unit))
+    return projected
+
+
+def render_units(state, units, preview=False, *, authoring_gate=None,
+                 historical_receipt=None):
+    render_state = (_historical_render_state(state, historical_receipt)
+                    if historical_receipt is not None else state)
     results = []
     counts = {}
-    scenes = {scene['id']: scene for scene in state['ledger']['scenes']}
+    scenes = {scene['id']: scene for scene in render_state['ledger']['scenes']}
     for index, value in enumerate(units, 1):
         unit = copy.deepcopy(value)
         d.require(unit.get('export_format') in (None, EXPORT_FORMAT), '未知的文字分镜导出版式')
@@ -249,7 +274,7 @@ def render_units(state, units, preview=False):
             scene = unit['main_scene']
             counts[scene] = counts.get(scene, 0) + 1
             unit['display_name'] = f'预览{index:02d}-场景{scenes[scene]["number"]}-分镜{counts[scene]}'
-        results.append(d.render_unit(state, unit))
+        results.append(d.render_unit(render_state, unit, authoring_gate=authoring_gate))
     if units and all(unit.get('export_format') == EXPORT_FORMAT for unit in units):
         total = sum(unit['duration'] for unit in units)
         minutes, seconds = divmod(total, 60)
@@ -276,7 +301,8 @@ def preview(project, draft, output=None, span=None, replace_ids=None, activity_i
     project, draft = Path(project).resolve(), Path(draft).resolve()
     state, units, info = prepare(project, draft, span, replace_ids,
                                  authoring_trace=authoring_trace)
-    payload = render_units(state, units, preview=True).encode('utf-8')
+    payload = render_units(state, units, preview=True,
+                           authoring_gate=info.get('authoring_gate')).encode('utf-8')
     artifact = {key: info[key] for key in ('draft_sha256', 'context_sha256', 'span', 'scenes')}
     artifact.update(draft=str(draft), output_sha256=hashlib.sha256(payload).hexdigest())
     rows, _ = storyboard_metrics.effective_events(storyboard_metrics.read_events(project))
@@ -354,7 +380,9 @@ def commit(project, draft, request_id, review, output, span=None,
                   '重试须沿用原交付路径；另行导出使用render')
         # A retry recovers its exact saved receipt, never a recomputed approval.
         target = Path(previous_receipt['output']).resolve()
-        rendered = render_units(state, previous_receipt['units'])
+        rendered = render_units(state, previous_receipt['units'],
+                                authoring_gate=previous_receipt.get('authoring_gate'),
+                                historical_receipt=previous_receipt)
         d.validate_output_path(state, project, target)
         if target.exists():
             d.require(target.read_text(encoding='utf-8-sig') == rendered,
@@ -438,7 +466,8 @@ def commit(project, draft, request_id, review, output, span=None,
             receipt.update(naming_policy=segment_naming.POLICY, segment_plan_id=plan['plan_id'],
                            batch_labels=list(dict.fromkeys(unit['batch_label'] for unit in units)))
         # Render before committing so a format error cannot create an unusable receipt.
-        rendered = render_units(working, units)
+        rendered = render_units(working, units,
+                                authoring_gate=info.get('authoring_gate'))
         working['receipts'].append(receipt)
         working['phase'] = 'nodes_choice'
         d.save(project, working)
@@ -515,7 +544,9 @@ def main():
             receipt = next((r for r in state['receipts'] if r['request_id'] == args.request_id), None)
             d.require(receipt is not None, '提交记录不存在')
             target = safe_output(state, args.project, args.output)
-            d.atomic_text(target, render_units(state, receipt['units']))
+            d.atomic_text(target, render_units(
+                state, receipt['units'], authoring_gate=receipt.get('authoring_gate'),
+                historical_receipt=receipt))
             result = {'output':str(target), **d.receipt_summary(receipt)}
         elif args.command == 'event':
             result = event(args.project, args.name, args.scene, args.note,

@@ -18,9 +18,10 @@ python <skill>/scripts/director.py status --project <project>
 python <skill>/scripts/director.py locate --project <project> --anchors <anchors.json>
 python <skill>/scripts/director.py locate --project <project> --segment A
 python <skill>/scripts/director.py range --project <project> --start <起点整数> --end <终点整数>
+python <skill>/scripts/canvas.py preflight --project <project> --target <画布网址> [--team-id <空间ID>]
 ```
 
-设置命令按实际选择执行，不同时执行示例中的两种ratio保存方式。`header --file`要求输入两行非空固定抬头并独立保存为项目`video-header.txt`；`--choice 1`为16:9，`--choice 2`为9:16；比例保存后记录分段方式、人数或自定义范围、同步选择和画布网址。比例保存后由统一画幅配置绑定`landscape-v1`或`portrait-v1`，新分镜单元冻结该配置，历史回执仍按原格式读取。正式分段计划的生成、目标切点、局部连续性审查、全局择点、摘要与精确范围接口统一见[剧本分工规则](script-partition.md)。范围和异常确认按[工作流](storyboard-workflow.md#范围定位与历史检查)。原位rebind未实现，来源/台账变化用[绑定变更边界](binding-changes.md)，不能手改session摘要。
+设置命令按实际选择执行，不同时执行示例中的两种ratio保存方式。`header --file`要求输入两行非空固定抬头并独立保存为项目`video-header.txt`；`--choice 1`为16:9，`--choice 2`为9:16；比例保存后记录分段方式、人数或自定义范围、同步选择和画布网址。同步意图为是且已有网址时，立即运行只读`canvas.py preflight`并保存`canvas/preflight.json`；预检未通过不得进入标准化。比例保存后由统一画幅配置绑定`landscape-v1`或`portrait-v1`，新分镜单元冻结该配置，历史回执仍按原格式读取。正式分段计划的生成、目标切点、局部连续性审查、全局择点、摘要与精确范围接口统一见[剧本分工规则](script-partition.md)。范围和异常确认按[工作流](storyboard-workflow.md#范围定位与历史检查)。原位rebind未实现，来源/台账变化用[绑定变更边界](binding-changes.md)，不能手改session摘要。
 
 ## 文本分镜接口
 

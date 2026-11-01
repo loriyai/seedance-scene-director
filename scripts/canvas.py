@@ -423,6 +423,69 @@ def bind(project, cli, target, switch=False, team_id=None):
     return {"status": "bound", "binding": binding}
 
 
+def preflight(project, cli, target, team_id=None):
+    """Read-only canvas/account/space/editability check before standardization.
+
+    This deliberately does not save a binding, create nodes, upload media, or
+    submit a queue task.  It may refresh the CLI's local public account
+    metadata through auth(), but the canvas itself is queried only.
+    """
+    project = Path(project)
+    receipt_path = project / "canvas" / "preflight.json"
+    project.joinpath("canvas").mkdir(parents=True, exist_ok=True)
+    state = read_state(project)
+    candidate = {"target_url": target}
+    account = None
+    selected = team_id
+    try:
+        account = cli.auth()
+        previous = state.get("binding") or {}
+        parsed = parse_target(target, cli, resolve=False)
+        selected, evidence = binding_space(cli, parsed, previous, account["identity"], team_id)
+        candidate = dict(parsed, account_id=account["identity"], team_id=selected,
+                         space_evidence=evidence)
+        if not candidate.get("canvas_id"):
+            candidate.update(parse_target(target, cli))
+        cli.use_binding(candidate)
+    except (ValueError, OSError, KeyError) as exc:
+        receipt = {"schema": 1, "mode": "read-only-preflight", "status": "failed",
+                   "target": candidate, "account_id": (account or {}).get("identity"),
+                   "team_id": selected, "error": safe_message(exc),
+                   "writes_performed": []}
+        d.write_json(receipt_path, receipt)
+        fail("PREFLIGHT_FAILED", "画布只读预检未通过；未写入绑定、未创建节点。",
+             team_id=selected, cause=safe_message(exc))
+    try:
+        permissions = cli.command(candidate["canvas_id"], "get_permissions")
+        d.require(permissions.get("canvasId") == candidate["canvas_id"], "权限回执画布不一致")
+        d.require(permissions.get("readOnly") is False, "不能编辑该画布")
+        doc = document(cli, candidate)
+    except (ValueError, OSError, KeyError) as exc:
+        receipt = {"schema": 1, "mode": "read-only-preflight", "status": "failed",
+                   "target": candidate, "account_id": (account or {}).get("identity"),
+                   "team_id": selected, "error": safe_message(exc),
+                   "writes_performed": []}
+        d.write_json(receipt_path, receipt)
+        fail("PREFLIGHT_FAILED", "画布只读预检未通过；未写入绑定、未创建节点。",
+             team_id=selected, cause=safe_message(exc))
+    root = doc["assets"][doc["rootCanvasId"]]
+    receipt = {
+        "schema": 1,
+        "mode": "read-only-preflight",
+        "status": "passed",
+        "target": candidate,
+        "account_id": account["identity"],
+        "team_id": selected,
+        "permissions": {"canvas_id": permissions.get("canvasId"),
+                        "read_only": permissions.get("readOnly")},
+        "root_canvas_id": doc.get("rootCanvasId"),
+        "root_type": root.get("type"),
+        "node_count": len(nodes(doc)),
+    }
+    d.write_json(Path(project) / "canvas" / "preflight.json", receipt)
+    return receipt
+
+
 def connected(project, cli):
     state = read_state(project)
     if not state.get("binding"):
@@ -2208,7 +2271,7 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("setup", "auth", "bind", "status", "assets", "videos", "references", "images", "edit", "delete", "black"))
+    parser.add_argument("command", choices=("setup", "auth", "preflight", "bind", "status", "assets", "videos", "references", "images", "edit", "delete", "black"))
     parser.add_argument("--project", required=True, type=Path)
     parser.add_argument("--node")
     parser.add_argument("--login", action="store_true")
@@ -2234,6 +2297,9 @@ def main():
             elif args.command == "auth":
                 auth = cli.auth(login=args.login, force=args.force)
                 result = {"status": "authenticated", "account_id": auth["identity"]}
+            elif args.command == "preflight":
+                d.require(args.target, "只读画布预检需要--target")
+                result = preflight(args.project, cli, args.target, args.team_id)
             elif args.command == "bind":
                 d.require(args.target, "绑定画布需要--target")
                 result = bind(args.project, cli, args.target, args.switch, args.team_id)
