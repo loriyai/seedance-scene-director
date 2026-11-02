@@ -134,11 +134,11 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
                   '不连续的指定单元请分别保存局部草稿并提交；不要把中间未选剧情混入修改')
         parse_span = [selected_old[0]['span'][0], selected_old[-1]['span'][1]]
         d.require(span is None or list(span) == parse_span, '--span与指定修改单元范围不同')
-    units = text_core.parse(raw, state, source_span=parse_span)
-    info = text_core.validate(state, units)
-    authoring = storyboard_authoring_gate.validate(
-        project, state, draft_bytes, units, context_hash(state, project), authoring_trace,
-        draft_path=draft)
+    units, info = text_core._parse_for_delivery(raw, state, source_span=parse_span)
+    context = context_hash(state, project)
+    authoring = storyboard_authoring_gate._validate_for_delivery(
+        project, state, draft_bytes, units, context, authoring_trace,
+        draft_path=draft, observations_summary=info['observations'])
     storyboard_authoring_gate.require(authoring)
     info['dialogue_capacity'] = require_dialogue_capacity(units)
     selected = list(dict.fromkeys(sid for unit in units for sid in unit['scene_ids']))
@@ -203,7 +203,7 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
     info['camera_constraints'] = camera
     info['warnings'].extend(camera['warnings'])
     binding = {'draft_sha256': hashlib.sha256(draft_bytes).hexdigest(),
-               'context_sha256': context_hash(state, project),
+               'context_sha256': context,
                'header_sha256': d.sha(header)}
     profiles = [ratio_profiles.profile_summary(unit['video_ratio']) for unit in units
                 if unit.get('video_ratio') is not None]
@@ -298,6 +298,8 @@ def render_units(state, units, preview=False, *, authoring_gate=None,
     results = []
     counts = {}
     scenes = {scene['id']: scene for scene in render_state['ledger']['scenes']}
+    context = (text_core._context(render_state)
+               if any(u.get('output_format') == text_core.OUTPUT_FORMAT for u in units) else None)
     for index, value in enumerate(units, 1):
         unit = copy.deepcopy(value)
         d.require(unit.get('export_format') in (None, EXPORT_FORMAT), '未知的文字分镜导出版式')
@@ -305,7 +307,11 @@ def render_units(state, units, preview=False, *, authoring_gate=None,
             scene = unit['main_scene']
             counts[scene] = counts.get(scene, 0) + 1
             unit['display_name'] = f'预览{index:02d}-场景{scenes[scene]["number"]}-分镜{counts[scene]}'
-        results.append(d.render_unit(render_state, unit, authoring_gate=authoring_gate))
+        if unit.get('output_format') == text_core.OUTPUT_FORMAT:
+            results.append(text_core._render_unit(render_state, unit, context,
+                                                 authoring_gate=authoring_gate))
+        else:
+            results.append(d.render_unit(render_state, unit, authoring_gate=authoring_gate))
     if units and all(unit.get('export_format') == EXPORT_FORMAT for unit in units):
         total = sum(unit['duration'] for unit in units)
         minutes, seconds = divmod(total, 60)
@@ -323,6 +329,13 @@ def write_preview(target, payload):
             stream.close()
             target.unlink()
             raise
+
+
+def _require_current_preview(project, draft, state, info):
+    d.require(hashlib.sha256(draft.read_bytes()).hexdigest() == info['draft_sha256'],
+              '作者稿在预览期间变化，请重新运行预览')
+    d.require(context_hash(state, project) == info['context_sha256'],
+              '分镜上下文在预览期间变化，请重新运行预览和核对审阅')
 
 
 def preview(project, draft, output=None, span=None, replace_ids=None, activity_id=None,
@@ -355,14 +368,12 @@ def preview(project, draft, output=None, span=None, replace_ids=None, activity_i
                 matches = [row for row in rows if row.get('producer') == storyboard_metrics.PREVIEW_PRODUCER
                            and row.get('artifact') == current and row.get('activity_id') == activity_id]
                 if set(row.get('scene') for row in matches) == set(info['scenes']):
-                    d.require(hashlib.sha256(draft.read_bytes()).hexdigest() == info['draft_sha256'],
-                              '作者稿在预览期间变化，请重新运行预览')
+                    _require_current_preview(project, draft, state, info)
                     return {**info, 'output': str(target), 'output_sha256': artifact['output_sha256'],
                             'preview_reused': True, 'preview_event_ids': [row['event_id'] for row in matches]}
         else:
             raise ValueError('预览版本路径已耗尽；保留现场并选择新的输出路径')
-    d.require(hashlib.sha256(draft.read_bytes()).hexdigest() == info['draft_sha256'],
-              '作者稿在预览期间变化，请重新运行预览')
+    _require_current_preview(project, draft, state, info)
     try:
         write_preview(target, payload)
     except FileExistsError as exc:
@@ -371,10 +382,8 @@ def preview(project, draft, output=None, span=None, replace_ids=None, activity_i
     artifact['output'] = str(target)
     events = []
     try:
-        for scene in info['scenes']:
-            events.append(storyboard_metrics.record_event(
-                project, 'previewed', at=now(), scene=scene, activity_id=activity_id,
-                producer=storyboard_metrics.PREVIEW_PRODUCER, artifact=artifact))
+        events = storyboard_metrics._record_preview_events(
+            project, info['scenes'], at=now(), activity_id=activity_id, artifact=artifact)
     except (OSError, ValueError) as exc:
         raise ValueError(f'预览文件已写入，但成功事件未全部记录；保留产物 {target}，请核对日志：{exc}') from exc
     return {**info, 'output': str(target), 'output_sha256': artifact['output_sha256'],
@@ -598,7 +607,11 @@ def main():
             result = timing(args.project)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (ValueError, OSError, KeyError, TypeError) as exc:
-        print(json.dumps({'status':'error','message':str(exc)},ensure_ascii=False))
+        result = {'status': 'error', 'message': str(exc)}
+        if isinstance(exc, storyboard_authoring_gate.AuthoringGateError):
+            result['errors'] = exc.report.get('errors', [])
+            result['authoring_gate'] = exc.report
+        print(json.dumps(result, ensure_ascii=False))
         return 1
     return 0
 

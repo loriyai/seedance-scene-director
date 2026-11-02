@@ -487,6 +487,10 @@ def source_context_digest(data, category, item):
               "source_name": item.get("source_name"), "appearance": item.get("appearance"),
               "visible_uses": item.get("visible_uses"), "variant": item.get("variant"),
               "parent_id": item.get("parent_id"), "location_id": item.get("location_id")}
+    if item.get("scene_clothing"):
+        record["scene_clothing"] = item["scene_clothing"]
+    if item.get("scene_source_speakers"):
+        record["scene_source_speakers"] = item["scene_source_speakers"]
     if item.get("visual_design", {}).get("image_reference") is not None:
         record["image_reference_dependencies"] = image_reference_context(data, item)
     if "appearance_variant" in item:
@@ -811,6 +815,39 @@ def validate_shared_identity(data):
         anchor_owners[anchor] = key
 
 
+def validate_scene_clothing(data):
+    """Explicit source clothing names share a body and an authored image root."""
+    from cast_contract import split_cast_entry
+    catalog = {item["id"]: item for item in visual_assets(data, "characters") if not is_group(item)}
+    unresolved_roots = {}
+    for item in catalog.values():
+        if not item.get("scene_clothing"):
+            continue
+        name = item["scene_clothing"]["base_name"]
+        ids = reference_design_ids(item)
+        if not ids:
+            # Same spelling is a candidate, never proof of the same body.
+            possible = [other for other in catalog.values() if other["id"] != item["id"]
+                        and not other.get("scene_clothing") and not other.get("appearance_variant")
+                        and split_cast_entry(other.get("source_entry", other["name"]))[0] == name]
+            if possible:
+                raise ValueError(item["id"] + "须由作者用image_reference明确对应基础人物图片，不按同名推断身体")
+            unresolved_roots.setdefault(name, []).append(item["id"])
+            continue
+        if data.get("image_design_version") != DESIGN_VERSION or ids[0] not in catalog:
+            raise ValueError(item["id"] + "换装须使用v2及现用基础角色图片")
+        base = catalog[ids[0]]
+        design, source = item.get("visual_design", {}), base.get("visual_design", {})
+        if design.get("identity_anchor_id") != source.get("identity_anchor_id"):
+            raise ValueError(item["id"] + "换装须共享所引用基础图片的identity_anchor_id")
+        if any(design.get(key) != source.get(key) for key in
+               ("appearance_overrides", "override_source_facts")):
+            raise ValueError(item["id"] + "只换服装，不得改变基础身体外观覆盖")
+    for roots in unresolved_roots.values():
+        if len(roots) > 1:
+            raise ValueError("换装基础图片关系待审；须明确现有图片引用，不自动合并同名身体：" + str(roots))
+
+
 def validate_variant_inheritance(data):
     characters = {item["id"]: item for item in data["characters"]}
     for item in visual_assets(data, "characters"):
@@ -959,6 +996,10 @@ def compile_prompt(data, category, item, design, anchors):
 
 
 def validate_design_item(data, category, item, anchors, version):
+    return _validate_design_item(data, category, item, anchors, version)
+
+
+def _validate_design_item(data, category, item, anchors, version, compiled=None):
     design = item.get("visual_design")
     validate_design_record(category, item, design, anchors, version)
     if item.get("image_design_digest") != fingerprint(design):
@@ -967,7 +1008,8 @@ def validate_design_item(data, category, item, anchors, version):
         raise ValueError(f"{item['id']}原文外观事实已改变，须审阅设计并重新运行design")
     if design.get("source_context_digest") != source_context_digest(data, category, item):
         raise ValueError(f"{item['id']}原文版本、出处或场次映射已改变，须审阅设计并重新运行design")
-    prompt, form = compile_prompt(data, category, item, design, anchors)
+    prompt, form = (compile_prompt(data, category, item, design, anchors)
+                    if compiled is None else compiled[item["id"]])
     if item.get("image_prompt") != prompt or item.get("image_format") != form:
         raise ValueError(f"{item['id']}生图提示词或版式与台账设计不一致，请重新运行design")
     image_reference_asset_ids(item)
@@ -994,7 +1036,7 @@ def design_review_status(data):
                 result["reusable_asset_ids"].append(item["id"])
             except (ValueError, KeyError, TypeError, StopIteration) as exc:
                 result["review_required"].append({"asset_id": item["id"], "reason": str(exc)})
-    for validator in (validate_shared_identity, validate_variant_inheritance, validate_image_references):
+    for validator in (validate_shared_identity, validate_scene_clothing, validate_variant_inheritance, validate_image_references):
         try:
             validator(data)
         except (ValueError, KeyError, TypeError) as exc:
@@ -1003,6 +1045,10 @@ def design_review_status(data):
 
 
 def validate_visual_design(data):
+    return _validate_visual_design(data)
+
+
+def _validate_visual_design(data, compiled=None):
     validate_prop_coverage(data)
     validate_group_modes(data)
     for item in data["characters"]:
@@ -1021,13 +1067,31 @@ def validate_visual_design(data):
     anchors = identity_map(data)
     for category in ASSET_CATEGORIES:
         for item in visual_assets(data, category):
-            validate_design_item(data, category, item, anchors, version)
+            _validate_design_item(data, category, item, anchors, version, compiled)
     validate_shared_identity(data)
+    validate_scene_clothing(data)
     validate_variant_inheritance(data)
     validate_image_references(data)
 
 
+class _CompiledSnapshot:
+    """Operation-local compilation evidence, never a serialized approval flag."""
+    def __init__(self, data, compiled):
+        self._digest = fingerprint(data)
+        self._compiled = copy.deepcopy(compiled)
+
+    def validate(self, data):
+        if fingerprint(data) != self._digest:
+            raise ValueError("已编译设计快照发生变化，不能复用本次编译结果")
+        _validate_visual_design(data, self._compiled)
+
+
 def apply_design(data, payload, style_text, *, patch=False, paragraphs=None):
+    result, _ = _apply_design_compiled(data, payload, style_text, patch=patch, paragraphs=paragraphs)
+    return result
+
+
+def _apply_design_compiled(data, payload, style_text, *, patch=False, paragraphs=None):
     validate_prop_coverage(data)
     validate_group_modes(data)
     if data.get("schema_version") != 3:
@@ -1119,12 +1183,14 @@ def apply_design(data, payload, style_text, *, patch=False, paragraphs=None):
     design_scope.check_context(result)
     validate_image_references(result)
     validate_authored_reference_roots(result, changed_ids)
+    compiled = {}
     for category in ASSET_CATEGORIES:
         for item in visual_assets(result, category):
             design = item["visual_design"]
             if item["id"] in reused:
                 old = reused[item["id"]]
                 prompt, form = compile_prompt(result, category, item, design, anchors)
+                compiled[item["id"]] = (prompt, form)
                 if (old.get("image_design_digest") != fingerprint(design)
                         or design.get("source_fact_digest") != fingerprint(source_constraints(result, category, item))
                         or design.get("source_context_digest") != source_context_digest(result, category, item)
@@ -1136,5 +1202,6 @@ def apply_design(data, payload, style_text, *, patch=False, paragraphs=None):
             design["source_context_digest"] = source_context_digest(result, category, item)
             item["image_design_digest"] = fingerprint(design)
             item["image_prompt"], item["image_format"] = compile_prompt(result, category, item, design, anchors)
-    validate_visual_design(result)
-    return result
+            compiled[item["id"]] = (item["image_prompt"], item["image_format"])
+    _validate_visual_design(result, compiled)
+    return result, _CompiledSnapshot(result, compiled)

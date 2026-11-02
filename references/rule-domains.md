@@ -17,7 +17,7 @@
 | 视频比例到分镜画幅配置的统一映射、版本与单元冻结 | `scripts/ratio_profiles.py`；适用创作规则见[画幅配置](storyboard-rules.md#画幅配置) |
 | 新文字分镜的创作、流程和语法 | 下述三份分镜权威资料 |
 | 分镜创作与脚本的职责边界、跨代理与包装器约束 | [共同执行契约](execution-contract.md#分镜创作与工具边界) |
-| 逐单元写作核对、增量检查、续接重新锚定和同类问题闭环 | [分镜工作流](storyboard-workflow.md#范围一次当前场次逐步完成) |
+| 连续逐镜核对、按需增量诊断、逐段交付及同类问题闭环 | [分镜工作流](storyboard-workflow.md#范围一次当前场次逐步完成) |
 | 按场来源/资产/版本只读投影与上下文绑定 | `scripts/storyboard_context.py`；合法引用集合复用`storyboard_text.py` |
 | 新文字分镜事件、过程问题及耗时派生 | `scripts/storyboard_metrics.py`；命令仍由`storyboard_text_delivery.py`暴露，口径见[事件计时](storyboard-text-format.md#事件计时) |
 

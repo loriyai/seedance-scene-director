@@ -152,6 +152,48 @@ def record_event(project, name, *, at, scene=None, note=None, activity_id=None,
     return row
 
 
+def _record_preview_events(project, scenes, *, at, activity_id, artifact):
+    """Append scene milestones after verifying artifact bytes at both boundaries.
+
+    This private batch accepts no cached verification from a public caller.
+    The public single-event API continues to verify each independent call.
+    """
+    from project_paths import assert_writable
+
+    project = Path(project).resolve()
+    assert_writable(project)
+    if not (project / 'session.json').is_file():
+        raise ValueError('计时必须指向已绑定项目')
+    if (not isinstance(scenes, list) or not scenes
+            or any(not isinstance(scene, str) or not scene.strip() for scene in scenes)
+            or len(set(scenes)) != len(scenes)):
+        raise ValueError('预览场次须完整且不重复')
+    if activity_id is not None and (not isinstance(activity_id, str) or not activity_id.strip()):
+        raise ValueError('场次或activity_id不能为空')
+    stamp(at)
+    rows = read_events(project)
+    if rows and stamp(at) < stamp(rows[-1]['at']):
+        raise ValueError('事件时间倒序，未追加；未知起点不回填')
+    validate_preview_artifact(artifact, scenes[0])
+    if set(scenes) != set(artifact['scenes']):
+        raise ValueError('预览产物场次不匹配')
+    events = []
+    for scene in scenes:
+        row = {'event_id': str(uuid.uuid4()), 'at': at, 'event': 'previewed',
+               'scene': scene, 'artifact': artifact, 'producer': PREVIEW_PRODUCER}
+        if activity_id is not None:
+            row['activity_id'] = activity_id
+        events.append(row)
+    # Event assembly can run caller/host code (for example UUID generation).
+    # Recheck the actual bytes at the append boundary, not once per scene.
+    validate_preview_artifact(artifact, scenes[0])
+    folder = project / 'text-storyboards'
+    folder.mkdir(exist_ok=True)
+    with (folder / 'events.jsonl').open('a', encoding='utf-8', newline='\n') as stream:
+        stream.write(''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in events))
+    return events
+
+
 def invalidate_event(project, event_id, *, at, note):
     return record_event(project, 'event_invalidated', at=at, note=note,
                         issue_kind='tool_repair', invalidates=event_id)

@@ -71,6 +71,13 @@ def project_inputs(data, shared, asset_ids):
     # Existing closure provides same-body, wearable, parent SET and LOC edges.
     needed, reasons = design_preview._closure(data, catalog, selected, authored)
     candidates = data.get("prop_coverage_review", {}).get("candidates", [])
+    candidates_by_target, scenes_by_asset = {}, {}
+    for index, candidate in enumerate(candidates):
+        candidates_by_target.setdefault(candidate.get("target_id"), []).append((index, candidate))
+    for scene in data["scenes"]:
+        ids = set(design.scene_character_ids(scene)) | set(scene["prop_ids"]) | {scene.get("scene_asset_id")}
+        for aid in ids:
+            scenes_by_asset.setdefault(aid, []).append(scene)
     rows = []
     for aid in sorted(needed):
         category, item = catalog[aid]
@@ -86,11 +93,8 @@ def project_inputs(data, shared, asset_ids):
         absorbed = [{"candidate_id": candidate["id"],
                      "inherited_from_base": candidate.get("target_id") == base,
                      "record": copy.deepcopy(candidate)}
-                    for candidate in candidates if candidate.get("target_id") in targets]
-        scene_ids = [scene["id"] for scene in data["scenes"]
-                     if (aid in design.scene_character_ids(scene) if category == "characters" else
-                         aid in scene["prop_ids"] if category == "props" else
-                         scene.get("scene_asset_id") == aid)]
+                    for _, candidate in sorted(entry for target in targets
+                                               for entry in candidates_by_target.get(target, []))]
         row = {
             "asset_id": aid, "category": category, "name": item["name"],
             "requested": aid in selected,
@@ -98,7 +102,7 @@ def project_inputs(data, shared, asset_ids):
             "source_context_sha256": design.source_context_digest(data, category, item),
             "facts": facts, "absorbed_candidates": absorbed,
             "scene_refs": [{"scene_id": scene["id"], "source_range": scene["source_range"]}
-                           for scene in data["scenes"] if scene["id"] in scene_ids],
+                           for scene in scenes_by_asset.get(aid, [])],
             "inheritance": {"base_asset_id": base, "prop_asset_id": variant.get("prop_asset_id"),
                             "image_reference_asset_ids": image_dependencies,
                             "location_id": item.get("location_id"), "parent_id": item.get("parent_id"),
@@ -117,8 +121,18 @@ def prepare(script, source, ledger_path, style, asset_ids=None, shared_design=No
              "ledger": Path(ledger_path).resolve(), "style": Path(style).resolve()}
     if shared_design is not None:
         paths["shared_design"] = Path(shared_design).resolve()
+    contents, hashes, rules = _read_inputs(paths)
+    return _prepare_snapshot(paths, contents, hashes, rules, asset_ids)
+
+
+def _read_inputs(paths):
     contents = {key: path.read_bytes() for key, path in paths.items()}
     hashes = {key: hashlib.sha256(value).hexdigest() for key, value in contents.items()}
+    return contents, hashes, rule_hashes()
+
+
+def _prepare_snapshot(paths, contents, hashes, rules, asset_ids):
+    """Rebuild and validate from this operation's actual bytes, never a flag."""
     style_text = contents["style"].decode("utf-8-sig").strip()
     require(style_text and "\n" not in style_text and "\r" not in style_text, "风格须为非空单行")
     data = json.loads(contents["ledger"].decode("utf-8-sig"))
@@ -131,8 +145,8 @@ def prepare(script, source, ledger_path, style, asset_ids=None, shared_design=No
             for field in design_preview.DERIVED:
                 item.pop(field, None)
     # Validate the full inventory, not a reduced subset that could hide issues.
-    ledger.validate(ledger.parse_script(paths["script"]), ledger.source_paragraphs(paths["source"]), source_data)
-    rules = rule_hashes()
+    ledger.validate(ledger._parse_script_text(contents["script"].decode("utf-8-sig")),
+                    ledger._source_paragraphs(json.loads(contents["source"].decode("utf-8"))), source_data)
     result = {"policy": POLICY, "status": "input_index", "formal_ready": False,
               "bindable": False, "semantic_review": "not_performed",
               "input_paths": {key: str(path) for key, path in paths.items()},
@@ -151,10 +165,11 @@ def check(index):
             ({"script", "source", "ledger", "style"}, {"script", "source", "ledger", "style", "shared_design"}),
             "设计输入路径集合无效")
     require(all(isinstance(p, str) and Path(p).is_absolute() for p in paths.values()), "设计输入须为绝对路径")
-    require(index.get("input_sha256") == {key: file_hash(Path(path)) for key, path in paths.items()}
-            and index.get("rule_sha256") == rule_hashes(), "设计输入或规则已变化；旧索引及相关判断须重新核验")
-    current = prepare(paths["script"], paths["source"], paths["ledger"], paths["style"],
-                      index.get("requested_asset_ids"), paths.get("shared_design"))
+    paths = {key: Path(path) for key, path in paths.items()}
+    contents, hashes, rules = _read_inputs(paths)
+    require(index.get("input_sha256") == hashes
+            and index.get("rule_sha256") == rules, "设计输入或规则已变化；旧索引及相关判断须重新核验")
+    current = _prepare_snapshot(paths, contents, hashes, rules, index.get("requested_asset_ids"))
     require(current == index, "设计输入索引内容被修改；请从当前台账重建，不手改投影或摘要")
     return {"status": "current", "binding_sha256": index["binding_sha256"],
             "asset_count": len(index["items"]), "semantic_review": "not_performed",

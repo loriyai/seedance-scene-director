@@ -14,6 +14,7 @@ from pathlib import Path
 from asset_ledger import HEADING, validate_image_name
 import source_compat
 from cast_contract import validate_cast_entries
+import scene_character_names
 
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -73,6 +74,7 @@ def prepare(input_path: Path, workdir: Path) -> None:
     payload = {
         "input": str(input_path.resolve()),
         "format_policy": "standard-screenplay-v1",
+        "character_name_policy": scene_character_names.POLICY,
         "paragraphs": [{"id": i, "text": value} for i, value in enumerate(paragraphs, 1)],
     }
     source_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

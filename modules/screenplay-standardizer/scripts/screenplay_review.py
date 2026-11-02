@@ -12,11 +12,12 @@ from pathlib import Path
 from asset_ledger import digest, scene_ranges, source_paragraphs, split_cast_entry
 from cast_contract import validate_cast_entries
 import source_compat
+import scene_character_names
 
 
 SCENE_FILE = re.compile(r"scene_(\d+)_(\d+)-(\d+)\.txt$")
 TRANSITION = re.compile(r"^(?:遮挡转场|转场)\s*")
-REVIEW_VERSION = 9
+REVIEW_VERSION = 10
 FRAGMENT_POLICY = "source-fragments-v1"
 BOUNDARY_POLICY = "narrative-space-v1"
 # A finite risk recognizer, not a scene splitter. Unlisted vehicle names still
@@ -61,6 +62,8 @@ def format_fingerprint(workdir):
     source = json.loads((workdir / "source.json").read_text(encoding="utf-8-sig"))
     if source.get("format_policy") is not None:
         result["format_policy"] = source["format_policy"]
+    if source.get("character_name_policy") is not None:
+        result["character_name_policy"] = source["character_name_policy"]
     markers = workdir / source_compat.ACTION_MARKERS_FILE
     if markers.is_file():
         source_compat.load_action_markers(workdir)
@@ -124,7 +127,14 @@ def draft_parts(path):
     errors = validate_cast_entries(entries)
     if errors:
         raise ValueError(f"{path.name} 人物行不合法：" + "；".join(errors))
-    names = [split_cast_entry(part)[0] for part in entries]
+    source_path = path.parent.parent / "source.json"
+    source = json.loads(source_path.read_text(encoding="utf-8-sig")) if source_path.exists() else {}
+    match = SCENE_FILE.fullmatch(path.name)
+    mapping = {}
+    if source.get("character_name_policy") == scene_character_names.POLICY and match:
+        mapping, _ = scene_character_names.scene_mapping(
+            source_paragraphs(path.parent.parent / "source.json"), int(match[2]), int(match[3]))
+    names = [part if part in mapping.values() else split_cast_entry(part)[0] for part in entries]
     body, dialogues = [], []
     position = 0
     markers = source_compat.load_action_markers(path.parent.parent)
@@ -304,7 +314,8 @@ def checked_span(span, text, label):
 
 
 def check_fragment_mapping(mapping, template, candidate, names, lines, dialogues,
-                           raw_lines, surfaces, cursor, used_targets, paragraphs, end):
+                           raw_lines, surfaces, cursor, used_targets, paragraphs, end,
+                           name_mapping=None):
     """Validate a full paragraph partition, never an omission exemption.
 
     This deliberately supports only verbatim content and the existing finite
@@ -340,6 +351,11 @@ def check_fragment_mapping(mapping, template, candidate, names, lines, dialogues
         number, kind = target["line"], target.get("kind")
         if kind not in ("heading", "action", "dialogue", "cue") or (number, kind) not in surfaces:
             raise ValueError("源片段目标行与 heading/action/dialogue/cue 类型不符")
+        if kind == "action" and name_mapping:
+            for name in sorted(set(name_mapping) | set(name_mapping.values()), key=len, reverse=True):
+                for match in re.finditer(re.escape(name), raw):
+                    if any(match.start() < cut < match.end() for cut in (a, b)):
+                        raise ValueError("源片段不能截断换装角色名称，须完整核对确定性映射")
         target_raw = raw_lines[number - 1]
         c, d = checked_span(target.get("range"), target_raw, "目标片段")
         low, high = surfaces[(number, kind)]
@@ -377,8 +393,10 @@ def check_fragment_mapping(mapping, template, candidate, names, lines, dialogues
                     or not refs[0] <= refs[1] <= end
                     or linked.get("source_lines") != paragraphs[refs[0] - 1:refs[1]]):
                 raise ValueError("cue 须逐字绑定紧邻且连续的原台词范围")
-            source_label = explicit_label(paragraphs[refs[0] - 1], names)
-            if source_label and source_label["speaker"] != speaker:
+            source_label = explicit_label(paragraphs[refs[0] - 1], names + list(name_mapping or {}))
+            source_speaker = (scene_character_names.replace_names(source_label["speaker"], name_mapping or {}, names)
+                              if source_label else None)
+            if source_label and source_speaker != speaker:
                 raise ValueError("cue 迁移声源与紧邻原台词的明确角色标签不一致")
             # A suffix must sit immediately before the receiving dialogue in
             # the draft too; it cannot leap over an action or another speaker.
@@ -388,7 +406,9 @@ def check_fragment_mapping(mapping, template, candidate, names, lines, dialogues
             voices.append({"paragraph": template["paragraph"], "speaker": speaker,
                            "draft_line": number, "source_range": refs, "text": source})
         else:
-            if compact(source) != compact(target_raw[c:d]):
+            expected_source = (scene_character_names.action_names(source, name_mapping or {}, names)
+                               if kind == "action" else source)
+            if compact(expected_source) != compact(target_raw[c:d]):
                 raise ValueError("源片段与目标字词不一致；映射不能删除或增加正文")
             if kind == "heading":
                 if not TRANSITION.match(raw.strip()) or cursor or body_spans:
@@ -416,8 +436,19 @@ def check_scene(paragraphs, start, end, path, decisions):
         if errors:
             raise ValueError("逐场入口检查未通过：" + "；".join(errors))
     heading, names, lines, dialogues = draft_parts(path)
+    source_path = path.parent.parent / "source.json"
+    source_settings = json.loads(source_path.read_text(encoding="utf-8-sig")) if source_path.exists() else {}
+    strict_dialogue = source_settings.get("character_name_policy") == scene_character_names.POLICY
+    clothing_mapping, declarations = ({}, {})
+    if source_settings.get("character_name_policy") == scene_character_names.POLICY:
+        clothing_mapping, declarations = scene_character_names.scene_mapping(paragraphs, start, end)
+    if any(value not in names for value in clothing_mapping.values()):
+        raise ValueError("标准稿人物行须保留原人物行明确的完整换装角色名")
     raw_lines, surfaces = fragment_surfaces(path, lines, dialogues)
-    source_labels = names + [item["speaker"] for item in dialogues if item["non_character"]]
+    source_labels = names + list(clothing_mapping) + [item["speaker"] for item in dialogues if item["non_character"]]
+    def scene_hint(paragraph):
+        hint = cue_hint(paragraphs, start, paragraph, source_labels)
+        return scene_character_names.replace_names(hint, clothing_mapping, names) if hint else hint
     flat = "".join(compact(line["text"]) for line in lines)
     cursor, missing, extra, paragraph_map = 0, [], [], []
     used_targets, mapped_voices, fragment_templates = set(), [], {}
@@ -454,6 +485,11 @@ def check_scene(paragraphs, start, end, path, decisions):
                     "source_text": paragraphs[paragraph - 1], "context_before": before,
                     "context_after": after, "source_hash": source_hash, "draft_hash": draft_hash}
         fragment_templates[paragraph] = (disposition_key, template)
+        if paragraph in declarations:
+            paragraph_map.append({"paragraph": paragraph, "source_text": value,
+                                  "status": "格式提示", "reason": "原场人物声明",
+                                  "destinations": []})
+            continue
         candidate = TRANSITION.sub("", value)
         candidate, leading_cue = source_compat.strip_leading_voice(candidate)
         raw_source_label = source_compat.explicit_label(candidate, source_labels)
@@ -470,7 +506,8 @@ def check_scene(paragraphs, start, end, path, decisions):
                     raise ValueError("同段不能同时使用源片段映射与纯提示豁免")
                 destinations, spans, targets, voices = check_fragment_mapping(
                     mapping, template, candidate, names, lines, dialogues,
-                    raw_lines, surfaces, cursor, used_targets, paragraphs, end)
+                    raw_lines, surfaces, cursor, used_targets, paragraphs, end,
+                    name_mapping=clothing_mapping)
             except ValueError as exc:
                 missing.append({"paragraph": paragraph, "text": value, "issue": str(exc)})
                 paragraph_map.append({"paragraph": paragraph, "source_text": value,
@@ -507,6 +544,15 @@ def check_scene(paragraphs, start, end, path, decisions):
             paragraph_map.append({"paragraph": paragraph, "source_text": value, "status": "待核", "decision_key": disposition_key,
                                   "decision_template": {"source_text": value, "context_before": before, "context_after": after}, "destinations": []})
             continue
+        if not source_label:
+            ambiguous = []
+            candidate = scene_character_names.action_names(candidate, clothing_mapping, source_labels, ambiguous)
+            if ambiguous:
+                missing.append({"paragraph": paragraph, "text": value,
+                                "issue": "单字角色名词界待核；用原始坐标片段映射区分实际人物引用与普通词语"})
+                paragraph_map.append({"paragraph": paragraph, "source_text": value,
+                                      "status": "名称归属待核", "destinations": []})
+                continue
         fragment = compact(candidate)
         if not fragment:
             paragraph_map.append({"paragraph": paragraph, "source_text": value, "status": "纯标点", "reason": "仅含标点", "destinations": []})
@@ -571,14 +617,18 @@ def check_scene(paragraphs, start, end, path, decisions):
                 issues.append("引号已匹配成稿台词，不能标为非台词")
         elif dialogue:
             assigned_lines.add(dialogue["line"])
+            if strict_dialogue and dialogue["text"] != block["text"]:
+                issues.append("换装名称映射不得改变台词原话、标点或空白")
             if dialogue["non_character"]:
                 issues.extend(non_character_issues(dialogue, decision, names, block["text"]))
             else:
-                hint = cue_hint(paragraphs, start, block["paragraph"], names)
+                hint = scene_hint(block["paragraph"])
                 cast_match = all(part in names for part in dialogue["speaker"].split("、"))
                 if not cast_match:
                     issues.append("说话人未逐字列入人物行")
-                if (not hint or (hint != dialogue["speaker"] and hint not in dialogue["speaker"].split("、"))) and not (decision and decision.get("speaker") == dialogue["speaker"]):
+                speaker_matches = hint == dialogue["speaker"]
+                if not speaker_matches and not (decision and decision.get("speaker") == dialogue["speaker"]
+                                                 and not hint):
                     issues.append("待人工确认说话人")
                 if decision and decision.get("classification") == "非人物播报":
                     issues.append("非人物播报须在成稿声源标签明确标记")
@@ -586,7 +636,7 @@ def check_scene(paragraphs, start, end, path, decisions):
             issues.append("原文引号未匹配成稿台词；若非台词须人工确认")
         quote_items.append({"kind": "原文引号", "paragraph": block["paragraph"], "end_paragraph": block["end_paragraph"],
                             "decision_key": key, "source_text": block["text"], "draft_line": dialogue["line"] if dialogue else None,
-                            "speaker": dialogue["speaker"] if dialogue else None, "cue_hint": cue_hint(paragraphs, start, block["paragraph"], names),
+                            "speaker": dialogue["speaker"] if dialogue else None, "cue_hint": scene_hint(block["paragraph"]),
                             "issue": issues, "decision_template": template})
 
     for dialogue in dialogues:
@@ -611,7 +661,15 @@ def check_scene(paragraphs, start, end, path, decisions):
             decision = None
         if not refs or compact(dialogue["text"]) not in compact(source_text):
             issues.append("无引号台词未能对应原文文字")
-        hint = cue_hint(paragraphs, start, first, names)
+        if strict_dialogue and refs:
+            spoken = []
+            for ref in refs:
+                raw, _ = source_compat.strip_leading_voice(paragraphs[ref - 1].strip())
+                label = explicit_label(raw, source_labels)
+                spoken.append(label["text"] if label else raw)
+            if dialogue["text"] != "".join(spoken):
+                issues.append("换装名称映射不得改变台词原话、标点或空白")
+        hint = scene_hint(first)
         if dialogue["non_character"]:
             spoken_parts = []
             for ref in refs:
@@ -622,7 +680,9 @@ def check_scene(paragraphs, start, end, path, decisions):
         else:
             if any(part not in names for part in dialogue["speaker"].split("、")):
                 issues.append("说话人未逐字列入人物行")
-            if (not hint or hint not in dialogue["speaker"].split("、")) and not (decision and decision.get("speaker") == dialogue["speaker"]):
+            speaker_matches = hint == dialogue["speaker"]
+            if not speaker_matches and not (decision and decision.get("speaker") == dialogue["speaker"]
+                                             and not hint):
                 issues.append("无引号台词说话人待核")
             if decision and decision.get("classification") == "非人物播报":
                 issues.append("非人物播报须在成稿声源标签明确标记")
@@ -808,8 +868,8 @@ def make_report(workdir, decisions, previous=None, scope="full", scene_numbers=N
     syntax = format_fingerprint(workdir)
     prior = {}
     if (previous and previous.get("review_version") == REVIEW_VERSION
-            and {key: previous.get("fingerprint", {}).get(key) for key in ("action_markers", "format_policy")}
-            == {key: syntax.get(key) for key in ("action_markers", "format_policy")}):
+            and {key: previous.get("fingerprint", {}).get(key) for key in ("action_markers", "format_policy", "character_name_policy")}
+            == {key: syntax.get(key) for key in ("action_markers", "format_policy", "character_name_policy")}):
         for item in previous.get("scenes", []):
             prior.setdefault((item["source_hash"], item["draft_hash"]), []).append(item)
     scenes, reused = [], 0

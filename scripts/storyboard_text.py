@@ -215,10 +215,10 @@ def _seconds(value):
     return int(number) if number == number.to_integral_value() else float(number)
 
 
-def _parse_units(text, state):
+def _parse_units(text, state, *, _context_data=None):
     _require(isinstance(text, str) and text.strip(), "分镜TXT为空")
     _require("\x00" not in text, "分镜TXT含NUL字符")
-    records, record_map, scenes, _ = _context(state)
+    records, record_map, scenes, _ = _context_data if _context_data is not None else _context(state)
     units, unit, lines = [], None, []
     stage = 0
 
@@ -325,10 +325,10 @@ def scene_asset_ids(scene):
             'props': list(dict.fromkeys(scene.get('prop_ids', [])))}
 
 
-def _speaker(asset):
+def _speaker(asset, scene_id=None):
     name = asset.get("source_entry", asset["name"])
     fallback = name.split("-群像-", 1)[0] + "-群像" if "-群像-" in name else name.split("-", 1)[0]
-    return asset.get("source_speaker", fallback)
+    return asset.get("scene_source_speakers", {}).get(scene_id, asset.get("source_speaker", fallback))
 
 
 def _check(units, state, *, allow_partial_tail=False):
@@ -375,7 +375,7 @@ def _check(units, state, *, allow_partial_tail=False):
                              and all(cid in unit["character_ids"]
                                      and cid in _scene_characters(scenes[record["scene"]])
                                      and cid in assets for cid in ids)
-                             and "、".join(_speaker(assets[cid]) for cid in ids) == record["speaker"],
+                            and "、".join(_speaker(assets[cid], record["scene"]) for cid in ids) == record["speaker"],
                              f"{key}/{rid}：台词说话人与来源台账不一致")
                     used.extend(ids)
                 _require("@" not in part["direction"], f"{key}/{rid}：语气括注只写声音表现，不写资产引用")
@@ -518,6 +518,17 @@ def validate(state, units):
     for unit, current in zip(units, fresh):
         for field in PROJECTION_FIELDS:
             _require(unit.get(field) == current.get(field), f'{current["draft_key"]}：派生字段{field}与作者文本不一致；请重新parse')
+    return _summary(state, fresh)
+
+
+def _parse_for_delivery(text, state, source_span=None):
+    """Use only the result just parsed here; no caller-supplied cache is trusted."""
+    units = parse(text, state, source_span=source_span)
+    return units, _summary(state, units)
+
+
+def _summary(state, fresh):
+    """Statistics for locally checked units; public validate still reparses."""
     source_records = list(dict.fromkeys(rid for u in fresh for rid in u["source_records"]))
     warnings = []
     entry = state.get("entry", {})
@@ -733,7 +744,8 @@ def observations(state, units):
     for run in runs:
         for start_index, (first_unit, first_shot_index, _) in enumerate(run):
             elapsed = 0
-            for last_unit, last_shot_index, shot in run[start_index:]:
+            for end_index in range(start_index, len(run)):
+                last_unit, last_shot_index, shot = run[end_index]
                 elapsed += shot["end"] - shot["start"]
                 if elapsed > 30:
                     break
@@ -820,13 +832,19 @@ def _require_render_authorization(state, unit, authoring_gate=None):
 
 def render_unit(state, unit, reference_text=None, *, authoring_gate=None):
     """Render one checked unit; quoted speech never enters callbacks."""
+    return _render_unit(state, unit, _context(state), reference_text,
+                        authoring_gate=authoring_gate)
+
+
+def _render_unit(state, unit, context_data, reference_text=None, *, authoring_gate=None):
+    """Share indexes only inside a render batch; always parse the source text."""
     _require_render_authorization(state, unit, authoring_gate)
     import director as d
     import ratio_profiles
-    parsed = _parse_units(unit["source_text"], state)
+    parsed = _parse_units(unit["source_text"], state, _context_data=context_data)
     _require(len(parsed) == 1, "单元source_text须恰好包含一个单元")
     authored = parsed[0]
-    _, _, _, assets = _context(state)
+    _, record_map, _, assets = context_data
     convert = reference_text or (lambda text: text)
 
     def asset(aid):
@@ -879,7 +897,8 @@ def render_unit(state, unit, reference_text=None, *, authoring_gate=None):
                 # Joint speech remains one source event and one verbatim line.
                 # Stable IDs are validated and retained in the character list;
                 # the displayed attribution preserves the original source names.
-                source = "、".join(_speaker(assets[cid]) for cid in part["character_ids"])
+                source_record = record_map[part["record"]][1]
+                source = "、".join(_speaker(assets[cid], source_record["scene"]) for cid in part["character_ids"])
             else:
                 source = asset(part["character_id"])
             line += source + display_voice(part["voice"]) + part["direction"] + '：“' + part["text"] + '”'

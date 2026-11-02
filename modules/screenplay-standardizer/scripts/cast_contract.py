@@ -28,6 +28,12 @@ def validate_source_speaker(item: dict, *, context: str = "") -> None:
     if not isinstance(speaker, str) or not speaker.strip():
         raise ValueError(f"{label} source_speaker须为非空字符串")
     expected, _ = split_cast_entry(item.get("source_entry", item.get("name")))
+    if item.get("scene_clothing"):
+        clothing = item["scene_clothing"]
+        if (not isinstance(clothing, dict) or set(clothing) != {"base_name"}
+                or clothing.get("base_name") != expected):
+            raise ValueError(f"{label} 换装关系须对应原人物条目的基础角色名")
+        expected = item.get("source_entry", item.get("name"))
     if speaker != expected:
         raise ValueError(f"{label} 人物声源须对应原人物行：source_speaker={speaker!r}，人物槽位={expected!r}")
 

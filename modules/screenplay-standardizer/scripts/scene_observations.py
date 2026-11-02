@@ -203,7 +203,7 @@ def _review_scenes(review, payload, paragraphs):
     expected = "passed" if scope == "full" else scope + "_passed"
     # Historical immutable import snapshots remain readable after an algorithm
     # upgrade. A new import still requires the current full report version.
-    versions = {7, 8, REVIEW_VERSION} if review.get("snapshot_scope") == "observed_scenes_only" else {REVIEW_VERSION}
+    versions = {7, 8, 9, REVIEW_VERSION} if review.get("snapshot_scope") == "observed_scenes_only" else {REVIEW_VERSION}
     if (scope not in ("full", "sample", "partial") or review.get("status") != expected
             or review.get("review_version") not in versions
             or any(item.get("issue") for item in review.get("boundary_items", []))):
@@ -346,6 +346,11 @@ def validate_observations(payload, source_path, workdir, review=None, ledger=Non
         cast = [line.strip() for line in content.splitlines() if line.strip()][1]
         cast_by_number[number] = [] if cast == "人物：无；" else cast[3:-1].split("；")
     if review is not None:
+        current_review = _object(review)
+        if current_review.get("snapshot_scope") != "observed_scenes_only":
+            settings = json.loads(Path(source_path).read_text(encoding="utf-8-sig"))
+            if current_review.get("fingerprint", {}).get("character_name_policy") != settings.get("character_name_policy"):
+                raise ValueError("观察审阅报告的角色命名政策已变化，须重新实际复核")
         if _object(review).get("snapshot_scope") is not None:
             raise ValueError("历史观察快照仅供已导入内容核验；新导入须提供当前完整审阅报告")
         for filename, expected_hash in _object(review).get("boundary_drafts", {}).items():

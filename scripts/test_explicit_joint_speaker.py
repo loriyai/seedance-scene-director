@@ -1,4 +1,5 @@
 """Known explicit joint labels pass; single speakers and action prose are preserved."""
+import json
 import sys
 import tempfile
 import unittest
@@ -35,6 +36,30 @@ class ExplicitJointSpeakerTests(unittest.TestCase):
             self.assertEqual(result["coverage_extra"], [])
             self.assertTrue(result["speaker_items"])
             self.assertTrue(all(not item["issue"] for item in result["speaker_items"]))
+
+    def test_standalone_review_rejects_single_to_joint_speaker_change(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "scene_001_0001-0001.txt"
+            path.write_text("场景1-日-外-教学楼门口\n人物：邱柏野-基础形象；谢奕辉-基础形象；\n邱柏野、谢奕辉：学姐好。\n", encoding="utf-8")
+            result = review.check_scene(["邱柏野：「学姐好。」"], 1, 1, path, {})
+            self.assertTrue(any(item["issue"] for item in result["speaker_items"]))
+
+    def test_project_review_requires_source_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaises(FileNotFoundError):
+                review.make_report(Path(temp), {})
+
+    def test_standalone_review_rejects_malformed_source_settings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            (project / "scenes").mkdir()
+            (project / "source.json").write_text("{", encoding="utf-8")
+            path = project / "scenes/scene_001_0001-0001.txt"
+            path.write_text("场景1-日-外-教学楼门口\n人物：卢筱筱-基础形象；\n卢筱筱：是的。\n", encoding="utf-8")
+            with self.assertRaises(json.JSONDecodeError):
+                review.draft_parts(path)
+            with self.assertRaises(json.JSONDecodeError):
+                review.check_scene(["卢筱筱：是的。"], 1, 1, path, {})
 
 
 if __name__ == "__main__": unittest.main()

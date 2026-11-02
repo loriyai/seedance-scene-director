@@ -21,6 +21,7 @@ from cast_contract import split_cast_entry, validate_cast_entries, validate_sour
 from asset_review import (prepare_review_payload, apply_review_decisions, verify_review_decisions,
                           validate_asset_lifecycle)
 from project_contract import delivery_contract, requires_design
+import scene_character_names
 
 
 HEADING = re.compile(r"场景(\d+)(?=-(?:日|夜)-(?:内|外)-|：(?:日|夜)·(?:内|外)·)[：-](日|夜)[·-](内|外)[·-](.+)")
@@ -36,7 +37,10 @@ GENERIC_ROLE = re.compile(r"^(?:宾客|同学|女生|男生|医生|男医生|女
 
 
 def source_paragraphs(path: Path) -> list[str]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    return _source_paragraphs(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _source_paragraphs(data):
     paragraphs = data["paragraphs"]
     if any(item["id"] != i for i, item in enumerate(paragraphs, 1)):
         raise ValueError("source.json 段落编号不连续")
@@ -49,7 +53,11 @@ def digest(paragraphs: list[str]) -> str:
 
 
 def parse_script(path: Path) -> list[dict]:
-    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    return _parse_script_text(path.read_text(encoding="utf-8-sig"))
+
+
+def _parse_script_text(text):
+    lines = text.splitlines()
     scenes = []
     heading_positions = []
     for i, line in enumerate(lines):
@@ -295,6 +303,17 @@ def fact_list(records: list[dict], paragraphs: list[str], scenes_by_id: dict, la
 
 
 def validate(script: list[dict], paragraphs: list[str], data: dict, *, require_designed=False) -> None:
+    return _validate(script, paragraphs, data, require_designed=require_designed)
+
+
+def _validate_compiled(script, paragraphs, data, compiled, *, require_designed=False):
+    from asset_visual_design import _CompiledSnapshot
+    if not isinstance(compiled, _CompiledSnapshot):
+        raise ValueError("缺少本次操作实际编译的设计快照")
+    return _validate(script, paragraphs, data, require_designed=require_designed, compiled=compiled)
+
+
+def _validate(script, paragraphs, data, *, require_designed=False, compiled=None):
     if data.get("schema_version") not in (2, 3):
         raise ValueError("不支持的资产台账 schema_version")
     validate_asset_lifecycle(data)
@@ -327,12 +346,42 @@ def validate(script: list[dict], paragraphs: list[str], data: dict, *, require_d
             all_ids.add(asset_id)
     scenes_by_id = {item["id"]: item for item in data["scenes"]}
     characters = {item["id"]: item for item in data["characters"]}
+    if data.get("character_name_policy") == scene_character_names.POLICY:
+        declared_bindings = set()
+        expected_speakers = {}
+        for base, scene in zip(script, data["scenes"]):
+            mapping, _ = scene_character_names.scene_mapping(paragraphs, *scene["source_range"])
+            for aid in scene["character_ids"]:
+                item = characters[aid]
+                entry = item.get("source_entry", item["name"])
+                role = split_cast_entry(entry)[0]
+                expected_speakers.setdefault(aid, {})[scene["id"]] = entry if mapping.get(role) == entry else role
+            for role, full_name in mapping.items():
+                declared_bindings.add((full_name, role))
+                matches = [characters[aid] for aid in scene["character_ids"]
+                           if characters[aid].get("source_entry") == full_name]
+                if (full_name not in base["cast_entries"] or len(matches) != 1
+                        or matches[0].get("scene_clothing") != {"base_name": role}
+                        or matches[0].get("source_speaker") != full_name):
+                    raise ValueError("换装角色资产及声源须对应本场原人物行完整名称：" + full_name)
+        for item in characters.values():
+            if item.get("scene_clothing") and (item.get("source_entry"), item["scene_clothing"].get("base_name")) not in declared_bindings:
+                raise ValueError("换装资产关系缺少当前原人物行声明：" + item["id"])
+            expected = expected_speakers.get(item['id'], {})
+            actual = item.get('scene_source_speakers')
+            if actual is not None:
+                if actual != expected or len(set(expected.values())) < 2:
+                    raise ValueError(item['id'] + "场级声源标签与实际标准稿场次不一致")
+            elif len(set(expected.values())) > 1:
+                raise ValueError(item['id'] + "复用资产的场级声源标签缺失")
     locations = {item["id"]: item for item in data["locations"]}
     props = {item["id"]: item for item in data["props"]}
     prop_primary_seen = {item["id"]: False for item in data["props"]}
     location_heading_names = {item["id"]: set() for item in data["locations"]}
     cast_union = {entry for item in script for entry in item["cast_entries"]}
     for item in data["characters"]:
+        if item.get("scene_clothing") and data.get("character_name_policy") != scene_character_names.POLICY:
+            raise ValueError("换装名称关系须由已声明命名政策的标准化项目建立")
         if item.get("source_entry", item.get("name")) not in cast_union:
             raise ValueError(f"人物资产名称不在任何人物行中：{item.get('name')}")
     for category in ("characters", "locations", "props"):
@@ -443,7 +492,10 @@ def validate(script: list[dict], paragraphs: list[str], data: dict, *, require_d
     validate_character_variants(data, paragraphs)
     validate_prop_policy(data, paragraphs, fact_list)
     validate_group_policy(data, paragraphs, fact_list, script)
-    validate_visual_design(data)
+    if compiled is None:
+        validate_visual_design(data)
+    else:
+        compiled.validate(data)
 
 
 def candidate_data(data):
@@ -739,9 +791,14 @@ def initialize(script_path: Path, workdir: Path, output: Path, *, observations=N
     script = parse_script(script_path)
     paragraphs = source_paragraphs(workdir / "source.json")
     ranges = scene_ranges(workdir, len(script), len(paragraphs))
+    settings = json.loads((workdir / "source.json").read_text(encoding="utf-8-sig"))
+    clothing_policy = settings.get("character_name_policy") == scene_character_names.POLICY
     character_ids = {}
+    speaker_contracts = {}
     characters, locations, scenes = [], [], []
     for base, source_range in zip(script, ranges):
+        clothing, _ = (scene_character_names.scene_mapping(paragraphs, *source_range)
+                       if clothing_policy else ({}, {}))
         location_name = base["location_name"]
         # Identical generic headings can denote different places. Start separately;
         # merge only after checking the original scene context.
@@ -752,6 +809,8 @@ def initialize(script_path: Path, workdir: Path, output: Path, *, observations=N
         for entry in base["cast_entries"]:
             role_name, _ = split_cast_entry(entry)
             key = (entry, base["number"]) if GENERIC_ROLE.match(role_name) or role_name.endswith("-群像") else (entry, None)
+            expected_speaker = entry if clothing.get(role_name) == entry else role_name
+            speaker_contracts.setdefault(key, {})[f"SC{base['number']:04d}"] = expected_speaker
             if key not in character_ids:
                 asset_id = f"CHAR{len(characters) + 1:04d}"
                 character_ids[key] = asset_id
@@ -763,6 +822,10 @@ def initialize(script_path: Path, workdir: Path, output: Path, *, observations=N
                 if role_name.endswith('-群像'):
                     # This is a draft until the author reviews all occurrences.
                     characters[-1]['visual_mode'] = 'prompt_only'
+            if clothing.get(role_name) == entry:
+                character = next(item for item in characters if item['id'] == character_ids[key])
+                character['scene_clothing'] = {"base_name": role_name}
+                character['source_speaker'] = entry
             linked.append(character_ids[key])
         scenes.append({
             "id": f"SC{base['number']:04d}", "number": base["number"],
@@ -779,6 +842,12 @@ def initialize(script_path: Path, workdir: Path, output: Path, *, observations=N
         "prop_coverage_review": {"source_digest": digest(paragraphs), "reviewed_full_script": False,
                                  "reviewed_scene_ids": [], "candidates": []},
     }
+    for key, speakers in speaker_contracts.items():
+        if len(set(speakers.values())) > 1:
+            character = next(item for item in characters if item['id'] == character_ids[key])
+            character['scene_source_speakers'] = speakers
+    if clothing_policy:
+        data['character_name_policy'] = scene_character_names.POLICY
     if project is not None:
         from project_contract import read_contract
         contract = read_contract(project)
@@ -822,6 +891,11 @@ def render(script_path: Path, source_path: Path, ledger_path: Path, output: Path
     paragraphs = source_paragraphs(source_path)
     data = json.loads(ledger_path.read_text(encoding="utf-8-sig"))
     validate(script, paragraphs, data, require_designed=requires_design(data, explicit=require_designed))
+    _write_catalog(script, data, output)
+
+
+def _write_catalog(script, data, output):
+    """Export only the in-memory object already checked by this operation."""
     characters = {item["id"]: item for item in data["characters"]}
     locations = {item["id"]: item for item in data["locations"]}
     props = {item["id"]: item for item in data["props"]}
@@ -1073,20 +1147,29 @@ def main() -> None:
             inputs = [args.script, args.source, args.ledger, args.design_json, args.style_file]
             if any(path.exists() for path in outputs) or len({path.resolve() for path in outputs}) != len(outputs) or any(path.resolve() in {value.resolve() for value in inputs} for path in outputs):
                 raise ValueError("design输出须为不同的新文件，不覆盖输入、旧台账或旧分类TXT")
-            script = parse_script(args.script)
-            paragraphs = source_paragraphs(args.source)
-            data = json.loads(args.ledger.read_text(encoding="utf-8-sig"))
+            contents = {path: path.read_bytes() for path in inputs}
+            script = _parse_script_text(contents[args.script].decode("utf-8-sig"))
+            paragraphs = _source_paragraphs(json.loads(contents[args.source].decode("utf-8")))
+            data = json.loads(contents[args.ledger].decode("utf-8-sig"))
             # Recompilation is also the explicit path for reviewed changes to
             # facts/style. Validate source structure without stale derivatives.
             source_data = candidate_data(data)
             validate(script, paragraphs, source_data)
-            result = apply_design(data, json.loads(args.design_json.read_text(encoding="utf-8-sig")),
-                                  args.style_file.read_text(encoding="utf-8-sig"), patch=args.patch, paragraphs=paragraphs)
-            validate(script, paragraphs, result, require_designed=True)
+            from asset_visual_design import _apply_design_compiled
+            result, compiled = _apply_design_compiled(data, json.loads(contents[args.design_json].decode("utf-8-sig")),
+                                  contents[args.style_file].decode("utf-8-sig"), patch=args.patch, paragraphs=paragraphs)
+            _validate_compiled(script, paragraphs, result, compiled, require_designed=True)
+            if any(path.read_bytes() != raw for path, raw in contents.items()):
+                raise ValueError("设计期间输入发生变化，须重新读取并检查；未写正式产物")
             args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            serialized = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+            args.output.write_text(serialized, encoding="utf-8")
+            if args.output.read_text(encoding="utf-8") != serialized:
+                raise ValueError("设计产物写入后发生变化；保留现场，不导出分类TXT")
             if args.catalog_output:
-                render(args.script, args.source, args.output, args.catalog_output, require_designed=True)
+                if any(path.read_bytes() != raw for path, raw in contents.items()):
+                    raise ValueError("设计台账写入后输入发生变化；保留台账，不导出分类TXT")
+                _write_catalog(script, result, args.catalog_output)
             print(f"已编译完整GPT-image-2资产设计：{args.output}；未调用生图模型")
         else:
             render(args.script, args.source, args.ledger, args.output, require_designed=args.require_designed)

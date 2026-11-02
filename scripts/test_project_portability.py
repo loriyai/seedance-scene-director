@@ -199,12 +199,28 @@ class ProjectPortabilityTests(unittest.TestCase):
         self.assertTrue((self.target / 'session.json').exists())
 
     def test_windows_long_dependency_paths_survive_import(self):
-        deep = self.project / 'evidence' / ('a' * 90) / ('b' * 90) / 'original-proof.txt'
+        deep = self.project / 'evidence' / ('a' * 90) / ('b' * 90) / ('c' * 90) / 'original-proof.txt'
+        self.assertGreater(len(str(deep)), 260)
         paths.io_path(deep.parent).mkdir(parents=True)
         paths.io_path(deep).write_text('synthetic evidence bytes', encoding='utf-8')
         self.transfer()
+        with zipfile.ZipFile(self.archive) as archive:
+            members = [name for name in archive.namelist() if name.endswith('/original-proof.txt')]
+            self.assertEqual(len(members), 1)
+            self.assertEqual(archive.read(members[0]), b'synthetic evidence bytes')
         restored = paths.resolve(self.target, str(paths.canonical(deep)))
-        self.assertEqual(restored.read_text(encoding='utf-8'), 'synthetic evidence bytes')
+        self.assertEqual(restored.read_bytes(), b'synthetic evidence bytes')
+
+    def test_directory_scan_error_aborts_export_instead_of_omitting_files(self):
+        def unreadable(directory, *, followlinks, onerror):
+            self.assertFalse(followlinks)
+            onerror(OSError(5, 'synthetic directory scan failure', str(directory)))
+            return iter(())
+
+        with patch.object(bundle.os, 'walk', side_effect=unreadable):
+            with self.assertRaisesRegex(ValueError, '依赖目录扫描失败'):
+                bundle.export_project(self.project, self.archive)
+        self.assertFalse(self.archive.exists())
 
     def test_import_into_long_root_is_readable(self):
         self.target = self.base / ('a' * 85) / ('b' * 85) / 'project'

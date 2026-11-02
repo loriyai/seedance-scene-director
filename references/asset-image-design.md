@@ -96,7 +96,7 @@ python <module>/scripts/design_inputs.py check <新索引.json>
 
 ### 身份锚点与造型差异
 
-同一实际身体的不同造型共享锚点。已登记`appearance.identity`与`incarnation`相同的CHAR共享`identity_anchor_id`，不同已知身体不能共用；没有appearance的简单/旧人物由作者审阅，不从名字拆分猜身份。明确进入另一身体时建立独立锚点，不能跨世次用覆盖字段借用旧身体。换装通常只改`styling`，不提前改变形象启用区间或新增人物。
+同一实际身体的不同造型共享锚点。已登记`appearance.identity`与`incarnation`相同的CHAR共享`identity_anchor_id`，不同已知身体不能共用；没有appearance的简单/旧人物由作者审阅，不从名字拆分猜身份。新标准化流程通过原场人物行确认的`scene_clothing`仅表示同一角色换了一身衣服，与对应基础人物共用同一`identity_anchor_id`；age/body/face/hair及已审身体覆盖保持一致，不新增人物或声线身份。明确进入另一身体时建立独立锚点，不能跨世次用覆盖字段借用旧身体。换装通常只改`styling`，不提前改变形象启用区间或新增人物。
 
 有依据的真实外观变化可用`appearance_overrides`覆盖`age/body/face/hair`，并以`variant_differences`文字数组逐项说明差异与保持项；这不创建CHAR或替代形象启用规则。覆盖`face/body`还须在`override_source_facts`中把相应字段映射到该资产已有、已验证的`visual_facts.text`。程序能核对引用，变化是否被事实证明仍由作者审阅。
 
@@ -113,7 +113,7 @@ python <module>/scripts/design_inputs.py check <新索引.json>
 }
 ```
 
-`base_asset_id`必须指向同一身体、同一身份锚点的现用个体CHAR，不由相似名称推断；`changes/preserve`为非空单行文字数组，只写真实差异与保持项。可选`prop_asset_ids`引用本版变化实际使用的独立PROP，作用关系写入changes；不把无关同场资产列为图片输入。已审佩戴版从`appearance_variant`取得基础和道具，`covering`仍是贴合/遮挡的唯一作者源，编译时据此建立image_reference，不另维护第二份佩戴差异。引用链必须完整、无自引用和循环，逐级使用已确认的直接基础图；图片未就绪时可以交付待引用文本和空节点，不自动生成图片。
+`base_asset_id`必须指向同一身体、同一身份锚点的现用个体CHAR，不由相似名称推断；`changes/preserve`为非空单行文字数组，只写真实差异与保持项。源人物行明确的`scene_clothing`换装家族使用一个已审基础图片，其余版本用本字段建立依赖；存在唯一基础人物资产时以其为根，多个基础/世次未厘清时先回身份审阅，不自动选择。仅登记一套服装而没有其他基础资产时，沿正常设计流程先确认该套基础图；不能引用不存在的CHAR或声称图片已生成。换装差异由作者写出服装变化与保持项，不借名称后缀重绘年龄、体型、面容、发型。可选`prop_asset_ids`引用本版变化实际使用的独立PROP，作用关系写入changes；不把无关同场资产列为图片输入。已审佩戴版从`appearance_variant`取得基础和道具，`covering`仍是贴合/遮挡的唯一作者源，编译时据此建立image_reference，不另维护第二份佩戴差异。引用链必须完整、无自引用和循环，逐级使用已确认的直接基础图；图片未就绪时可以交付待引用文本和空节点，不自动生成图片。
 
 后台完整锚点、styling和已审覆盖字段继续用于事实与依赖校验；派生提示词只渲染基础图片引用、变化对象引用、差异及适用版式。引用采用`@完整制作名 `，名称后保留英文空格。图片板呈现变化完成后的单一状态，不能用“戴上”等过程词替代目标状态或绘成前后对照。风格、白底和板式属于输出要求，可保留。
 
@@ -206,7 +206,7 @@ python <module>/scripts/design_workspace.py verify-group <baseline.json> <plan.j
 python <module>/scripts/design_workspace.py merge <baseline.json> <plan.json> <character-a.json> <sets.json> <props.json>
 ```
 
-`freeze`固定剧本、source、完整台账、共享设计输入、风格五个原文件的绝对路径与原始字节SHA256。计划、验证、合并均重验文件与基线内嵌内容；`baseline_sha256/plan_sha256`绑定完整内容，宿主交接另绑基线/计划文件原始字节hash。来源、风格或共享设计变化须修改作者输入并建新基线/计划，不能替换旧摘要复用审阅。
+`freeze`固定剧本、source、完整台账、共享设计输入、风格五个原文件的绝对路径与原始字节SHA256。每次独立的计划、验证或合并入口均核验文件与基线内嵌内容；同次调用中的计划查询、各组验证与合并复用本次已验证基线，结束时复核原件、基线、计划及实际提交内容。执行使用入口处的提交快照，期间内容变化时拒绝返回通过结果，避免设计内容与提交摘要对应不同版本。拥有范围、只读依赖和每组实际提交仍逐项核对；`baseline_sha256/plan_sha256`绑定完整内容，宿主交接另绑基线/计划文件原始字节hash。来源、风格或共享设计变化须修改作者输入并建新基线/计划，不能替换旧摘要复用审阅。
 
 共享输入沿用[作者字段](#制作设计与图片提示词)，额外增加`identity_assignments`，如`{"CHAR0001":"identity-a","CHAR0002":"identity-a"}`。它精确覆盖全部独立图片CHAR；v2多人群像和prompt_only群体不填。锚点不得闲置或引用未知ID，身体/身份共享规则不变；`designs`只放本轮明确冻结的设计，可为空，不自动借用台账旧设计。
 
@@ -259,7 +259,7 @@ python <module>/scripts/design_workspace.py merge <baseline.json> <plan.json> <c
 | `validate_baseline(baseline, require_files=True)` | 生产交接要求真实输入文件，拒绝纯内存基线。 |
 | `plan(baseline, groups)` / `validate_plan(baseline, plan)` / `group_spec(baseline, plan, group_id)` | 建立/验证计划，查询拥有范围和只读依赖。 |
 | `verify_group(baseline, plan, group_id, submission)` | 在完整台账编译真实提交，返回展平设计和提示词预览；仅`structurally_valid_group`，`semantic_review=not_performed`、`formal_ready=false`、`bindable=false`。 |
-| `merge(baseline, plan, submissions)` | 重新核验实际组，运行原apply_design及完整require_designed验证，返回完整旧格式设计JSON；仍由主代理正常命令写正式台账。全部已冻结时groups/submissions均可为空。 |
+| `merge(baseline, plan, submissions)` | 核验实际组并完成全量设计编译与完整require_designed验证，返回完整设计JSON；同次编译结果按输入快照复用，仍由主代理正常命令写正式台账。全部已冻结时groups/submissions均可为空。 |
 
 纯内存`freeze(script, paragraphs, data, payload, style)`只供已验证解析结果的可信调用者和测试。宿主负责草稿隔离、并发上限、ownership reservation、实际语义验收及交接关闭，本模块不签发语义通过。关闭前不得改变交接输入，也不能把已完成任务记cancelled或刷新摘要绕过校验。
 
@@ -278,9 +278,9 @@ design-check的`--asset-id`可重复但ID不得重复。它先验证完整台账
 
 预览只向stdout输出，不改原台账/设计、不建立绑定或正式TXT。报告包含五个输入文件的`input_sha256`、请求ID、依赖闭包、`binding_sha256`与实际提示词；佩戴用`wearable_review_pairs`同时实读PROP单品和人物板。复查可把input_sha256对象另存JSON并传`--expected-hashes <输入摘要.json>`，必须含script/source/ledger/design/style五项；输入变化即重查。报告始终是`partial_preview`、`formal_ready:false`、`semantic_review:not_performed`。
 
-作者沿短约束实读预览，核对事实、身份与服装继承、实际遮挡、空间关系及美术效果，再扩写同类。全量合并仍须原design、render及绑定验收，样本/组结构通过不替代完整交付。JSON是唯一设计源，TXT不得手工维护第二份设计。
+作者沿短约束实读预览，核对事实、身份与服装继承、实际遮挡、空间关系及美术效果，再扩写同类。全量合并后仍须正式design及绑定验收；design带`--catalog-output`生成的分类TXT已属于该次完整交付，不再为同版结果另跑render。样本或组结构通过不替代完整交付。JSON是唯一设计源，TXT不得手工维护第二份设计。
 
-编译以原文明示特征为优先约束，组合已选风格、作者设计与分类版式，不把审计出处或“无外观事实”写入prompt。每个图片资产保存`visual_design/image_prompt/image_format/image_design_digest`，设计自动记录`source_fact_digest/source_context_digest`。render确定性重编，核对提示词、版式、设计摘要、事实出处和场次映射；事实/设计/依赖变化须显式design，不手改image_prompt。命令写不同的新文件，保留旧台账/TXT，无设计旧台账沿原事实渲染，不自动补全。
+编译以原文明示特征为优先约束，组合已选风格、作者设计与分类版式，不把审计出处或“无外观事实”写入prompt。每个图片资产保存`visual_design/image_prompt/image_format/image_design_digest`，设计自动记录`source_fact_digest/source_context_digest`。独立render确定性重编，核对提示词、版式、设计摘要、事实出处和场次映射；同次design调用生成的实际编译结果仅在完整内容绑定有效时供后续内部验证及分类输出复用，公开验证入口仍自行核对当前输入；事实/设计/依赖变化须显式design，不手改image_prompt。命令写不同的新文件，保留旧台账/TXT，无设计旧台账沿原事实渲染，不自动补全。
 
 分类TXT只保留角色、场景、主要道具三类，按台账数组顺序各自从`角色01`、`场景01`、`道具01`连续编号，超过99为100，过滤prompt_only后无空号。完成design的主行为`角色01 - 完整资产名：完整image_prompt`（场景/道具用各自前缀）；下一行角色写出现场次，须含仅内心想法os/画外音出场及佩戴形象关联反查，SET/PROP写使用场次，稳定ID反查number后排序去重。来源中的`os/O.S./内心OS/内心想法`统一按内心想法os处理，`ov/VO/V.O./画外音`统一按画外音处理；普通括号提示逐字保留。展示号不进入稳定ID、name、图片名、节点名或引用，后台ID、证据及性格栏只留JSON。未design旧台账继续显示原文核心可见特征，缺信息保留“未明示”及旧独立production_design行，保留原绑定，不静默补设计；新制作须先design。
 

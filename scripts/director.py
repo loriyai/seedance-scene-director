@@ -218,7 +218,7 @@ def dependency(path=None):
                 "scripts/asset_visual_design.py", "scripts/character_variants.py",
                 "scripts/asset_review.py", "scripts/design_preview.py",
                 "scripts/design_scope.py", "scripts/design_inputs.py", "scripts/evidence_draft.py",
-                "scripts/cast_contract.py", "scripts/source_compat.py",
+                "scripts/cast_contract.py", "scripts/source_compat.py", "scripts/scene_character_names.py",
                 "scripts/screenplay_io.py", "scripts/screenplay_review.py",
                 "scripts/scene_observations.py", "scripts/project_contract.py",
                 "scripts/asset_impact.py", "scripts/design_workspace.py"}

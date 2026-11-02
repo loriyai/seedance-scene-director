@@ -43,8 +43,7 @@ def group_inputs(brief, stage):
     baseline, plan = read_json(baseline_path), read_json(plan_path)
     module = design_workspace_module()
     # The workspace helper owns the plan schema and its input bindings.
-    module.validate_baseline(baseline, require_files=True)
-    module.validate_plan(baseline, plan)
+    module.validate_plan(baseline, plan, require_files=True)
     groups = plan['groups']
     group = next((item for item in groups if item['group_id'] == value['group_id']), None)
     require(group is not None, 'design_group不属于冻结计划')

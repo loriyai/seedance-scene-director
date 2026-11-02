@@ -286,7 +286,7 @@ class TextDeliveryIntegration(unittest.TestCase):
         self.assertFalse((self.project/'text-storyboards/previews').exists())
 
     def test_event_failure_keeps_written_artifact_and_reports_incomplete(self):
-        with patch.object(metrics, 'record_event', side_effect=OSError('synthetic log failure')):
+        with patch.object(metrics, '_record_preview_events', side_effect=OSError('synthetic log failure')):
             with self.assertRaisesRegex(ValueError, '成功事件未全部记录'):
                 delivery.preview(self.project, self.draft)
         saved = list((self.project/'text-storyboards/previews').glob('*.txt'))

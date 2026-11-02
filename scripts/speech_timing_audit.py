@@ -10,6 +10,58 @@ from dialogue_layout import pause_seconds, SPEEDS, PAUSE_RANGES
 TEXT_DIALOGUE_CAPACITY_POLICY = 'scene-text-dialogue-capacity-v1'
 
 
+def _text_load(text):
+    characters = sum(unicodedata.category(char)[0] in ('L', 'N') for char in text)
+    commas = sum(char in '，、,' for char in text)
+    endings = sum(char in '。！？!?' for char in text)
+    minimum = (Decimal(characters) / Decimal(6)
+               + Decimal(commas) / Decimal(10)
+               + Decimal(endings) / Decimal(5))
+    return characters, commas, endings, minimum
+
+
+def _speech_window_facts(key, number, parts, start, end):
+    """Describe authored unit-relative windows, not measured sound or pacing."""
+    row = {'unit': key, 'shot': number, 'shot_start': float(start),
+           'shot_end': float(end), 'timing_status': 'unavailable'}
+    windows = []
+    previous_end = start
+    try:
+        for part in parts:
+            values = [part.get(field) for field in ('start', 'end')]
+            if any(isinstance(value, bool) for value in values):
+                raise ValueError('布尔值不是秒数')
+            t0, t1 = (Decimal(str(value)) for value in values)
+            if (not t0.is_finite() or not t1.is_finite()
+                    or not start <= previous_end <= t0 < t1 <= end):
+                raise ValueError('片段须按顺序位于镜窗内')
+            windows.append((t0, t1))
+            previous_end = t1
+    except (InvalidOperation, ValueError):
+        # The parser owns structural validation; this diagnostic adds no gate.
+        row['reason'] = '缺少合法有序的镜内声音时窗，未推断或补齐。'
+        return row
+    fragments = []
+    for index, (part, (t0, t1)) in enumerate(zip(parts, windows), 1):
+        characters, commas, endings, minimum = _text_load(part['text'])
+        duration = t1 - t0
+        fragments.append({
+            'part': index, 'record': part.get('record'),
+            'start': float(t0), 'end': float(t1), 'duration': float(duration),
+            'dialogue_characters': characters,
+            'comma_or_pause_count': commas, 'sentence_end_count': endings,
+            'mechanical_minimum': float(minimum),
+            'below_mechanical_minimum': duration < minimum,
+            'deficit': float(max(Decimal(0), minimum - duration)),
+        })
+    row.update(timing_status='available', fragments=fragments,
+               before_first_speech=float(windows[0][0] - start),
+               after_last_speech=float(end - windows[-1][1]),
+               between_fragments=[float(windows[i][0] - windows[i - 1][1])
+                                  for i in range(1, len(windows))])
+    return row
+
+
 def text_dialogue_capacity(units):
     """Check the mechanical fastest-speech lower bound for authored text.
 
@@ -19,6 +71,7 @@ def text_dialogue_capacity(units):
     or proof that the dialogue sounds natural at the chosen delivery.
     """
     errors = []
+    window_facts = []
     checked, skipped = 0, 0
     for unit in units:
         key = unit.get('draft_key', unit.get('id', '当前单元'))
@@ -40,14 +93,10 @@ def text_dialogue_capacity(units):
             except (InvalidOperation, ValueError) as exc:
                 raise ValueError(f'{key}/镜头{number}：台词容量检查须有合法起止秒数') from exc
             text = ''.join(texts)
-            characters = sum(unicodedata.category(char)[0] in ('L', 'N') for char in text)
-            commas = sum(char in '，、,' for char in text)
-            endings = sum(char in '。！？!?' for char in text)
-            minimum = (Decimal(characters) / Decimal(6)
-                       + Decimal(commas) / Decimal(10)
-                       + Decimal(endings) / Decimal(5))
+            characters, commas, endings, minimum = _text_load(text)
             duration = end - start
             checked += 1
+            window_facts.append(_speech_window_facts(key, number, parts, start, end))
             if duration < minimum:
                 errors.append({
                     'code': 'DIALOGUE_CAPACITY', 'unit': key, 'shot': number,
@@ -62,6 +111,12 @@ def text_dialogue_capacity(units):
             'status': 'blocked' if errors else 'checked',
             'errors': errors, 'checked_dialogue_shots': checked,
             'skipped_no_dialogue_shots': skipped,
+            'speech_window_diagnostics': {
+                'blocking': False, 'time_basis': 'authored_unit_relative_seconds',
+                'shots': window_facts,
+                'limits': '仅列作者声音时窗与原话机械负荷；不是实际录音测量或语速批准。'
+                          '窄窗仅供定位，宽窗及前后间隔不自动判为拖慢；程序不改稿或配秒。',
+            },
             'semantic_review': 'not_performed'}
 
 

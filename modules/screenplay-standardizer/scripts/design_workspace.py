@@ -355,6 +355,16 @@ def _check_input_files(baseline, require_files=False):
     return inputs
 
 
+def _check_operation_inputs(baseline, baseline_sha256, group_plan=None, plan_sha256=None):
+    """A cheap closing guard, not permission to reuse a prior public check."""
+    _check_seal(baseline, "baseline_sha256")
+    require(baseline["baseline_sha256"] == baseline_sha256, "操作期间共享基线已变化")
+    if group_plan is not None:
+        _check_seal(group_plan, "plan_sha256")
+        require(group_plan["plan_sha256"] == plan_sha256, "操作期间分组计划已变化")
+    _check_input_files(baseline)
+
+
 def validate_baseline(baseline, require_files=False):
     import asset_ledger as ledger
     _check_seal(baseline, "baseline_sha256")
@@ -418,6 +428,14 @@ def _group_dependencies(baseline, owned):
 
 def plan(baseline, groups):
     validate_baseline(baseline)
+    baseline_sha256 = baseline["baseline_sha256"]
+    result = _plan(baseline, groups)
+    _check_operation_inputs(baseline, baseline_sha256)
+    return result
+
+
+def _plan(baseline, groups):
+    """Build from a baseline validated by this operation, never a saved cache."""
     require(isinstance(groups, list), "groups须为数组")
     expected = _image_ids(baseline["ledger"]) - set(baseline["shared_designs"])
     seen, names, planned = set(), set(), []
@@ -440,11 +458,19 @@ def plan(baseline, groups):
                   "groups": sorted(planned, key=lambda group: group["group_id"])}, "plan_sha256")
 
 
-def validate_plan(baseline, group_plan):
-    validate_baseline(baseline)
+def validate_plan(baseline, group_plan, *, require_files=False):
+    validate_baseline(baseline, require_files=require_files)
+    baseline_sha256 = baseline["baseline_sha256"]
+    plan_sha256 = group_plan.get("plan_sha256") if isinstance(group_plan, dict) else None
+    result = _validate_plan(baseline, group_plan)
+    _check_operation_inputs(baseline, baseline_sha256, group_plan, plan_sha256)
+    return result
+
+
+def _validate_plan(baseline, group_plan):
     _check_seal(group_plan, "plan_sha256")
     require(group_plan.get("baseline_sha256") == baseline["baseline_sha256"], "分组计划引用过期共享基线")
-    rebuilt = plan(baseline, [{"group_id": group["group_id"], "owned_asset_ids": group["owned_asset_ids"]}
+    rebuilt = _plan(baseline, [{"group_id": group["group_id"], "owned_asset_ids": group["owned_asset_ids"]}
                               for group in group_plan["groups"]])
     require(rebuilt == group_plan, "分组依赖或计划字段与冻结基线不一致")
     return group_plan
@@ -452,13 +478,30 @@ def validate_plan(baseline, group_plan):
 
 def group_spec(baseline, group_plan, group_id):
     validate_plan(baseline, group_plan)
+    return _group_spec(group_plan, group_id)
+
+
+def _group_spec(group_plan, group_id):
     matches = [group for group in group_plan["groups"] if group["group_id"] == group_id]
     require(len(matches) == 1, f"未知分组：{group_id}")
     return copy.deepcopy(matches[0])
 
 
 def verify_group(baseline, group_plan, group_id, submission):
-    group = group_spec(baseline, group_plan, group_id)
+    require(isinstance(submission, dict), "分组提交须为对象")
+    snapshot = copy.deepcopy(submission)
+    submission_sha256 = design.fingerprint(snapshot)
+    validate_plan(baseline, group_plan)
+    baseline_sha256, plan_sha256 = baseline["baseline_sha256"], group_plan["plan_sha256"]
+    result = _verify_group(baseline, group_plan, group_id, snapshot)
+    _check_operation_inputs(baseline, baseline_sha256, group_plan, plan_sha256)
+    require(design.fingerprint(submission) == submission_sha256, "操作期间分组提交已变化，须重新核验")
+    return result
+
+
+def _verify_group(baseline, group_plan, group_id, submission):
+    """Check one ownership scope after the operation's common plan validation."""
+    group = _group_spec(group_plan, group_id)
     require(isinstance(submission, dict) and set(submission) == {
         "baseline_sha256", "plan_sha256", "group_id", "owned_asset_ids", "read_only_dependency_sha256", "designs"},
         "分组提交字段须精确匹配协议；不接受改写共享锚点或基线")
@@ -493,10 +536,13 @@ def verify_group(baseline, group_plan, group_id, submission):
 def merge(baseline, group_plan, submissions):
     """Return full legacy-compatible design JSON, never a shortened ledger."""
     import asset_ledger as ledger
-    validate_plan(baseline, group_plan)
     require(isinstance(submissions, list), "分组提交须为数组")
+    snapshot = copy.deepcopy(submissions)
+    submissions_sha256 = design.fingerprint(snapshot)
+    validate_plan(baseline, group_plan)
+    baseline_sha256, plan_sha256 = baseline["baseline_sha256"], group_plan["plan_sha256"]
     submitted = {}
-    for submission in submissions:
+    for submission in snapshot:
         require(isinstance(submission, dict), "分组提交须为对象")
         gid = submission.get("group_id")
         require(isinstance(gid, str) and gid not in submitted, f"重复或缺失提交group_id：{gid}")
@@ -504,14 +550,16 @@ def merge(baseline, group_plan, submissions):
     require(set(submitted) == {group["group_id"] for group in group_plan["groups"]}, "合并须精确收齐全部分组，不得缺组/多组")
     records = copy.deepcopy(baseline["shared_designs"])
     for gid in sorted(submitted):
-        report = verify_group(baseline, group_plan, gid, submitted[gid])
+        report = _verify_group(baseline, group_plan, gid, submitted[gid])
         records.update(_records(report["designs"]))
     payload = {"image_design_version": baseline["image_design_version"],
                "identity_anchors": copy.deepcopy(baseline["identity_anchors"]),
                "designs": [{"asset_id": aid, **records[aid]} for aid in sorted(records)]}
-    complete = design.apply_design(baseline["ledger"], payload, baseline["style"])
-    ledger.validate(baseline["script"], baseline["source_paragraphs"], complete, require_designed=True)
-    _check_input_files(baseline)
+    complete, compiled = design._apply_design_compiled(baseline["ledger"], payload, baseline["style"])
+    ledger._validate_compiled(baseline["script"], baseline["source_paragraphs"], complete, compiled,
+                              require_designed=True)
+    _check_operation_inputs(baseline, baseline_sha256, group_plan, plan_sha256)
+    require(design.fingerprint(submissions) == submissions_sha256, "操作期间分组提交已变化，须重新核验")
     return payload
 
 
@@ -549,7 +597,9 @@ def main(argv=None):
             result = freeze_from_files(args.script, args.source, args.ledger, args.shared_design, args.style)
         else:
             baseline = _read(args.baseline)
-            validate_baseline(baseline, require_files=True)
+            # Public operations still validate the complete baseline once.
+            # The CLI adds the file-backed requirement without repeating it.
+            _check_input_files(baseline, require_files=True)
             if args.command == "plan":
                 result = plan(baseline, _read(args.groups))
             elif args.command == "verify-group":

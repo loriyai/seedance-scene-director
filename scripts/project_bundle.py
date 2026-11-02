@@ -120,7 +120,14 @@ class Collector:
             raise ValueError('依赖目录不存在：' + str(directory))
         prefix = prefix or 'dependencies/trees/' + paths.digest(str(directory).encode())[:20]
         self.directories[str(directory)] = prefix
-        for current, directories, filenames in os.walk(paths.io_path(directory), followlinks=False):
+
+        def scan_failed(error):
+            raise ValueError('依赖目录扫描失败：' + str(error)) from error
+
+        # A short Windows root can contain descendants beyond MAX_PATH. Keep
+        # the extended prefix throughout recursion, not only at long leaves.
+        for current, directories, filenames in os.walk(
+                paths.io_path(directory, force=True), followlinks=False, onerror=scan_failed):
             current = Path(current)
             directories[:] = sorted(name for name in directories
                 if not excluded(paths.canonical(current / name).relative_to(directory)))

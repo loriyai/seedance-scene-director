@@ -11,6 +11,7 @@ attestations fail closed.
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import re
 from pathlib import Path
@@ -450,11 +451,12 @@ def _source_cues(record):
     return [cue]
 
 
-def _unit_organization_v4(trace, state, units):
+def _unit_organization_v4(trace, state, units, observations_summary=None):
     from storyboard_text import observations
 
     errors = []
-    summary = observations(state, units)
+    summary = (observations(state, units) if observations_summary is None
+               else copy.deepcopy(observations_summary))
     summary["preferred_target_summary"]["policy"] = UNIT_BOUNDARY_POLICY
     organization = trace.get("unit_organization")
     if not isinstance(organization, dict) or organization.get("policy") != UNIT_BOUNDARY_POLICY:
@@ -484,7 +486,7 @@ def _unit_organization_v4(trace, state, units):
 
 
 def _validate_v4(project, state, draft_bytes, units, expected_context_sha256,
-                 explicit_trace=None, draft_path=None):
+                  explicit_trace=None, draft_path=None, *, observations_summary=None):
     import math
 
     path = trace_path(draft_path or project, explicit_trace)
@@ -522,7 +524,7 @@ def _validate_v4(project, state, draft_bytes, units, expected_context_sha256,
         errors.append({"code": "AUTHORING_TRACE_SHOT_COVERAGE",
                        "message": "作者依据须按正文顺序一镜一条，不能漏镜、重镜或跳镜"})
     rows = {row.get("shot_key"): row for row in trace_rows}
-    organization_errors, organization = _unit_organization_v4(trace, state, units)
+    organization_errors, organization = _unit_organization_v4(trace, state, units, observations_summary)
     errors.extend(organization_errors)
     records = {record["id"]: record for record in state["records"]}
     mapped_records, mapped_cues = set(), set()
@@ -646,6 +648,13 @@ def _validate_v4(project, state, draft_bytes, units, expected_context_sha256,
 def validate(project, state, draft_bytes, units, expected_context_sha256,
              explicit_trace=None, draft_path=None):
     """Read-only dispatch; old authored sidecars keep their original contract."""
+    return _validate_for_delivery(project, state, draft_bytes, units, expected_context_sha256,
+                                  explicit_trace, draft_path)
+
+
+def _validate_for_delivery(project, state, draft_bytes, units, expected_context_sha256,
+                           explicit_trace=None, draft_path=None, *, observations_summary=None):
+    """Reuse statistics only from the private delivery pipeline's fresh parse."""
     if state.get("storyboard_authoring_policy") != POLICY:
         return {"enforced": False, "policy": POLICY, "status": "legacy_compatible"}
     path = trace_path(draft_path or project, explicit_trace)
@@ -654,13 +663,24 @@ def validate(project, state, draft_bytes, units, expected_context_sha256,
     except (OSError, UnicodeError, ValueError):
         value = None
     validator = _validate_v3 if isinstance(value, dict) and value.get("version") == LEGACY_VERSION else _validate_v4
+    if validator is _validate_v4:
+        return validator(project, state, draft_bytes, units, expected_context_sha256,
+                         explicit_trace, draft_path, observations_summary=observations_summary)
     return validator(project, state, draft_bytes, units, expected_context_sha256,
                      explicit_trace, draft_path)
+
+
+class AuthoringGateError(ValueError):
+    """Keep the legacy message while exposing all original error locations."""
+
+    def __init__(self, message, report):
+        super().__init__(message)
+        self.report = copy.deepcopy(report)
 
 
 def require(report):
     if report.get("enforced") and report.get("status") != "passed":
         errors = report.get("errors") or [{"message": "逐镜写作闸门未通过"}]
         preview = "; ".join(str(item.get("message", item.get("code", "error"))) for item in errors[:8])
-        raise ValueError("逐镜写作闸门：" + preview)
+        raise AuthoringGateError("逐镜写作闸门：" + preview, report)
 
