@@ -78,6 +78,37 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def bind_trace(project, draft, decisions, output=None, span=None):
+    """Save metadata around authored v4 decisions; never infer creative data."""
+    from project_paths import assert_writable
+
+    assert_writable(project)
+    project, draft, decisions = (Path(value).resolve() for value in (project, draft, decisions))
+    state = d.load(project)
+    raw = draft.read_bytes()
+    units = text_core.parse(raw.decode('utf-8-sig'), state, source_span=list(span) if span else None)
+    actual_span = [units[0]['span'][0], units[-1]['span'][1]]
+    if span is not None:
+        d.require(list(span) == actual_span, '草稿未覆盖指定来源范围')
+    else:
+        scenes = {unit['main_scene'] for unit in units}
+        records = [record for record in state['records'] if record['scene'] in scenes]
+        d.require(actual_span == [records[0]['start'], records[-1]['end']],
+                  '局部稿件绑定须提供准确--span')
+    context = context_hash(state, project)
+    authored = d.read_json(decisions)
+    bound = storyboard_authoring_gate.bind_metadata(authored, raw, units, context)
+    target = safe_output(state, project, output or storyboard_authoring_gate.trace_path(draft),
+                         (draft, decisions))
+    d.require(draft.read_bytes() == raw and context_hash(state, project) == context,
+              '绑定期间输入发生变化，请重新读取')
+    write_preview(target, (json.dumps(bound, ensure_ascii=False, indent=2) + '\n').encode('utf-8'))
+    return {'status': 'bound', 'authoring_trace': str(target),
+            'draft_sha256': bound['draft_sha256'], 'context_sha256': context,
+            'semantic_review': 'not_performed',
+            'limits': '仅绑定元数据，未检查或生成创作依据，仍须完整preview和独立审阅。'}
+
+
 def digest(value):
     return d.sha(d.packed(value))
 
@@ -483,6 +514,12 @@ def main():
         sys.stdout.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
+    p = commands.add_parser('bind-trace', help='为已写好的v4依据绑定元数据并另存，不改创作内容')
+    p.add_argument('--project', type=Path, required=True)
+    p.add_argument('--draft', type=Path, required=True)
+    p.add_argument('--decisions', type=Path, required=True)
+    p.add_argument('--output', type=Path)
+    p.add_argument('--span', type=int, nargs=2)
     for name in ('check', 'preview', 'commit'):
         p = commands.add_parser(name)
         p.add_argument('--project', type=Path, required=True)
@@ -526,7 +563,9 @@ def main():
     p.add_argument('--span', type=int, nargs=2)
     args = parser.parse_args()
     try:
-        if args.command == 'check':
+        if args.command == 'bind-trace':
+            result = bind_trace(args.project, args.draft, args.decisions, args.output, args.span)
+        elif args.command == 'check':
             if args.incremental:
                 d.require(not args.replace_ids, '增量检查不接受--replace-ids；指定修改使用正常check/preview')
                 result = check_incremental(args.project, args.draft, args.span)

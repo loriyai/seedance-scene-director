@@ -673,6 +673,18 @@ def camera_context(state, units, replace_ids=None):
     return before, None
 
 
+def _same_source_run(left, right, records):
+    selected = left["source_records"] + right["source_records"]
+    if len({records[rid][1]["scene"] for rid in selected}) != 1:
+        return False
+    last_index, last = records[left["source_records"][-1]]
+    first_index, first = records[right["source_records"][0]]
+    return (first_index in (last_index, last_index + 1) and
+            (left["span"][1] == right["span"][0] or
+             (last["id"] == first["id"] and first["kind"] == "action" and
+              left["span"][1] == first["end"] and right["span"][0] == first["start"])))
+
+
 def observations(state, units):
     """Read-only statistics; unit-organization decisions are gated by the authoring trace."""
     durations = [unit["duration"] for unit in units]
@@ -701,6 +713,40 @@ def observations(state, units):
                                "source_scene": next(iter(scenes)), "combined_duration": combined,
                                "review": "human_review_only"})
     candidate_units = sorted({key for row in candidates for key in row["units"]})
+    # Enumerate existing shot boundaries only.  This neither selects a cut nor
+    # claims that an integer-second boundary is a natural semantic cut.
+    boundary_candidates = []
+    runs, run = [], []
+    for index, unit in enumerate(units):
+        if len({records[rid][1]["scene"] for rid in unit["source_records"]}) != 1:
+            if run:
+                runs.append(run)
+                run = []
+            continue
+        if index and not _same_source_run(units[index - 1], unit, records):
+            if run:
+                runs.append(run)
+            run = []
+        run.extend((unit, shot_index, shot) for shot_index, shot in enumerate(unit["shots"], 1))
+    if run:
+        runs.append(run)
+    for run in runs:
+        for start_index, (first_unit, first_shot_index, _) in enumerate(run):
+            elapsed = 0
+            for last_unit, last_shot_index, shot in run[start_index:]:
+                elapsed += shot["end"] - shot["start"]
+                if elapsed > 30:
+                    break
+                if elapsed < 26:
+                    continue
+                existing = (first_unit["draft_key"] == last_unit["draft_key"] and
+                            first_shot_index == 1 and last_shot_index == len(last_unit["shots"]))
+                if not existing:
+                    boundary_candidates.append({
+                        "start_shot": f'{first_unit["draft_key"]}#{first_shot_index}',
+                        "end_shot": f'{last_unit["draft_key"]}#{last_shot_index}',
+                        "combined_duration": elapsed, "review": "human_review_only",
+                        "limits": "仅列既有镜界的时长可能性，不证明自然切点或生成兼容，不改时码及边界。"})
     target_units = [unit["draft_key"] for unit in units if 26 <= unit["duration"] <= 30]
     short_units = [unit["draft_key"] for unit in units if 4 <= unit["duration"] <= 25]
     return {"mode": "non_blocking", "unit_duration_seconds": {
@@ -708,6 +754,7 @@ def observations(state, units):
                 "mean": sum(durations) / len(durations) if durations else None,
                 "min": min(durations) if durations else None, "max": max(durations) if durations else None},
             "same_scene_adjacent_candidates": candidates,
+            "same_scene_boundary_candidates": boundary_candidates,
             "preferred_target_summary": {
                 "policy": "prefer_26_30_with_exception_proof_v1",
                 "preferred_range_seconds": [26, 30],

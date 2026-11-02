@@ -37,7 +37,7 @@ class StoryboardAuthoringGateTest(unittest.TestCase):
         draft_sha = hashlib.sha256(self.draft).hexdigest()
         trace = {
             'policy': gate.POLICY,
-            'version': gate.VERSION,
+            'version': gate.LEGACY_VERSION,
             'draft_sha256': draft_sha,
             'context_sha256': self.context,
             'source_span': [0, 4],

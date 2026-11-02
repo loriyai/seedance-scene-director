@@ -9,16 +9,16 @@
 人物：@{CHAR0001}；
 场景：@{SET0001}；时间：白天；天气：未明示；
 人物站位：@{CHAR0001}站在门边，朝向窗外。
-·00秒-03秒[镜头1-叮嘱]：（@{CHAR0001}的中景；转场：硬切）镜头向右平移，人物在画面左侧、门框在后景，人物与门框清晰，窗外柔光照亮侧脸；@{CHAR0001}停在门边。音效：无。
+·00秒-03秒[镜头1-叮嘱]：（@{CHAR0001}的中景；转场：硬切）镜头向右平移，人物在画面左侧、门框在后景，焦点保留人物与门框、窗外虚化，主光：窗外漫射柔光照亮侧脸，环境反射：室内墙面反光填住下颌暗部；@{CHAR0001}停在门边。音效：无。
 声音[L000004,0.2-2.8]：@{CHAR0001}说（压低音量）：“别动，等我回来。”
-·03秒-05秒[镜头2-等待]：（@{CHAR0001}的近景；转场：硬切）侧后方固定机位保持视线关系，肩部在前景、窗框在后景，窗框清晰，沿用窗外柔光；@{CHAR0001}看向窗外。音效：无。
+·03秒-05秒[镜头2-等待]：（@{CHAR0001}的近景；转场：硬切）侧后方固定机位保持视线关系，肩部在前景、窗框在后景，景深保留肩部与窗框的清晰关系，主光：窗外漫射柔光照亮侧脸，环境反射：室内墙面反光填住下颌暗部；@{CHAR0001}看向窗外。音效：无。
 ```
 
 示例ID、原话和时码仅说明语法，实际生产必须取本项目已绑定来源和台账。`SC0001`是剧情场次，`u01`是作者在本场内保持稳定的单元键；组合`SC0001/u01`不得在同一草稿重复。作者键不代替交付程序分配的内部ID和批次展示名。源范围两端是`session.json.records`真实记录ID，包含端点，按记录顺序连续；标准剧本的标题或空行不属于records，记录ID数值不连续不构成缺漏。
 
 人物行只用`@{CHAR…}`稳定ID，逗号、顿号或分号分隔，末尾一个中文分号；无人写`人物：无；`。名单含出镜及发声人物。场景行用来源场次对应的`@{SET…}`，多个布景按来源场次顺序排列，同一SET只写一次；时间、天气和末尾中文分号不能省略。人物站位另占一行。道具不增加名单行，在镜头或站位中使用`@{PROP…}`即自动收集。
 
-每镜一行，时码为两位整数秒，镜头编号从1连续递增，单镜1～6秒、单元4～30秒；首镜从00秒开始，前后无空隙或重叠。镜数无额外数量门槛，组织原则见[单元组织](storyboard-rules.md#单元组织)。旧项目`entry.min`或`entry.durations`保存的时长偏好若与当前单元不符，检查结果列出诊断，不要求作者为旧入口偏好补写原因表，也不把新文本格式允许的4～30秒再次收窄；26～30秒优先及4～25秒例外证明仍按`unit_organization`执行。景别为大远景、大全景、远景、全景、中景、中近景、近景、特写之一，主体使用稳定资产引用。镜头行必须有转场、可见内容及一个末尾`音效：…。`字段。摄影、构图、景深、光照、表演、动作过程和必要承接直接写入最终可见正文；其中每个镜头的光照必须写明当前已成立的环境光照条件、主光方向、辅光或环境反射关系及主体或道具上的明暗落点，当前取景无法辨认方向时明确写均匀、漫射或无明确方向的环境光关系，没有明确光源名称时按环境光关系表达，不得凭空补造灯具或发光事件；镜头正文还必须让摄影起点、相机路径、终点和切点可执行，不新增摄影计划字段。人物站位必须区分在场、可见、画外和主焦点；源记录中的括号动作、表演、发声方式、群体声源和非对白动作必须在正文或声音行中落实，或在作者侧车记录具体的合法省略理由。不另填purpose、动作计划、状态效果、依赖图或重复声音计划；仅用于防止重复或解释审核的后台纠错句不进入成稿，剧情中的拒绝、中止及有意义保持按实际可见行为表达。独立起点、动作相位和连续性的实质要求见[统一分镜规则](storyboard-rules.md)，创作与只读检查的职责见[共同执行契约](execution-contract.md#分镜创作与工具边界)；程序不通过搜索术语来判定创作合格。
+每镜一行，时码为两位整数秒，镜头编号从1连续递增，单镜1～6秒、单元4～30秒；首镜从00秒开始，前后无空隙或重叠。镜数无额外数量门槛，组织原则见[单元组织](storyboard-rules.md#单元组织)。旧项目`entry.min`或`entry.durations`保存的时长偏好若与当前单元不符，检查结果列出诊断，不要求作者为旧入口偏好补写原因表，也不把新文本格式允许的4～30秒再次收窄；26～30秒优先及4～25秒例外证明仍按`unit_organization`执行。景别为大远景、大全景、远景、全景、中景、中近景、近景、特写之一，主体使用稳定资产引用。镜头行必须有转场、可见内容及一个末尾`音效：…。`字段。摄影、构图、景深、光照、表演、动作过程和必要承接直接写入最终可见正文。光照在每镜正文中使用`主光：`及其后紧邻的`辅光：`、`环境反射：`、`反射光：`或`补光：`之一，两类标签均使用明确冒号；内容写清已成立的环境光条件、实际方向或漫射关系，以及主体或道具上的明暗落点。方向与明暗采用可核验表达，如左侧上方、右侧、前方、后方、逆光、漫射、阴影或暗部，按实际条件选择，不要求逐项出现。当前取景无法辨认方向时写明均匀、漫射或无明确方向的环境光关系；无光源名称时按已成立的环境光关系表达，不补造灯具或发光事件。景深表述至少使用`景深`、`焦点`、`焦外`或`虚化`之一，同时明确实际清晰对象及相关层次；需要多个层次清楚时可写景深保留其清晰关系，不为命中术语制造无依据的虚化。标签和术语属于现有机器可识别的格式，不规定固定句式或每镜相同光照、景深内容；脚本不得为通过门禁补写或套用这些创作描述，词面通过也不证明取景与光照真实成立。镜头正文还须让摄影起点、相机路径、终点和切点可执行，不新增摄影计划字段。人物站位必须区分在场、可见、画外和主焦点；源记录中的括号动作、表演、发声方式、群体声源和非对白动作必须在正文或声音行中落实，或在作者侧车记录具体的合法省略理由。不另填purpose、动作计划、状态效果、依赖图或重复声音计划；仅用于防止重复或解释审核的后台纠错句不进入成稿，剧情中的拒绝、中止及有意义保持按实际可见行为表达。独立起点、动作相位和连续性的实质要求见[统一分镜规则](storyboard-rules.md)，创作与只读检查的职责见[共同执行契约](execution-contract.md#分镜创作与工具边界)；程序不通过搜索术语来判定创作合格。
 
 实际台词只写在其所属镜头之后的`声音[...]`行中，可有多行；不得在镜头正文重复添加`：“台词”`。时码相对于当前单元，支持最多三位小数，整个片段必须落在所属镜头之内，按发声顺序排列且不能重叠。新`scene-text-v1`声音类型使用`说`、`内心想法os`、`画外音`、`旁白`；作者稿中的`os/O.S./内心OS/内心想法`统一解析为`内心想法os`，`ov/VO/V.O./画外音`统一解析为`画外音`。新单元冻结`inner-voice-os-v1`显示策略，历史回执沿原显示标签渲染。可选中文括号只写本片段必要的声音表现，不引入资产引用；常规项省略，没有必要就不写括注，普通情绪、说话方式、表情和微动作括号逐字保留。估时档位按[声音与时长](storyboard-rules.md#声音与时长)在后台选用，不作为默认语速标签填入括注或提示词模板。源记录明确标为非人物播报时，用原声源名和`非人物播报`，例如`声音[L000007,0.1-2.5]：电话提示音非人物播报：“原话”`，不建立CHAR、不加@。不能凭设备名称推断播报类型。
 
@@ -83,13 +83,24 @@ python <skill>/scripts/storyboard_text_delivery.py context --project <project> -
 
 ```text
 python <skill>/scripts/storyboard_text_delivery.py check --project <project> --draft <draft.txt> [--authoring-trace <trace.json>]
+python <skill>/scripts/storyboard_text_delivery.py bind-trace --project <project> --draft <draft.txt> --decisions <已写好的依据.json> [--output <新侧车.json>] [--span START END]
 python <skill>/scripts/storyboard_text_delivery.py check --incremental --project <project> --draft <draft.txt>
 python <skill>/scripts/storyboard_text_delivery.py preview --project <project> --draft <draft.txt> [--authoring-trace <trace.json>]
 python <skill>/scripts/storyboard_text_delivery.py commit --project <project> --draft <draft.txt> --request-id <本次唯一ID> --review <场级审阅.json> --output <新交付.txt> [--authoring-trace <trace.json>]
 python <skill>/scripts/storyboard_text_delivery.py render --project <project> --request-id <已提交ID> --output <新导出.txt>
 ```
 
-新绑定项目的完整`check`、`preview`和`commit`会读取`<draft>.authoring.json`（或`--authoring-trace`指定的路径）。该侧车不进入最终提示词，至少为每个镜头保存`shot_key`、`source_records`、`beat`、`visual_change`、`timing_basis`和必要的`gaze_target`/`hold_reason`；`timing_basis`须包含`duration_seconds`、`speech_seconds`、`action_seconds`、`observation_seconds`、`action_phases`、`entry_phase`、`completion_point_seconds`、`parallel`、`parallel_with`、`tail_load`和`cut_reason`。这些字段必须说明动作/信息如何进入、何时完成、哪些内容同期发生以及完成后为何仍需观看，不能只填总秒数。侧车还必须按作者稿单元顺序保存`unit_organization`：其`policy`为`prefer_26_30_with_exception_proof_v1`，每个单元记录`draft_key`、`duration_seconds`和`decision`；26～30秒使用`target_26_30`，4～25秒使用`short_exception`并填写`reason_code`与具体`reason`。允许的`reason_code`为`scene_boundary`、`selected_range_end`、`merge_exceeds_30`、`incompatible_generation`、`semantic_cut`和`candidate_not_compatible`。存在同场景、来源连续且合计不超过30秒的相邻候选时，短单元只能用`semantic_cut`或`candidate_not_compatible`证明为何不能合并，不能用空泛的“节奏需要”。侧车绑定作者稿摘要、上下文摘要和完整来源范围，任何一项变化都必须重写侧车并重新审阅；规则版本或项目上下文摘要变化后，旧侧车不得继续用于`check`、`preview`或`commit`，必须按当前规则重写并重新审阅。合法的连续对白、群像、蒙太奇、慢动作或静态观察写入来源支持的`exception`，不能用例外字段掩盖缺少观看重点。
+新绑定项目的完整`check`、`preview`和`commit`读取`<draft>.authoring.json`，也可用`--authoring-trace`指定。新稿采用`policy: shot-by-shot-v1`、`version: 4`的精简侧车；旧v3侧车按原协议检查，不自动转换或改写历史回执。侧车不进入最终提示词，正文仍是唯一执行文本。
+
+作者与正文同次写出`units`，每个单元含`draft_key`及按正文顺序排列的`shots`。每镜必填`shot_key`、`source_records`、`viewing_decision`和`natural_timing`：分别用于镜头定位、镜级来源映射、一条具体观看决定，以及自然时长与必要声画关系的简述。`viewing_decision`合并原`beat`/`focus_note`的作用；`natural_timing`解释实际负荷，不复制整段动作，也不把已分配镜窗当作自然估时。需要数值估时时，对整次发言保留一处自然估时，跨镜只说明必要分配关系，不另建音频计划。
+
+动作过程、进入相位、执行者、视线对象和切出状态已在正文明确时，不再强制填写`visual_change`、`entry_phase`、`action_phases`、`actor_ids`、`gaze_target`或重复`cut_reason`。必要时可补`cut_reason`；保持、等待或关键变化后仍需观看时，使用一条`continuation_reason`说明对象、仍在发展的内容和结束条件，替代重复的`hold_reason`/`tail_load`。复杂且依赖具体时间的位置可填写`timing_constraints: [{"label":"具体动作或发言阶段","start":0,"end":1.5}]`，时间相对于本镜起点，须完整落在镜窗内；这些区间由作者决定，程序不推断或生成。普通镜头不强制填写动作秒数、观察秒数、小数完成点或同期布尔值，不以观察数值未单列判定没有观看负荷，也不用三项全部相加或取最大值批准真实同期关系。
+
+源记录括号中的动作、表演和发声要求以每镜`source_cues: ["L000019:笑了笑"]`定位，cue逐字引用原括号要求，记录必须属于本镜`source_records`；实际落实在正文或所属声音行中。必要合法省略放顶层`source_cue_omissions: [{"source_record":"L000019","cue":"原cue","reason":"具体合法依据"}]`，由主审核实，不自动批准省略。非对白动作仍保留镜级来源映射。删除重复的全场`source_cue_coverage.status`自证段；程序只核验定位和声明是否齐全，不能证明实际画面已落实。
+
+`unit_organization`使用`policy: prefer_26_30_at_unit_boundaries_v2`，其`units`按正文顺序列`draft_key`。正常26～30秒单元不要求重复时长、分类或达到目标的理由；4～25秒单元填写`reason_code`及具体`reason`。原因代码沿用`scene_boundary`、`selected_range_end`、`merge_exceeds_30`、`incompatible_generation`、`semantic_cut`、`candidate_not_compatible`；存在26～30秒相邻直接组合候选而未选用时，须用后两类说明实际不兼容条件。只读诊断也列出在既有镜间边界移动单元切点的26～30秒时长可能性，这些不表示自然切点已获批准；作者和主审按[单元组织](storyboard-rules.md#单元组织)判断合法性，不只检查原单元能否整体合并。程序不改镜长、不选切点、不重组单元。
+
+`draft_sha256`、`context_sha256`和`source_span`由`bind-trace`依据实际稿件及项目生成。作者将已经写好的v4依据保存到独立JSON后运行该命令，另存到新的侧车路径；命令不改正文、原依据、session或审阅，也不生成观看决定或时间依据。默认输出为`<draft>.authoring.json`，已有路径须另存并通过`--authoring-trace`使用；局部范围传同一个`--span`。单镜/单元时长、声源签名及单元时长分类由正文派生，不再重复维护。绑定后仍须完整`preview`与独立审阅，不能以重新绑定摘要代替实际修改和阅读。高度集中镜长或统一转场确需解释时，保留一次场级`timing_distribution_basis`或`transition_distribution_basis`，不常规复述逐镜依据。
 
 check返回统计、`draft_sha256`、`context_sha256`及`semantic_review: not_performed`。`observations`提供单元时长分布、26～30秒目标摘要、同场来源连续且合计不超过上限的相邻组合候选，以及按镜长分组的摄影措辞统计；候选列表仍是非阻断观察，不自动合并或改稿，但完整作者闸门会要求每个单元提交对应的组织决定，并阻断未证明的短单元或未关闭的可合并候选。摄影统计仅识别镜头开头摄影分句的词面，含混或未识别项明确保留，不能将主体动作、对白或词频当作相机运动的语义证据。preview已包含同版check，同时保存实际排版预览，不占正式编号；不要在前后紧邻重复check。只查错误/摘要时单独check即可。默认覆盖所选完整场景；用户明确局部范围时，check/preview/commit传同一个 `--span START END`，使用现有locate/range所得正文坐标，不猜范围。
 
@@ -97,7 +108,7 @@ check返回统计、`draft_sha256`、`context_sha256`及`semantic_review: not_pe
 
 完整检查和增量检查均执行逐镜台词容量硬门禁：同镜全部原话片段合并计算`字数÷6 + 逗号/顿号数量×0.1 + 句末标点数量×0.2`，字数按Unicode字母和数字计，逗号/顿号计`，、,`，句末标点计`。！？!?`。镜长小于该最低值时报`DIALOGUE_CAPACITY`；无台词镜头跳过。该值仅证明镜窗是否低于机械下限，不核准自然语速、语气或动作安排，不以计算结果自动配秒、拆镜或回写稿件；实际取舍见[镜长与声音安排](storyboard-rules.md#镜长与声音安排)。
 
-作者闸门返回错误时，相关镜头/单元状态为`needs_rewrite`。必须重写失败镜头及其直接受影响的相邻衔接，重新生成作者侧车并重新执行完整`check`与独立审阅；旧侧车、旧预览和旧审阅不得复用。闸门错误未关闭前，`preview`、`commit`和画布同步均不可执行。
+作者闸门返回错误时，相关镜头/单元为`needs_rewrite`。写者先按根因修正实际正文及受影响连接，再更新匹配侧车并完成机械检查及独立复看；未改变的有效阅读按实际差异复用，不增加第三轮逐镜审阅。具体闭环见[集中修订与结论](storyboard-workflow.md#集中修订与结论)。错误未关闭前，不得宣告预览成功、commit或同步画布。
 
 preview默认在项目的 `text-storyboards/previews/` 内按稿件及上下文摘要分配版本路径，返回实际 `output`、`output_sha256` 和 `preview_event_ids`。同一运行中，只有实际产物逐字一致、绑定摘要相同且各场成功事件仍有效时才复用；`preview_reused: true` 表示复用已核验版本，不重新记录成功。损坏、撤销、未登记或其他运行的同名产物均保留，自动选择新路径。需要指定位置时可传 `--output <新预览.txt>`，已有路径仍报错，不能覆盖作者稿、来源、状态、审阅或历史版本。作者交接使用返回的路径和摘要，不凭文件名里的v2/v3推定同版。
 

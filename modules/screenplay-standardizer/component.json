@@ -20,6 +20,6 @@
     "scripts/scene_observations.py": "57a78c81595ebc1024c0fcc7ff070253e298b221355c9fc5c4d8899c04f506cf",
     "scripts/screenplay_io.py": "b4fb2aa2cfa7a4d361d3087be73f8e0c71b7d88798534dc91aa1f0b83a6307ed",
     "scripts/screenplay_review.py": "15ef07a1a9651adbd191d1c8a0d01af561f69f3c33d5de9a86131f9886465e0e",
-    "scripts/source_compat.py": "fba10b32a29fb1684a9f4b0318470d00580ce9add83b743651c1a07dd9901739"
+    "scripts/source_compat.py": "ef519b65075844d8e6aa3aff0445bc1446546fae29ce481f04fcb08413e84ed9"
   }
 }

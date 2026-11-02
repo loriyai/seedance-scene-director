@@ -137,11 +137,22 @@ def explicit_label(value, names):
     # Multiple cue slots are not silently discarded or conflated.
     cue = "，".join(cues)
     raw_cues = [match.group(key) for key in ("prefix", "wide_raw", "ascii_raw", "suffix") if match.group(key)]
-    return {"speaker": "、".join(members), "cue": cue, "text": value[match.end():],
-            "source_prefix": value[:match.end()],
+    end = match.end()
+    # Some source screenplays place the stage direction after the colon.
+    # Consume only a complete leading parenthesis when no earlier cue exists;
+    # retain its exact spelling so normal cue-preservation checks still apply.
+    post_cue = None
+    if not cues and value[:end].rstrip().endswith(("：", ":")):
+        post_cue = re.match(r"(?:（([^（）]*)）|\(([^()]*)\))\s*", value[end:])
+        if post_cue:
+            cue = next(part for part in post_cue.groups() if part is not None)
+            raw_cues.append(post_cue.group(0).rstrip())
+            end += post_cue.end()
+    return {"speaker": "、".join(members), "cue": cue, "text": value[end:],
+            "source_prefix": value[:end],
             "cue_raw": "，".join(raw_cues),
             "cue_kind": voice_cue_kind(cue) if cue else None,
-            "compatibility": bool(match.group("prefix") or match.group("suffix"))}
+            "compatibility": bool(match.group("prefix") or match.group("suffix") or post_cue)}
 
 
 def quote_blocks(paragraphs, start, end):

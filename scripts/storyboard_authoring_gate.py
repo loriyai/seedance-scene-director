@@ -17,9 +17,11 @@ from pathlib import Path
 
 
 POLICY = "shot-by-shot-v1"
-VERSION = 3
+VERSION = 4
+LEGACY_VERSION = 3
 TRACE_SUFFIX = ".authoring.json"
 UNIT_ORGANIZATION_POLICY = "prefer_26_30_with_exception_proof_v1"
+UNIT_BOUNDARY_POLICY = "prefer_26_30_at_unit_boundaries_v2"
 UNIT_DECISIONS = {"target_26_30", "short_exception"}
 SHORT_REASON_CODES = {
     "scene_boundary", "selected_range_end", "merge_exceeds_30",
@@ -177,7 +179,7 @@ def _validate_unit_organization(trace, state, units):
     return errors, summary
 
 
-def validate(project, state, draft_bytes, units, expected_context_sha256,
+def _validate_v3(project, state, draft_bytes, units, expected_context_sha256,
              explicit_trace=None, draft_path=None):
     """Validate the required authoring trace for a new bound project.
 
@@ -205,7 +207,7 @@ def validate(project, state, draft_bytes, units, expected_context_sha256,
                 "status": "blocked", "errors": [{"code": "AUTHORING_TRACE_INVALID",
                 "message": f"逐镜写作侧车无法读取：{exc}"}], "trace_path": str(path)}
 
-    if trace.get("policy") != POLICY or trace.get("version") != VERSION:
+    if trace.get("policy") != POLICY or trace.get("version") != LEGACY_VERSION:
         errors.append({"code": "AUTHORING_TRACE_POLICY", "message": "逐镜写作侧车版本不兼容"})
     if trace.get("draft_sha256") != draft_sha256:
         errors.append({"code": "AUTHORING_TRACE_DRAFT_BINDING", "message": "侧车与作者稿摘要不一致"})
@@ -405,16 +407,255 @@ def validate(project, state, draft_bytes, units, expected_context_sha256,
                            "message": "相邻镜头摄影/动作骨架高度重复，缺少逐镜独立观看依据"})
 
     trace_sha256 = hashlib.sha256(trace_bytes).hexdigest()
-    payload = {"policy": POLICY, "version": VERSION, "trace_sha256": trace_sha256,
+    payload = {"policy": POLICY, "version": LEGACY_VERSION, "trace_sha256": trace_sha256,
                "draft_sha256": draft_sha256, "context_sha256": expected_context_sha256,
                "shot_count": len(expected_keys), "source_span": trace.get("source_span")}
     payload["gate_digest"] = _digest(payload)
-    return {"enforced": True, "policy": POLICY, "version": VERSION,
+    return {"enforced": True, "policy": POLICY, "version": LEGACY_VERSION,
             "status": "passed" if not errors else "blocked", "errors": errors,
             "trace_path": str(path), "trace_sha256": trace_sha256,
             "shot_count": len(expected_keys), "shot_keys": expected_keys,
             "preferred_target_summary": organization_summary,
             "gate_digest": payload["gate_digest"]}
+
+
+def bind_metadata(trace, draft_bytes, units, context_sha256):
+    """Bind authored decisions without generating or changing creative fields."""
+    import copy
+
+    if trace.get("policy") != POLICY or trace.get("version") != VERSION:
+        raise ValueError("仅对当前v4作者依据绑定元数据；不自动转换旧侧车")
+    result = copy.deepcopy(trace)
+    result.update(draft_sha256=hashlib.sha256(draft_bytes).hexdigest(),
+                  context_sha256=context_sha256,
+                  source_span=[units[0]["span"][0], units[-1]["span"][1]])
+    return result
+
+
+def _source_cues(record):
+    """Return explicit parenthetical performance cues, not inferred actions."""
+    label = record.get("label") or ""
+    match = re.search(r"[（(]([^（）()]*)[）)]$", label)
+    if not match:
+        return []
+    import sys
+    module_path = str(Path(__file__).resolve().parents[1] / "modules/screenplay-standardizer/scripts")
+    if module_path not in sys.path:
+        sys.path.insert(0, module_path)
+    from source_compat import voice_cue_kind
+
+    cue = match.group(1).strip()
+    if not cue or voice_cue_kind(cue) or cue in ("旁白", "非人物播报"):
+        return []
+    return [cue]
+
+
+def _unit_organization_v4(trace, state, units):
+    from storyboard_text import observations
+
+    errors = []
+    summary = observations(state, units)
+    summary["preferred_target_summary"]["policy"] = UNIT_BOUNDARY_POLICY
+    organization = trace.get("unit_organization")
+    if not isinstance(organization, dict) or organization.get("policy") != UNIT_BOUNDARY_POLICY:
+        return [{"code": "AUTHORING_UNIT_ORGANIZATION",
+                 "message": "须采用仅作用于单元切分组合的26～30秒优先规则"}], summary
+    rows = organization.get("units")
+    keys = [unit["draft_key"] for unit in units]
+    if (not isinstance(rows, list) or
+            [row.get("draft_key") for row in rows if isinstance(row, dict)] != keys):
+        return [{"code": "AUTHORING_UNIT_ORGANIZATION",
+                 "message": "单元组织记录须与作者稿单元一一对应"}], summary
+    direct_candidates = {key for candidate in summary.get("same_scene_adjacent_candidates", [])
+                         if 26 <= candidate["combined_duration"] <= 30
+                         for key in candidate["units"]}
+    for unit, row in zip(units, rows):
+        duration = unit["duration"]
+        # Classification and duration come from the text, never a second estimate.
+        if 26 <= duration <= 30:
+            continue
+        if row.get("reason_code") not in SHORT_REASON_CODES or not _concrete(row.get("reason")):
+            errors.append({"code": "AUTHORING_UNIT_SHORT_REASON", "unit": unit["draft_key"],
+                           "message": "短单元须说明自然边界及无法合法组合到26～30秒的具体原因"})
+        elif unit["draft_key"] in direct_candidates and row["reason_code"] not in CANDIDATE_REASON_CODES:
+            errors.append({"code": "AUTHORING_UNIT_CANDIDATE_REVIEW", "unit": unit["draft_key"],
+                           "message": "存在26～30秒相邻组合候选，须具体说明为何不兼容；程序不判断语义合法性"})
+    return errors, summary
+
+
+def _validate_v4(project, state, draft_bytes, units, expected_context_sha256,
+                 explicit_trace=None, draft_path=None):
+    import math
+
+    path = trace_path(draft_path or project, explicit_trace)
+    if not path.is_file():
+        return {"enforced": True, "policy": POLICY, "version": VERSION, "status": "blocked",
+                "errors": [{"code": "AUTHORING_TRACE_MISSING", "message": f"缺少作者依据：{path}"}]}
+    try:
+        trace_bytes = path.read_bytes()
+        trace = json.loads(trace_bytes.decode("utf-8-sig"))
+        if not isinstance(trace, dict):
+            raise ValueError("作者依据必须是对象")
+    except (OSError, UnicodeError, ValueError) as exc:
+        return {"enforced": True, "policy": POLICY, "version": VERSION, "status": "blocked",
+                "errors": [{"code": "AUTHORING_TRACE_INVALID", "message": str(exc)}]}
+    errors = []
+    if trace.get("policy") != POLICY or trace.get("version") != VERSION:
+        errors.append({"code": "AUTHORING_TRACE_POLICY", "message": "作者依据版本不兼容"})
+    draft_sha256 = hashlib.sha256(draft_bytes).hexdigest()
+    for field, value, code in (
+            ("draft_sha256", draft_sha256, "AUTHORING_TRACE_DRAFT_BINDING"),
+            ("context_sha256", expected_context_sha256, "AUTHORING_TRACE_CONTEXT_BINDING"),
+            ("source_span", [units[0]["span"][0], units[-1]["span"][1]], "AUTHORING_TRACE_SPAN")):
+        if trace.get(field) != value:
+            errors.append({"code": code, "message": f"作者依据的{field}与当前文件不一致"})
+    expected = [(f"{unit['draft_key']}#{index}", unit, shot)
+                for unit in units for index, shot in enumerate(unit["shots"], 1)]
+    expected_keys = [key for key, _, _ in expected]
+    trace_units = trace.get("units", [])
+    if not isinstance(trace_units, list) or any(not isinstance(unit, dict) for unit in trace_units):
+        trace_units = []
+    trace_rows = [row for unit in trace_units for row in unit.get("shots", [])
+                  if isinstance(row, dict)]
+    if ([unit.get("draft_key") for unit in trace_units] != [unit["draft_key"] for unit in units]
+            or [row.get("shot_key") for row in trace_rows] != expected_keys):
+        errors.append({"code": "AUTHORING_TRACE_SHOT_COVERAGE",
+                       "message": "作者依据须按正文顺序一镜一条，不能漏镜、重镜或跳镜"})
+    rows = {row.get("shot_key"): row for row in trace_rows}
+    organization_errors, organization = _unit_organization_v4(trace, state, units)
+    errors.extend(organization_errors)
+    records = {record["id"]: record for record in state["records"]}
+    mapped_records, mapped_cues = set(), set()
+    durations, normalized, transitions, sounds = [], [], [], []
+    for key, unit, shot in expected:
+        row = rows.get(key)
+        if row is None:
+            continue
+        source = row.get("source_records")
+        if (not isinstance(source, list) or not source or
+                any(rid not in unit["source_records"] for rid in source)):
+            errors.append({"code": "AUTHORING_TRACE_SOURCE", "shot": key,
+                           "message": "每镜须绑定本单元实际来源记录"})
+            source = []
+        mapped_records.update(source)
+        dialogue_records = {part["record"] for part in shot.get("dialogue_parts", [])}
+        if not dialogue_records.issubset(source):
+            errors.append({"code": "AUTHORING_TRACE_SOURCE", "shot": key,
+                           "message": "本镜全部发声来源须包含在镜级来源映射中"})
+        for field in ("viewing_decision", "natural_timing"):
+            if not _concrete(row.get(field)):
+                errors.append({"code": "AUTHORING_TRACE_EVIDENCE", "shot": key,
+                               "field": field, "message": "须提供具体观看决定与自然时长依据"})
+        cues = row.get("source_cues", [])
+        if not isinstance(cues, list):
+            cues = [None]
+        for cue_ref in cues:
+            rid, separator, cue = cue_ref.partition(":") if isinstance(cue_ref, str) else (None, "", "")
+            if not separator or rid not in source or cue not in _source_cues(records.get(rid, {})):
+                errors.append({"code": "AUTHORING_SOURCE_CUE_MAPPING", "shot": key,
+                               "message": "cue定位必须引用本镜实际来源的原括号要求"})
+            else:
+                mapped_cues.add((rid, cue))
+        duration = shot["end"] - shot["start"]
+        durations.append(duration)
+        constraints = row.get("timing_constraints", [])
+        if not isinstance(constraints, list):
+            constraints = [None]
+        for constraint in constraints:
+            valid = isinstance(constraint, dict) and _concrete(constraint.get("label"))
+            if valid:
+                start, end = constraint.get("start"), constraint.get("end")
+                valid = all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                            and math.isfinite(value) for value in (start, end))
+                valid = valid and 0 <= start < end <= duration
+            if not valid:
+                errors.append({"code": "AUTHORING_TRACE_TIMING_CONSTRAINT", "shot": key,
+                               "message": "作者给定的局部时间区间须具体、有限且完整落在镜窗内"})
+        body = _body(shot)
+        if META_WORDS.search(body):
+            errors.append({"code": "AUTHORING_META_PROMPT", "shot": key,
+                           "message": "后台纠错说明不能进入提示词正文"})
+        if (any(phrase in body for phrase in TEMPLATE_PHRASES) or TEMPLATE_PATTERN.search(body)):
+            errors.append({"code": "AUTHORING_TEMPLATE_PHRASE", "shot": key,
+                           "message": "正文含固定句壳，须写本镜具体执行内容"})
+        if GENERIC_CAMERA.search(body):
+            errors.append({"code": "AUTHORING_GENERIC_CAMERA", "shot": key,
+                           "message": "摄影路径不得使用泛化占位句"})
+        if GENERIC_LIGHT.search(body) or not CONCRETE_LIGHT.search(body) or not MAIN_FILL_LIGHT.search(body):
+            errors.append({"code": "AUTHORING_LIGHTING_UNDER_SPECIFIED", "shot": key,
+                           "message": "正文须落实具体主光、辅光或反射关系和明暗落点"})
+        if not DEPTH_WORDS.search(body):
+            errors.append({"code": "AUTHORING_DEPTH_MISSING", "shot": key,
+                           "message": "正文须落实实际清晰与焦外关系"})
+        if GENERIC_STATION.search(unit.get("global", "")):
+            errors.append({"code": "AUTHORING_GENERIC_STATION", "unit": unit["draft_key"],
+                           "message": "站位不得使用抽象占位说明"})
+        match_transition = re.search(r"；转场：([^）]+）)", shot.get("text", ""))
+        transitions.append(match_transition.group(1).rstrip("）") if match_transition else "")
+        match_sound = re.search(r"音效：(.+?)。$", shot.get("text", ""))
+        sounds.append(match_sound.group(1).strip() if match_sound else "")
+        normalized.append((key, _normalized_body(shot)))
+    selected_records = {rid for unit in units for rid in unit["source_records"]}
+    if selected_records - mapped_records:
+        errors.append({"code": "AUTHORING_TRACE_SOURCE_COVERAGE",
+                       "records": sorted(selected_records - mapped_records),
+                       "message": "镜级来源映射未覆盖选定内容"})
+    omissions = trace.get("source_cue_omissions", [])
+    if not isinstance(omissions, list):
+        omissions = [None]
+    omitted = set()
+    for omission in omissions:
+        rid = omission.get("source_record") if isinstance(omission, dict) else None
+        cue = omission.get("cue") if isinstance(omission, dict) else None
+        if (rid not in selected_records or cue not in _source_cues(records.get(rid, {}))
+                or not _concrete(omission.get("reason"))):
+            errors.append({"code": "AUTHORING_SOURCE_CUE_MAPPING",
+                           "message": "省略记录须定位原cue并给出待语义审阅的具体合法依据"})
+        else:
+            omitted.add((rid, cue))
+    required_cues = {(rid, cue) for rid in selected_records for cue in _source_cues(records[rid])}
+    missing_cues = required_cues - mapped_cues - omitted
+    if missing_cues:
+        errors.append({"code": "AUTHORING_SOURCE_CUE_COVERAGE", "cues": sorted(missing_cues),
+                       "message": "来源括号要求缺少具体镜头定位或待审省略依据；总括状态不能代替"})
+    if len(durations) >= 6 and max(durations.count(value) for value in set(durations)) / len(durations) >= 0.65:
+        if not _concrete(trace.get("timing_distribution_basis")):
+            errors.append({"code": "AUTHORING_UNIFORM_TIMING", "message": "镜长高度集中须说明来源节奏依据"})
+    if len(transitions) >= 6 and len(set(transitions)) == 1:
+        if transitions[0] == "硬切" or not _concrete(trace.get("transition_distribution_basis")):
+            errors.append({"code": "AUTHORING_UNIFORM_TRANSITION", "message": "统一转场须核对具体观看锚点"})
+    if len(sounds) >= 6 and len(set(sounds)) == 1:
+        errors.append({"code": "AUTHORING_UNIFORM_SOUND", "message": "统一音效须回到实际声源核对"})
+    for (left_key, left), (right_key, right) in zip(normalized, normalized[1:]):
+        if _similar(left, right) >= 0.78:
+            errors.append({"code": "AUTHORING_TEMPLATE_REUSE", "shots": [left_key, right_key],
+                           "message": "相邻正文骨架高度重复，须实际复核观看作用"})
+    payload = {"policy": POLICY, "version": VERSION,
+               "trace_sha256": hashlib.sha256(trace_bytes).hexdigest(),
+               "draft_sha256": draft_sha256, "context_sha256": expected_context_sha256,
+               "shot_count": len(expected_keys), "source_span": trace.get("source_span")}
+    return {**payload, "enforced": True, "status": "blocked" if errors else "passed",
+            "errors": errors, "trace_path": str(path), "shot_keys": expected_keys,
+            "preferred_target_summary": organization.get("preferred_target_summary", {}),
+            "unit_boundary_candidates": organization.get("same_scene_boundary_candidates", []),
+            "semantic_review": "not_performed",
+            "limits": "仅核验来源定位、绑定、结构、已给定时窗及确定词面风险；不证明自然镜长、动作、可见性、保持或省略合法。",
+            "gate_digest": _digest(payload)}
+
+
+def validate(project, state, draft_bytes, units, expected_context_sha256,
+             explicit_trace=None, draft_path=None):
+    """Read-only dispatch; old authored sidecars keep their original contract."""
+    if state.get("storyboard_authoring_policy") != POLICY:
+        return {"enforced": False, "policy": POLICY, "status": "legacy_compatible"}
+    path = trace_path(draft_path or project, explicit_trace)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, ValueError):
+        value = None
+    validator = _validate_v3 if isinstance(value, dict) and value.get("version") == LEGACY_VERSION else _validate_v4
+    return validator(project, state, draft_bytes, units, expected_context_sha256,
+                     explicit_trace, draft_path)
 
 
 def require(report):
