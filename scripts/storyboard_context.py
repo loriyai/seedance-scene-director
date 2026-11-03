@@ -20,6 +20,8 @@ def context_hash(state, project=None):
     required = ('references/storyboard-rules.md', 'references/storyboard-text-format.md',
                 'scripts/storyboard_text.py', 'scripts/storyboard_text_delivery.py',
                 'scripts/storyboard_authoring_gate.py', 'scripts/storyboard_context.py',
+                'scripts/continuity.py',
+                'modules/screenplay-standardizer/scripts/character_variants.py',
                 'scripts/segment_naming.py', 'scripts/script_partition.py',
                 'scripts/video_settings.py', 'scripts/ratio_profiles.py',
                 'scripts/video_header.py',
@@ -46,7 +48,7 @@ def context_hash(state, project=None):
     return d.sha(d.packed(data))
 
 
-def scene_context(project, scene_id, span=None):
+def scene_context(project, scene_id, span=None, authoring_trace=None):
     from video_settings import get_ratio
     from video_header import read as read_header
     project = Path(project).resolve()
@@ -70,6 +72,13 @@ def scene_context(project, scene_id, span=None):
         record['selected_text'] = d.portion(record, start, end)
         record['selected_span'] = [max(start, record['start']), min(end, record['end'])]
     allowed = text_core.scene_asset_ids(scene)
+    carried = []
+    if authoring_trace is not None:
+        from continuity import carry_declarations, validate_carry_props
+        declared = carry_declarations(d.read_json(authoring_trace))
+        local = [row for row in declared if isinstance(row, dict) and row.get('scene_id') == scene_id]
+        carried = validate_carry_props(state, local, {scene_id})
+        allowed['props'] = list(dict.fromkeys(allowed['props'] + [row['asset_id'] for row in carried]))
     ids = list(dict.fromkeys(aid for values in allowed.values() for aid in values))
     d.require(set(ids) <= assets.keys(), '场次台账引用了不存在的资产')
     # image_prompt repeats the visual design and is not a storyboard input.
@@ -123,6 +132,7 @@ def scene_context(project, scene_id, span=None):
         'span': selected_span, 'full_scene_span': full_span,
         'source_lines': {'first': first, 'last': last, 'text': '\n'.join(lines[first - 1:last])},
         'records': selected, 'allowed_asset_ids': allowed, 'assets': projected,
+        'continuity_props': carried,
         'style': (project / 'video-style.txt').read_text(encoding='utf-8-sig').strip(),
         'video_header': header,
         'video_ratio': ratio,

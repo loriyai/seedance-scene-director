@@ -27,6 +27,8 @@ OBSERVATION_PAIRS = {
     'conception': ('conception_started', 'conception_finished'),
     'source_preparation_to_manuscript': ('source_read_started', 'manuscript_ready'),
     'draft_to_manuscript': ('draft_started', 'manuscript_ready'),
+    'manuscript_to_authoring': ('manuscript_ready', 'authoring_ready'),
+    'authoring_to_first_preview': ('authoring_ready', 'first_native_preview'),
     'manuscript_to_first_preview': ('manuscript_ready', 'first_native_preview'),
     'candidate_to_review_start': ('candidate_ready', 'review_started'),
     'preview_to_review_submission': ('first_native_preview', 'review_submitted'),
@@ -37,7 +39,7 @@ OBSERVATION_PAIRS = {
 OBSERVATION_EVENTS = {name for pair in OBSERVATION_PAIRS.values() for name in pair}
 MILESTONES = ({name for pair in PHASES.values() for name in pair}
               | (OBSERVATION_EVENTS - {'first_native_preview'})
-              | {'draft_saved', 'draft_finished', 'review_waiting'})
+              | {'draft_saved', 'draft_finished', 'manuscript_partial', 'review_waiting'})
 PREVIEW_PRODUCER = 'storyboard_text_delivery.preview'
 COMMAND_MEASUREMENT_KIND = 'actual_subprocess_wall_time_not_model_or_semantic_review'
 
@@ -321,6 +323,11 @@ def _milestone_views(rows):
         points = group['milestones']
         for name, (left, right) in OBSERVATION_PAIRS.items():
             start, end = points.get(left), points.get(right)
+            if name == 'manuscript_to_authoring':
+                # Legacy draft_saved records may describe only a partial save.
+                # Keep their old views, but require the explicit new boundary.
+                start = next((event for event in group['events']
+                              if event['event'] == 'manuscript_ready'), None)
             if start or end:
                 # An observed endpoint preceding the start cannot bound this
                 # interval. Keep both as independent incomplete observations.
@@ -442,6 +449,8 @@ def summarize(rows):
                 'conception': '仅有实际构思起止观察时计区间，缺失边界留空。',
                 'source_preparation_to_manuscript': '来源阅读开始至首份候选稿保存的准备、构思与保存合并区间。',
                 'draft_to_manuscript': 'draft_started至首份候选稿保存，可能只覆盖临近保存的后段。',
+                'manuscript_to_authoring': '完整候选正文保存至匹配作者依据实际保存的观察间隔；依据随正文完成时可为零，不代表单独的纯侧车写作耗时。',
+                'authoring_to_first_preview': '匹配作者依据保存至首个原生成功预览，可能包含绑定、机械修正与等待。缺失端点保持未知。',
                 'manuscript_to_first_preview': '首份候选稿保存至首个具有原生成功产物记录的预览。',
                 'candidate_to_review_start': 'candidate_ready或历史draft_finished观察至实际阅读开始，与首个成功预览分别展示。',
                 'preview_to_review_submission': '预览至实际派审事件的观察区间，包含准备和等待。',

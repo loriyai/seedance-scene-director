@@ -25,6 +25,16 @@ def compact(value):
     return "".join(c for c in value if c.isalnum())
 
 
+def character_identity(characters, asset_id):
+    """Resolve an explicit person/incarnation through an appearance base."""
+    asset = characters.get(asset_id, {})
+    base_id = asset.get('appearance_variant', {}).get('base_asset_id', asset_id)
+    appearance = characters.get(base_id, {}).get('appearance', {})
+    if line(appearance.get('identity')) and line(appearance.get('incarnation')):
+        return ('explicit', appearance['identity'], appearance['incarnation'])
+    return ('asset', base_id)
+
+
 def scene_appearance_tracks(scene):
     return scene.get("character_appearances", [])
 
@@ -211,12 +221,7 @@ def validate_storyboard(state, unit):
     characters = {item['id']: item for item in data['characters']}
 
     def identity(asset_id):
-        base_id = variants.get(asset_id, asset_id)
-        base = characters.get(base_id, {})
-        appearance = base.get('appearance', {})
-        if line(appearance.get('identity')) and line(appearance.get('incarnation')):
-            return ('explicit', appearance['identity'], appearance['incarnation'])
-        return ('asset', base_id)
+        return character_identity(characters, asset_id)
 
     tracked_identities = {identity(base) for base in tracked_bases}
     contract = unit.get("continuity")

@@ -32,6 +32,37 @@ def observation(result, phase, attempt=1, activity=None):
 
 
 class StoryboardMetricsTests(unittest.TestCase):
+    def test_partial_save_does_not_close_full_manuscript_window(self):
+        result = metrics.summarize([
+            row(0, 'source_read_started', activity_id='draft1', coverage='full'),
+            row(2, 'manuscript_partial', activity_id='draft1', note='仅保存前部'),
+            row(8, 'manuscript_ready', activity_id='draft1'),
+            row(9, 'authoring_ready', activity_id='draft1'),
+            native_preview(12, activity_id='draft1'),
+        ])
+        self.assertEqual(observation(result, 'source_preparation_to_manuscript', activity='draft1')['elapsed_seconds'], 8)
+        self.assertEqual(observation(result, 'manuscript_to_authoring', activity='draft1')['elapsed_seconds'], 1)
+        self.assertEqual(observation(result, 'authoring_to_first_preview', activity='draft1')['elapsed_seconds'], 3)
+        self.assertEqual(result['milestone_observations'][0]['events'][1]['event'], 'manuscript_partial')
+
+    def test_authoring_boundary_is_not_inferred_from_preview_or_another_activity(self):
+        result = metrics.summarize([
+            row(0, 'manuscript_ready', activity_id='draft1'),
+            row(4, 'authoring_ready', activity_id='draft2'),
+            native_preview(7, activity_id='draft1'),
+        ])
+        self.assertIsNone(observation(result, 'manuscript_to_authoring', activity='draft1')['elapsed_seconds'])
+        self.assertIsNone(observation(result, 'authoring_to_first_preview', activity='draft1')['elapsed_seconds'])
+        self.assertIsNone(observation(result, 'manuscript_to_authoring', activity='draft2')['elapsed_seconds'])
+
+    def test_legacy_partial_save_is_not_promoted_to_complete_manuscript(self):
+        events = [row(0, 'draft_saved', note='旧记录，仅部分正文已保存')]
+        result = metrics.summarize(events + [row(6, 'authoring_ready')])
+        self.assertIsNone(observation(result, 'manuscript_to_authoring')['started_at'])
+        self.assertIsNone(observation(result, 'manuscript_to_authoring')['elapsed_seconds'])
+        result = metrics.summarize(events + [row(4, 'manuscript_ready'), row(6, 'authoring_ready')])
+        self.assertEqual(observation(result, 'manuscript_to_authoring')['elapsed_seconds'], 2)
+
     def test_explicit_partial_at_either_endpoint_overrides_full_start_declaration(self):
         for start_coverage, end_coverage, expected in (
                 ('full', 'partial', 'partial'), ('partial', 'full', 'partial'),

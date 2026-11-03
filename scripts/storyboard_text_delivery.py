@@ -63,7 +63,7 @@ def _raise_parsed_diagnostics(error, state, replace_ids=None, *, check_camera=Tr
     raise text_core.TextValidationError(errors) from error
 
 
-def check_incremental(project, draft, span=None):
+def check_incremental(project, draft, span=None, authoring_trace=None):
     """Read only an authored scene prefix; not a preview or delivery approval.
 
     Incomplete source tails and a final 1–3 second in-progress unit can be
@@ -78,7 +78,8 @@ def check_incremental(project, draft, span=None):
     profile = ratio_profiles.profile_summary(ratio)
     raw = draft.read_bytes()
     try:
-        units = text_core.parse_incremental(raw.decode('utf-8-sig'), state, span)
+        units = text_core.parse_incremental(raw.decode('utf-8-sig'), state, span,
+            continuity_props=storyboard_authoring_gate.candidate_carry_props(draft, authoring_trace))
     except text_core.TextValidationError as exc:
         _raise_parsed_diagnostics(exc, state)
     camera = text_core.camera_constraints(units, *text_core.camera_context(state, units))
@@ -116,8 +117,10 @@ def bind_trace(project, draft, decisions, output=None, span=None):
     state = d.load(project)
     raw = draft.read_bytes()
     authored = d.read_json(decisions)
+    from continuity import carry_declarations
     try:
-        units = text_core.parse(raw.decode('utf-8-sig'), state, source_span=list(span) if span else None)
+        units = text_core.parse(raw.decode('utf-8-sig'), state, source_span=list(span) if span else None,
+                               continuity_props=carry_declarations(authored))
     except text_core.TextValidationError as exc:
         if not isinstance(authored, dict) or authored.get('version') != 4:
             exc.errors.extend(storyboard_authoring_gate.source_mapping_errors(state, exc.units, authored))
@@ -172,7 +175,8 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
         parse_span = [selected_old[0]['span'][0], selected_old[-1]['span'][1]]
         d.require(span is None or list(span) == parse_span, '--span与指定修改单元范围不同')
     try:
-        units, info = text_core._parse_for_delivery(raw, state, source_span=parse_span)
+        units, info = text_core._parse_for_delivery(raw, state, source_span=parse_span,
+            continuity_props=storyboard_authoring_gate.candidate_carry_props(draft, authoring_trace))
     except text_core.TextValidationError as exc:
         trace = None
         if state.get('storyboard_authoring_policy') == storyboard_authoring_gate.POLICY:
@@ -414,6 +418,14 @@ def _require_current_preview(project, draft, state, info):
               '作者稿在预览期间变化，请重新运行预览')
     d.require(context_hash(state, project) == info['context_sha256'],
               '分镜上下文在预览期间变化，请重新运行预览和核对审阅')
+    _require_current_carry_trace(info)
+
+
+def _require_current_carry_trace(info):
+    gate = info.get('authoring_gate', {})
+    if gate.get('continuity_props'):
+        d.require(d.file_hash(gate['trace_path']) == gate['trace_sha256'],
+                  '跨场道具依据在执行期间变化，请重新绑定并核对审阅')
 
 
 def preview(project, draft, output=None, span=None, replace_ids=None, activity_id=None,
@@ -427,6 +439,8 @@ def preview(project, draft, output=None, span=None, replace_ids=None, activity_i
                            authoring_gate=info.get('authoring_gate')).encode('utf-8')
     artifact = {key: info[key] for key in ('draft_sha256', 'context_sha256', 'span', 'scenes')}
     artifact.update(draft=str(draft), output_sha256=hashlib.sha256(payload).hexdigest())
+    if info.get('authoring_gate', {}).get('continuity_props'):
+        artifact['authoring_trace_sha256'] = info['authoring_gate']['trace_sha256']
     rows, _ = storyboard_metrics.effective_events(storyboard_metrics.read_events(project))
     starts = [i for i, row in enumerate(rows) if row['event'] == 'start']
     rows = rows[starts[-1]:] if starts else rows
@@ -476,40 +490,120 @@ def timing(project, command_logs=None):
     return storyboard_metrics.timing(project, command_logs=command_logs)
 
 
+def _recover_committed(project, state, receipt, draft, output, span, replace_ids, authoring_trace):
+    """Recover the exact accepted artifact before consulting current context."""
+    from continuity import carry_declarations, unit_carry_props
+    d.require(receipt.get('policy') == POLICY, 'request_id已用于其他内容；不能覆盖历史请求')
+    units = receipt.get('units')
+    d.require(isinstance(units, list) and units, '历史回执缺少完整单元')
+    raw = Path(draft).read_bytes()
+    draft_hash = hashlib.sha256(raw).hexdigest()
+    final_review = receipt.get('final_review', {})
+    d.require(final_review.get('draft_sha256') == draft_hash,
+              'request_id已用于其他内容；作者稿与原交付不同')
+    saved_span = [units[0]['span'][0], units[-1]['span'][1]]
+    d.require(span is None or list(span) == saved_span, '重试来源范围与原交付不同')
+    mode = 'replace' if replace_ids else 'append'
+    d.require(mode == receipt.get('mode'), '重试方式与原交付不同')
+    if replace_ids:
+        d.require(list(replace_ids) == [u['id'] for u in units], '重试替换ID与原交付不同')
+    header = units[0].get('header_text')
+    if header is None:
+        header = read_header(project, state, required=bool(state.get('header_hash')))
+    binding = {'policy': POLICY, 'draft_sha256': draft_hash, 'mode': mode,
+               'replace_ids': replace_ids or [], 'span': saved_span,
+               'header_sha256': d.sha(header) if header is not None else None,
+               'video_ratios': list(dict.fromkeys(u.get('video_ratio') for u in units
+                                                if u.get('video_ratio') is not None)),
+               'ratio_profiles': list(dict.fromkeys(u['ratio_profile'] for u in units
+                                                   if u.get('ratio_profile')))}
+    carried = unit_carry_props(units)
+    if carried:
+        binding['continuity_props'] = carried
+    d.require(digest(binding) == receipt.get('request_hash'),
+              'request_id已用于其他内容；历史请求绑定不一致')
+    # Compare syntax projections to the exact original bytes. Do not rejudge
+    # old creative choices or revalidate anchors against later replacements.
+    context = text_core._slice_state(state, saved_span)
+    parsed = text_core._parse_units(raw.decode('utf-8-sig'), context)
+    d.require(len(parsed) == len(units), '历史回执单元数与作者稿不一致')
+    for actual, frozen in zip(parsed, units):
+        for field, value in actual.items():
+            if field != 'span':  # Shared dialogue boundaries own punctuation after checking.
+                d.require(frozen.get(field) == value, f'历史回执派生字段与作者稿不一致：{field}')
+    gate = receipt.get('authoring_gate') or {}
+    scenes = list(dict.fromkeys(sid for u in units for sid in u['scene_ids']))
+    frozen_info = {'draft_sha256': draft_hash, 'context_sha256': final_review.get('context_sha256'),
+                   'scenes': scenes, 'authoring_gate': gate}
+    if gate.get('enforced'):
+        d.require(gate.get('status') == 'passed', '历史作者闸门未通过')
+        trace_path = storyboard_authoring_gate.trace_path(draft, authoring_trace)
+        trace_raw = trace_path.read_bytes()
+        d.require(hashlib.sha256(trace_raw).hexdigest() == gate.get('trace_sha256'),
+                  'request_id已用于其他内容；作者依据与原交付不同')
+        trace = json.loads(trace_raw.decode('utf-8-sig'))
+        d.require(carry_declarations(trace) == carried, '历史跨场道具承诺与原作者依据不一致')
+        shot_keys = [f'{u["draft_key"]}#{i}' for u in units for i in range(1, len(u['shots']) + 1)]
+        d.require(gate.get('shot_keys') == shot_keys and gate.get('shot_count') == len(shot_keys),
+                  '历史作者闸门镜头范围与回执不一致')
+        payload = {'policy': gate['policy'], 'version': gate['version'],
+                   'trace_sha256': gate['trace_sha256'], 'draft_sha256': draft_hash,
+                   'context_sha256': final_review.get('context_sha256'),
+                   'shot_count': len(shot_keys), 'source_span': trace.get('source_span')}
+        if carried:
+            payload['continuity_props'] = carried
+        d.require(digest(payload) == gate.get('gate_digest'), '历史作者闸门绑定摘要不一致')
+    verify_review(final_review, frozen_info)
+    d.require(Path(output).resolve() == Path(receipt['output']).resolve(),
+              '重试须沿用原交付路径；另行导出使用render')
+    target = d.validate_output_path(state, project, output)
+    rendered = render_units(state, units, authoring_gate=gate, historical_receipt=receipt)
+    if receipt.get('output_sha256') is not None:
+        d.require(hashlib.sha256(rendered.encode('utf-8')).hexdigest() == receipt['output_sha256'],
+                  '历史回执与原交付内容摘要不一致')
+    # Recheck the saved receipt and both caller-owned inputs at the write boundary.
+    current = d.load(project)
+    d.require(next((r for r in current['receipts'] if r['request_id'] == receipt['request_id']), None) == receipt,
+              '恢复期间历史回执变化，请重读后重试')
+    d.require(hashlib.sha256(Path(draft).read_bytes()).hexdigest() == draft_hash, '恢复期间作者稿变化')
+    if gate.get('enforced'):
+        d.require(hashlib.sha256(trace_path.read_bytes()).hexdigest() == gate['trace_sha256'],
+                  '恢复期间作者依据变化')
+    if target.exists():
+        d.require(target.read_text(encoding='utf-8-sig') == rendered,
+                  '已交付文件被外部修改；保留现场，使用render另存')
+    else:
+        write_preview(target, rendered.encode('utf-8'))
+    return {'status': 'already_committed', 'output': str(target), **d.receipt_summary(receipt)}
+
+
 def commit(project, draft, request_id, review, output, span=None,
            replace_ids=None, range_confirmation=None, authoring_trace=None):
     from project_paths import assert_writable
     assert_writable(project)
     project = Path(project).resolve()
     d.require(isinstance(request_id, str) and request_id.strip(), 'request_id不能为空')
+    current = d.load(project)
+    prior = next((r for r in current['receipts'] if r['request_id'] == request_id), None)
+    if prior is not None:
+        return _recover_committed(project, current, prior, draft, output, span,
+                                  replace_ids, authoring_trace)
     state, units, info = prepare(project, draft, span, replace_ids, check_camera=False,
                                  authoring_trace=authoring_trace)
     mode = 'replace' if replace_ids else 'append'
-    request_hash = digest({'policy': POLICY, 'draft_sha256': info['draft_sha256'],
+    request_binding = {'policy': POLICY, 'draft_sha256': info['draft_sha256'],
                            'mode': mode, 'replace_ids': replace_ids or [], 'span': info['span'],
                            'header_sha256': info.get('header_sha256'),
                            'video_ratios': info.get('video_ratios', []),
-                           'ratio_profiles': [p['profile_id'] for p in info.get('ratio_profiles', [])]})
-    previous_receipt = next((r for r in state['receipts'] if r['request_id'] == request_id), None)
-    if previous_receipt:
-        d.require(previous_receipt.get('policy') == POLICY and previous_receipt['request_hash'] == request_hash,
-                  'request_id已用于其他内容；不能覆盖历史请求')
-        d.require(Path(output).resolve() == Path(previous_receipt['output']).resolve(),
-                  '重试须沿用原交付路径；另行导出使用render')
-        # A retry recovers its exact saved receipt, never a recomputed approval.
-        target = Path(previous_receipt['output']).resolve()
-        rendered = render_units(state, previous_receipt['units'],
-                                authoring_gate=previous_receipt.get('authoring_gate'),
-                                historical_receipt=previous_receipt)
-        d.validate_output_path(state, project, target)
-        if target.exists():
-            d.require(target.read_text(encoding='utf-8-sig') == rendered,
-                      '已交付文件被外部修改；保留现场，使用render另存')
-        else:
-            d.atomic_text(target, rendered)
-        return {'status': 'already_committed', 'output': str(target), **d.receipt_summary(previous_receipt)}
+                           'ratio_profiles': [p['profile_id'] for p in info.get('ratio_profiles', [])]}
+    from continuity import unit_carry_props
+    carried = unit_carry_props(units)
+    if carried:
+        request_binding['continuity_props'] = carried
+    request_hash = digest(request_binding)
     require_camera_constraints(info['camera_constraints'])
     final_review = verify_review(d.read_json(review), info)
+    _require_current_carry_trace(info)
     if mode == 'append' and info['history']['issues']:
         d.require(range_confirmation == info['history']['confirmation_token'],
                   '范围重叠/间隔/回退需要已取得的本次用户授权，不得自动填写确认')
@@ -526,6 +620,7 @@ def commit(project, draft, request_id, review, output, span=None,
         d.require(d.read_json(project / 'session.json')['revision'] == state['revision'], '项目已有新的提交；重读后重试')
         d.require(context_hash(state, project) == info['context_sha256'],
                   '比例、拆分方案或规则在提交期间变化；请重新预览和核对审阅')
+        _require_current_carry_trace(info)
         working = copy.deepcopy(state)
         counts = {}
         scenes = {scene['id']: scene for scene in state['ledger']['scenes']}
@@ -586,6 +681,7 @@ def commit(project, draft, request_id, review, output, span=None,
         # Render before committing so a format error cannot create an unusable receipt.
         rendered = render_units(working, units,
                                 authoring_gate=info.get('authoring_gate'))
+        receipt['output_sha256'] = hashlib.sha256(rendered.encode('utf-8')).hexdigest()
         working['receipts'].append(receipt)
         working['phase'] = 'nodes_choice'
         d.save(project, working)
@@ -652,6 +748,8 @@ def main():
     p.add_argument('--project', type=Path, required=True)
     p.add_argument('--scene', required=True)
     p.add_argument('--span', type=int, nargs=2)
+    p.add_argument('--authoring-trace', type=Path,
+                   help='可选v4作者依据，仅展示其中显式声明的本场延续道具')
     args = parser.parse_args()
     try:
         if args.command == 'bind-trace':
@@ -659,7 +757,7 @@ def main():
         elif args.command == 'check':
             if args.incremental:
                 d.require(not args.replace_ids, '增量检查不接受--replace-ids；指定修改使用正常check/preview')
-                result = check_incremental(args.project, args.draft, args.span)
+                result = check_incremental(args.project, args.draft, args.span, args.authoring_trace)
             else:
                 state, units, result = prepare(args.project, args.draft, args.span, args.replace_ids,
                                                authoring_trace=args.authoring_trace)
@@ -686,7 +784,7 @@ def main():
         elif args.command == 'invalidate-event':
             result = storyboard_metrics.invalidate_event(args.project, args.event_id, at=now(), note=args.note)
         elif args.command == 'context':
-            result = scene_context(args.project, args.scene, args.span)
+            result = scene_context(args.project, args.scene, args.span, args.authoring_trace)
         else:
             result = timing(args.project, command_logs=args.command_log)
         print(json.dumps(result, ensure_ascii=False, indent=2))

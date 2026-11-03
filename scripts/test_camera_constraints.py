@@ -86,6 +86,9 @@ class CameraConstraintChecks(unittest.TestCase):
         state = d.load(test.project)
         for unit in state['units'] + state['receipts'][0]['units']:
             unit['header_policy'] = 'visual-only-v2'
+        # This fixture represents the older receipt shape. Keeping the current
+        # checksum after changing its header would simulate tampering instead.
+        state['receipts'][0].pop('output_sha256', None)
         d.write_json(test.project / 'session.json', state)
         test.output.write_text(delivery.render_units(state, state['receipts'][0]['units']), encoding='utf-8')
         before = test.output.read_bytes()

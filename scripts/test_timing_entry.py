@@ -70,6 +70,21 @@ class TimingEntryTests(unittest.TestCase):
         self.assertIn('实际commit', result['message'])
         self.assertFalse((self.project / 'text-storyboards/events.jsonl').exists())
 
+    def test_partial_manuscript_and_authoring_events_remain_distinct(self):
+        for name in ('manuscript_partial', 'manuscript_ready', 'authoring_ready'):
+            status, _ = self.call('event', '--name', name, '--scene', 'SC0099',
+                                  '--activity-id', 'draft1', '--coverage', 'full')
+            self.assertEqual(status, 0)
+        status, summary = self.call('timing')
+        self.assertEqual(status, 0)
+        group = summary['milestone_observations'][0]
+        self.assertEqual([event['event'] for event in group['events']],
+                         ['manuscript_partial', 'manuscript_ready', 'authoring_ready'])
+        window = next(row for row in summary['milestone_windows']
+                      if row['phase'] == 'manuscript_to_authoring')
+        self.assertEqual(window['bounds'], 'bounded')
+        self.assertIsNone(summary['model_seconds'])
+
 
 if __name__ == '__main__':
     unittest.main()

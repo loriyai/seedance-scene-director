@@ -456,6 +456,17 @@ def bind_metadata(trace, draft_bytes, units, context_sha256):
     return result
 
 
+def candidate_carry_props(draft_path, explicit_trace=None):
+    """Read optional production references; normal trace validation owns errors."""
+    from continuity import carry_declarations
+    path = trace_path(draft_path, explicit_trace)
+    try:
+        trace = json.loads(path.read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError):
+        return []
+    return carry_declarations(trace)
+
+
 def _source_cues(record):
     """Return explicit parenthetical performance cues, not inferred actions."""
     label = record.get("label") or ""
@@ -622,6 +633,15 @@ def _validate_v4(project, state, draft_bytes, units, expected_context_sha256,
                 "errors": [{"code": "AUTHORING_TRACE_INVALID", "message": str(exc)}]}
     errors = []
     warnings = []
+    from continuity import carry_declarations, unit_carry_props, validate_carry_props
+    carried = []
+    try:
+        carried = validate_carry_props(state, carry_declarations(trace),
+                                      {sid for unit in units for sid in unit.get('scene_ids', [])})
+        if unit_carry_props(units) != carried:
+            raise ValueError('已解析单元与当前侧车的跨场道具声明不一致')
+    except ValueError as exc:
+        errors.append({'code': 'AUTHORING_CONTINUITY_PROPS', 'message': str(exc)})
     draft_sha256 = hashlib.sha256(draft_bytes).hexdigest()
     for field, value, code in (
             ("draft_sha256", draft_sha256, "AUTHORING_TRACE_DRAFT_BINDING"),
@@ -681,6 +701,8 @@ def _validate_v4(project, state, draft_bytes, units, expected_context_sha256,
                "trace_sha256": hashlib.sha256(trace_bytes).hexdigest(),
                "draft_sha256": draft_sha256, "context_sha256": expected_context_sha256,
                "shot_count": len(expected_keys), "source_span": trace.get("source_span")}
+    if carried:
+        payload['continuity_props'] = carried
     return {**payload, "enforced": True, "status": "blocked" if errors else "passed",
             "errors": errors, "warnings": warnings,
             "trace_path": str(path), "shot_keys": expected_keys,

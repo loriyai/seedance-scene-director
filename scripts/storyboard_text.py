@@ -215,7 +215,7 @@ def _seconds(value):
     return int(number) if number == number.to_integral_value() else float(number)
 
 
-def _parse_units(text, state, *, _context_data=None):
+def _parse_units(text, state, *, _context_data=None, _diagnostics=None):
     _require(isinstance(text, str) and text.strip(), "分镜TXT为空")
     _require("\x00" not in text, "分镜TXT含NUL字符")
     records, record_map, scenes, _ = _context_data if _context_data is not None else _context(state)
@@ -275,11 +275,23 @@ def _parse_units(text, state, *, _context_data=None):
             start, end, index, label, focal, transition, body, sound = match.groups()
             _require(int(index) == len(unit["shots"]) + 1, f"{context}：镜头编号须从1连续递增")
             framing = next((f for f in FRAMINGS if focal.endswith("的" + f)), None)
-            _require(framing is not None, f"{context}：景别须绑定主体并采用规定景别名称")
-            _require(_refs(focal, context), f"{context}：景别主体须使用稳定资产引用")
-            _require(all(s.strip() for s in (label, focal, transition, body, sound)), f"{context}：镜头字段不可为空")
-            _require("：“" not in line, f"{context}：台词只写在声音来源行，不可直接重复写入镜头正文")
-            _require(line.count("音效：") == 1, f"{context}：每镜只能有一个末尾音效字段")
+            # Complete SHOT groups and a continuous index locate these fields
+            # without guessing. Delivery can collect their independent errors;
+            # rendering and standalone parsing retain strict rejection.
+            checks = (
+                (framing is not None, 'SHOT_FRAMING', '景别须绑定主体并采用规定景别名称'),
+                (bool(_refs(focal, context)), 'SHOT_FOCAL_REFERENCE', '景别主体须使用稳定资产引用'),
+                (all(s.strip() for s in (label, focal, transition, body, sound)),
+                 'SHOT_EMPTY_FIELD', '镜头字段不可为空'),
+                ("：“" not in line, 'SHOT_INLINE_DIALOGUE', '台词只写在声音来源行，不可直接重复写入镜头正文'),
+                (line.count("音效：") == 1, 'SHOT_SOUND_FIELD', '每镜只能有一个末尾音效字段'),
+            )
+            for valid, code, message in checks:
+                if not valid:
+                    _require(_diagnostics is not None, f"{context}：{message}")
+                    _diagnostics.append({'code': code, 'unit': unit['draft_key'],
+                                         'shot': int(index), 'line': line_no,
+                                         'message': f"{context}：{message}"})
             unit["shots"].append({"start": int(start), "end": int(end), "text": line,
                                   "label": label, "framing": framing, "dialogue_parts": []})
             stage = 4
@@ -340,10 +352,10 @@ class TextValidationError(ValueError):
         super().__init__('；'.join(row['message'] for row in errors))
 
 
-def _check(units, state, *, allow_partial_tail=False):
+def _check(units, state, *, allow_partial_tail=False, _diagnostics=()):
     records, record_map, scenes, assets = _context(state)
     keys, previous_last, ordered_dialogue, actual_order = set(), None, [], []
-    chunks, units_by_record, errors = {}, {}, []
+    chunks, units_by_record, errors = {}, {}, list(_diagnostics)
     for unit in units:
         key = unit["draft_key"]
         _require(key not in keys, f"重复作者单元键：{key}")
@@ -360,6 +372,7 @@ def _check(units, state, *, allow_partial_tail=False):
                            'message': f"{key}：场景SET名单与来源场次及顺序不一致"})
         allowed_chars = set().union(*(_scene_characters(scenes[sid]) for sid in unit["scene_ids"]))
         allowed_props = set().union(*(set(scenes[sid].get("prop_ids", [])) for sid in unit["scene_ids"]))
+        allowed_props.update(row['asset_id'] for row in unit.get('continuity_props', []))
         if not set(unit["character_ids"]) <= allowed_chars:
             errors.append({'code': 'CHARACTER_REFERENCE_SCOPE', 'unit': key,
                            'message': f"{key}：人物名单包含不属于来源场次的资产"})
@@ -480,18 +493,21 @@ def _slice_state(state, source_span):
     return dict(state, records=clipped)
 
 
-def parse(text, state, source_span=None):
+def parse(text, state, source_span=None, *, continuity_props=None):
     """Return checked metadata derived solely from author text and bound state."""
     context = _slice_state(state, source_span)
-    units = _parse_units(text, context)
-    _check(units, context)
+    diagnostics = []
+    units = _parse_units(text, context, _diagnostics=diagnostics)
+    from continuity import apply_carry_props
+    apply_carry_props(state, units, continuity_props or [])
+    _check(units, context, _diagnostics=diagnostics)
     if source_span is not None:
         _require([units[0]["span"][0], units[-1]["span"][1]] == list(source_span),
                  "作者文本须完整覆盖指定source_span，不能遗漏范围首尾记录")
     return units
 
 
-def parse_incremental(text, state, source_span=None):
+def parse_incremental(text, state, source_span=None, *, continuity_props=None):
     """Inspect only an authored scene prefix, without completing any content.
 
     A final spoken fragment may stop at an exact source prefix and the last
@@ -500,7 +516,10 @@ def parse_incremental(text, state, source_span=None):
     preview/review.  Source clipping here is a read-only validation view.
     """
     context = _slice_state(state, source_span)
-    units = _parse_units(text, context)
+    diagnostics = []
+    units = _parse_units(text, context, _diagnostics=diagnostics)
+    from continuity import apply_carry_props
+    apply_carry_props(state, units, continuity_props or [])
     records, record_map, _, _ = _context(context)
     scene_ids = {sid for unit in units for sid in unit['scene_ids']}
     _require(len(scene_ids) == 1, "增量检查只允许当前单场的连续前缀")
@@ -523,7 +542,7 @@ def parse_incremental(text, state, source_span=None):
         # the written prefix, without appending it or changing the source.
         prefix = dict(prefix, records=[dict(record, text=fragment) if record['id'] == last['id']
                                        else record for record in prefix['records']])
-    _check(units, prefix, allow_partial_tail=True)
+    _check(units, prefix, allow_partial_tail=True, _diagnostics=diagnostics)
     return units
 
 
@@ -532,18 +551,35 @@ def validate(state, units):
     _require(isinstance(units, list) and units, "分镜单元不能为空")
     _require(all(isinstance(u, dict) and isinstance(u.get("source_text"), str) for u in units), "分镜单元缺少唯一作者文本source_text")
     _require(all(isinstance(u.get("span"), list) and len(u["span"]) == 2 for u in units), "分镜单元缺少有效span")
-    fresh = parse("\n".join(u["source_text"] for u in units), state,
-                  source_span=[units[0]["span"][0], units[-1]["span"][1]])
+    from continuity import unit_carry_props
+    text = "\n".join(u["source_text"] for u in units)
+    span = [units[0]["span"][0], units[-1]["span"][1]]
+    saved = list(state.get('units', []))
+    saved.extend(unit for receipt in state.get('receipts', []) for unit in receipt.get('units', []))
+    if all(unit in saved for unit in units):
+        # Historical projections keep their accepted references even if an
+        # earlier anchor has subsequently acquired a new production version.
+        context = _slice_state(state, span)
+        fresh = _parse_units(text, context)
+        for unit, current in zip(units, fresh):
+            if unit.get('continuity_props'):
+                import copy
+                current['continuity_props'] = copy.deepcopy(unit['continuity_props'])
+        _check(fresh, context)
+    else:
+        fresh = parse(text, state, source_span=span, continuity_props=unit_carry_props(units))
     _require(len(fresh) == len(units), "作者文本单元数与缓存不一致")
     for unit, current in zip(units, fresh):
         for field in PROJECTION_FIELDS:
             _require(unit.get(field) == current.get(field), f'{current["draft_key"]}：派生字段{field}与作者文本不一致；请重新parse')
+        _require(unit.get('continuity_props') == current.get('continuity_props'),
+                 f'{current["draft_key"]}：跨场道具声明与当前候选不一致')
     return _summary(state, fresh)
 
 
-def _parse_for_delivery(text, state, source_span=None):
+def _parse_for_delivery(text, state, source_span=None, *, continuity_props=None):
     """Use only the result just parsed here; no caller-supplied cache is trusted."""
-    units = parse(text, state, source_span=source_span)
+    units = parse(text, state, source_span=source_span, continuity_props=continuity_props)
     return units, _summary(state, units)
 
 
@@ -848,6 +884,9 @@ def _require_render_authorization(state, unit, authoring_gate=None):
     _require(isinstance(draft_key, str) and any(
         str(key).startswith(draft_key + "#") for key in shot_keys),
              "渲染单元未包含在当前逐镜写作闸门结果中；请重新prepare并逐镜复审")
+    if unit.get('continuity_props'):
+        expected = [row for row in gate.get('continuity_props', []) if row['scene_id'] in unit['scene_ids']]
+        _require(unit['continuity_props'] == expected, '渲染单元的跨场道具声明未绑定当前作者闸门')
 
 
 def render_unit(state, unit, reference_text=None, *, authoring_gate=None):

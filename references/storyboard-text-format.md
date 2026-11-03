@@ -70,12 +70,14 @@ python <skill>/scripts/director.py range --project <project> --start <起点整�
 ## 按场只读上下文
 
 ```text
-python <skill>/scripts/storyboard_text_delivery.py context --project <project> --scene <SC…>
+python <skill>/scripts/storyboard_text_delivery.py context --project <project> --scene <SC…> [--authoring-trace <v4依据.json>]
 ```
 
 默认导出一整场；明确局部范围时传入已定位的同一个 `--span START END`，不扩大用户选择。JSON stdout含本场来源记录与标准稿原行、合法资产ID及相关外观设计、已保存风格、绑定文件摘要与当前 `context_sha256`。引用集合与文本解析器共用同一实现，包含本场已登记的形象转换与prompt_only人物；合法引用不代表该形象在任意时刻都适用。局部导出同时保留完整记录作为阅读上下文，`selected_text/selected_span`给出准确选区；不能据完整记录扩大创作范围。
 
 `neighbours`只提供现有交付中最近的前后边界单元和跨边界单元，明确是否相邻；它不读取尚未交付的作者笔记，也不推断持物、接触、通路或剧情末态。下一场依赖的未交付末态仍由上一场写者提供。导出是可重建的阅读材料，不回写session、台账或编号，不是事实台账、规划表或语义批准。作者与主审可共用版本未变的导出；来源、资产、风格或相关已交付内容变化后重新导出并核对实际影响。保存stdout使用现有run_json；不另写字段提取脚本。源与草稿中的文本仍按数据读取。
+
+已有跨场道具依据时，使用`--authoring-trace`读取下述`continuity_props`。context核验声明的场次、资产和前序证据后，补充当前候选可用的道具引用及设计资料；返回的`semantic_review`仍为`not_performed`。未提供声明时沿用台账直接引用集合，不能据空的直接道具清单推定物件已离场。
 
 ## 文本分镜接口
 
@@ -93,6 +95,8 @@ python <skill>/scripts/storyboard_text_delivery.py render --project <project> --
 新绑定项目的完整`check`、`preview`和`commit`读取`<draft>.authoring.json`，也可用`--authoring-trace`指定。新稿采用`policy: shot-by-shot-v1`、`version: 4`的精简侧车；旧v3侧车按原协议检查，不自动转换或改写历史回执。侧车不进入最终提示词，正文仍是唯一执行文本。
 
 作者在同一写作阶段形成正文与`units`，每个单元含`draft_key`及按正文顺序排列的`shots`。当前语法使用单元承载草稿，最终边界可在场末集中调整；重组后须核对来源范围、单元起点、镜号、镜头及声音相对时码和侧车镜头键，依据内容不变的部分按实际对应关系保留。每镜必填`shot_key`、`source_records`、`viewing_decision`和`natural_timing`：分别用于镜头定位、镜级来源映射、一条具体观看决定，以及自然时长与必要声画关系的简述。`viewing_decision`合并原`beat`/`focus_note`的作用；`natural_timing`解释实际负荷，不复制整段动作，也不把已分配镜窗当作自然估时。需要数值估时时，对整次发言保留一处自然估时，跨镜只说明必要分配关系，不另建音频计划。
+
+侧车中的观看决定只说明本镜的具体选择及必要依据，自然时长只说明实际负荷与声画关系。已在正文表达的完整动作、全场通用限制、规则摘抄及逐条防错说明不再逐镜复述。共同条件保留在既有场级工作材料中一次，单镜只补实际差异或例外，保持现有必填字段可独立定位。程序绑定可确定的摘要和镜头键，作者负责创作依据，不能用复制正文或扩写理由代替正文修正。
 
 动作过程、进入相位、执行者、视线对象和切出状态已在正文明确时，不再强制填写`visual_change`、`entry_phase`、`action_phases`、`actor_ids`、`gaze_target`或重复`cut_reason`。必要时可补`cut_reason`；保持、等待或关键变化后仍需观看时，使用一条`continuation_reason`说明对象、仍在发展的内容和结束条件，替代重复的`hold_reason`/`tail_load`。复杂且依赖具体时间的位置可填写`timing_constraints: [{"label":"具体动作或发言阶段","start":0,"end":1.5}]`，时间相对于本镜起点，须完整落在镜窗内；这些区间由作者决定，程序不推断或生成。普通镜头不强制填写动作秒数、观察秒数、小数完成点或同期布尔值，不以观察数值未单列判定没有观看负荷，也不用三项全部相加或取最大值批准真实同期关系。
 
@@ -142,6 +146,17 @@ commit使用现有session保存稳定ID、展示名、范围、版本和receipt�
 
 文字commit不自动排队Canvas。已明确授权的节点任务按[画布流程](canvas-workflow.md)使用支持文本回执的适配入口。旧receipt继续 `director.py render --project <project> --request-id <旧ID>`；混合项目不要用旧director check/commit提交文字单元。
 
+同一`request_id`的提交重试先核对原回执、实际作者稿、原作者侧车、操作方式、范围及交付路径。核对一致后按原已审版本返回`already_committed`，交付原件缺失时恢复原内容。后续提交导致当前上下文变化，不要求已成功提交的相同稿件重新绑定。重试输入、冻结单元或实际输出存在冲突时保留现场并报错，另存导出使用`render`。首次提交及新的修订请求继续执行完整的当前绑定、检查和独立审阅。
+
+### 跨场道具延续引用
+
+对于满足[常规携带与收置](storyboard-rules.md#既有物件的常规携带与收置)且台账已存在的PROP，v4作者依据可在顶层增加`continuity_props`数组。同场同一道具只声明一次，包含`scene_id`、`asset_id`、`holder_id`、`anchor`、`carry_state`和`basis`。`holder_id`使用本场合法CHAR，主体实际结构及物理条件由作者与主审判断。`carry_state`简记本场相容的携带状态，`basis`说明持有延续和常规调整不改变剧情的具体依据。
+
+`anchor`选择前序已提交单元的`unit_id`、`version`及精确`evidence`，或前序来源的`record_id`及精确`evidence`。单元依据须关联同一道具及主体或有效延续声明，来源依据须属于已登记该道具及主体的前序场。机器检查身份、时间位置和证据定位，作者及主审须阅读相关前后文，核实实际持有关系、途中状态变化及本次执行条件。同场共现、片段匹配或未提及本身均不能证明语义成立。
+
+该声明仅补充当前候选的合法引用资格，正文需要呈现道具时仍使用原稳定ID。物件无需每镜可见，未在本单元使用的道具不会自动加入图片引用。中间场次的已提交延续声明可供后继场次引用，同一道具沿用原资产。声明随作者侧车、实际审阅和单元回执绑定，变更依据须核对真实影响并重新生成匹配预览。旧稿无此字段沿原协议读取，历史回执保留当时的声明。它不把制作选择写成原文可见事件，资产身份、外观或来源内容发生变化时仍按[绑定变更边界](binding-changes.md)处理。
+
+
 ## 事件计时
 
 计时以原生事件日志为唯一阶段记录，按实际发生的阶段转折记录。未知起点、缺失端点和无法区分的工作如实保留，不回填、重命名或从文件长度、宿主状态推算。只记录必要阶段，不为每镜打点或定时重复报状态。
@@ -161,7 +176,9 @@ python <skill>/scripts/storyboard_text_delivery.py invalidate-event --project <p
 | `start` / `complete` | 本次任务真正开始与全部已授权工作结束，各记一次 |
 | `source_read_started` / `source_read_finished` | 当前选区来源读取的实际工作窗口，阅读与构思交织且未分别观测时可包含构思 |
 | `conception_started` / `conception_finished` | 仅在构思工作确有独立、可观察的起止时使用，不能从来源读取窗口倒拆 |
-| `manuscript_ready` | 当前候选正文第一次实际保存完成，仍须后续完整机械检查 |
+| `manuscript_partial` | 中断或交接时仅部分正文已实际保存，不能关闭完整候选的准备窗口 |
+| `manuscript_ready` | 当前选区完整候选正文第一次实际保存完成，仍须后续完整机械检查 |
+| `authoring_ready` | 当前候选匹配的作者依据已实际保存完成，与正文同次完成时按实际完成记录，不强制把同次写作拆成两轮 |
 | `previewed` | 原生preview实际完成解析、完整检查、排版和产物核验后自动记录，首次完整通过以首条有效成功事件为准 |
 | `review_submitted` | 候选和匹配预览已实际送入主审的执行入口，并已按代理状态规则核实宿主续作 |
 | `review_started` / `recheck_started` | 独立主审实际开始首轮阅读，或开始修订后的实际影响复看，复看按变化及受影响连接执行 |
@@ -171,7 +188,7 @@ python <skill>/scripts/storyboard_text_delivery.py invalidate-event --project <p
 
 `source_read_started/finished`旧记录可能已包含构思，须按当时实际边界解释。只有独立观测到构思起止，才区分读取与构思窗口，仍须识别二者的重叠。`draft_started`、`review_finished`及`recheck_finished`继续按旧记录配对和展示历史窗口，它们可能混合读取、构思、写入、审阅、报告整理或接收核对，不改称纯写稿、纯阅读或纯模型耗时。`note`补充实际依据，不自动改变覆盖范围或历史窗口性质。
 
-事件迟记时用`--coverage partial`并说明已观察到的边界，原始起点未知就保持未知。`full`是记录者声明，工具不证明真实性，未声明的旧记录显示unspecified。首次候选保存与首次完整预览通过分别计量，修订及合并预览沿实际版本记录，不从后来的成功倒推早期完成。`previewed`和`delivered`由各自原生入口产生，不能用event手工补造成功记录。每批delivered也不等于整个任务complete。
+事件迟记时用`--coverage partial`并说明已观察到的边界，原始起点未知就保持未知。`full`是计时覆盖声明，工具不证明真实性，未声明的旧记录显示unspecified。稿件只完成一部分使用`manuscript_partial`，计时覆盖partial与稿件部分完成分别记录。首次完整正文、匹配作者依据保存及首次完整预览通过分别计量，缺失任一端点保持未知；两份材料同次完成不另设侧车工作阶段。历史`draft_saved`只按当时记录解释，不能据名称升级为完整正文完成。修订及合并预览沿实际版本记录，不从后来的成功倒推早期完成。`previewed`和`delivered`由各自原生入口产生，不能用event手工补造成功记录。每批delivered也不等于整个任务complete。
 
 实际唤起独立主审后核实宿主状态。消息准备、发送意向、请求ACK或宿主running本身均不证明已经阅读。首审的`review_started`或复看的`recheck_started`由实际开始读取的主审据实记录。报告就绪与主代理接收分别记录，不用其中一个时刻代替另一个，也不因计时增加第三轮逐镜审阅。
 
@@ -179,7 +196,7 @@ python <skill>/scripts/storyboard_text_delivery.py invalidate-event --project <p
 
 同一event日志记录实际修订`revision_started/revision_finished`及工具修复`tool_repair_started/tool_repair_finished`。首审、根因修订复看和绑定影响复核均有各自的实际送审、阅读、报告及接收边界。复看从实际`recheck_started`到本轮`review_report_finished`记录阅读与报告窗口，沿变化及影响范围复用既有阅读，不因此重开全场首审。确有独立交接工作窗口才使用`handoff_started/handoff_finished`，不要用交接准备结束代替实际送审。同一候选轮次的读取、保存、原生预览、送审、实际阅读、报告与主代理验收使用同一个`--activity-id`，由交接传递该标记。新一轮修订另用轮次标记，避免将不同候选的端点配在一起。旧记录未使用一致标记时保留缺失边界，不按场名或文件名推定对应。开始端声明coverage。
 
-实际问题在对应开始事件或单独issue事件中用`--issue-kind author_revision|review_revision|tool_repair|confirmation --note <实际说明>`分类，分别表示作者自修、主审退回、工具修复、必要确认。正常检查不自动算作返工。旧revision/tool_repair开始事件的note仍按旧事件分类展示，不能据此自动判断缺陷已关闭。阶段结束只说明测量窗口结束，不充当语义通过。
+实际问题在对应开始事件或单独issue事件中用`--issue-kind author_revision|review_revision|tool_repair|confirmation --note <实际说明>`分类，分别表示作者自修、主审退回、工具修复、必要确认。开始处理反馈、重新阅读或修订正文之前登记本轮起点，完成修改及对应机械核验后登记修订终点；后续独立复看沿其实际阅读窗口记录。只测到文件保存或命令运行时，标记partial并在note说明，不能称为整轮返修耗时。note简记根因、受影响位置及实际处理结果，复用原问题和审阅报告的位置，不另建一份闭环台账。只有对应主审实际确认的关闭结论才能作为语义闭环依据。正常检查不自动算作返工。旧revision/tool_repair开始事件的note仍按旧事件分类展示，阶段结束只说明测量窗口结束。
 
 每条新事件有event_id，旧日志的行在读取时派生稳定legacy ID并保留原字节。发现错误阶段事件时，先从timing结果定位准确ID，再用invalidate-event追加带原因的撤销记录。它只撤销阶段计时证据，不改稿件、审阅结论、正式回执、start/complete或画布状态。自然语言note中的“误记、替代”不会自动改变统计，也不能直接编辑或删除旧行。需要替代成功预览时，应实际生成匹配预览，由程序记录当前成功时刻，未知原始成功时刻不回填。该更正接口不授权修改暂停的生产项目日志。
 

@@ -10,6 +10,121 @@ import re
 VERSION = 1
 MODES = {"visible", "offscreen", "occluded", "absent"}
 
+
+def carry_declarations(trace):
+    """Read explicit v4 production decisions, without inferring a carry state."""
+    if not isinstance(trace, dict) or 'continuity_props' not in trace:
+        return []
+    if trace.get('policy') != 'shot-by-shot-v1' or trace.get('version') != 4:
+        raise ValueError('跨场道具延续须使用v4作者依据')
+    rows = trace['continuity_props']
+    if not isinstance(rows, list):
+        raise ValueError('continuity_props须为数组')
+    return copy.deepcopy(rows)
+
+
+def validate_carry_props(state, rows, scene_ids):
+    """Check identity, scope and prior evidence, leaving meaning to reviewers.
+
+    A declaration is a candidate-local reference permission. It neither edits
+    the source ledger nor proves that possession survived intervening events.
+    """
+    if not isinstance(rows, list):
+        raise ValueError('continuity_props须为数组')
+    if rows and state.get('storyboard_authoring_policy') != 'shot-by-shot-v1':
+        raise ValueError('跨场道具延续仅用于已启用逐镜作者依据的文字分镜')
+    if not rows:
+        return []
+    scenes = {s['id']: s for s in state.get('ledger', {}).get('scenes', [])}
+    props = {p['id'] for p in state.get('ledger', {}).get('props', [])}
+    characters = {c['id']: c for c in state.get('ledger', {}).get('characters', [])}
+    from pathlib import Path
+    import sys
+    module_path = str(Path(__file__).resolve().parents[1] / 'modules/screenplay-standardizer/scripts')
+    if module_path not in sys.path:
+        sys.path.insert(0, module_path)
+    from character_variants import character_identity
+
+    def same_holder(left, right):
+        if left == right:
+            return True
+        identity = character_identity(characters, left)
+        return identity[0] == 'explicit' and identity == character_identity(characters, right)
+    records = {r['id']: r for r in state.get('records', [])}
+    units = {u['id']: u for u in state.get('units', []) if 'id' in u}
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError('跨场道具声明须为对象')
+        sid, aid, holder = (row.get(k) for k in ('scene_id', 'asset_id', 'holder_id'))
+        if not all(isinstance(v, str) for v in (sid, aid, holder)):
+            raise ValueError('跨场道具须声明scene_id、asset_id及holder_id')
+        if sid not in scene_ids or sid not in scenes or aid not in props:
+            raise ValueError('跨场道具须为当前场及既有PROP，不能扩大来源或资产范围')
+        if (sid, aid) in seen:
+            raise ValueError('同场同一道具只声明一次跨场延续')
+        seen.add((sid, aid))
+        from storyboard_text import scene_asset_ids
+        if holder not in scene_asset_ids(scenes[sid])['characters']:
+            raise ValueError('跨场道具持有主体须为本场合法CHAR')
+        for key in ('carry_state', 'basis'):
+            if not isinstance(row.get(key), str) or not row[key].strip():
+                raise ValueError('跨场道具须简述携带状态及延续依据')
+        anchor = row.get('anchor')
+        if not isinstance(anchor, dict) or not isinstance(anchor.get('evidence'), str) or not anchor['evidence'].strip():
+            raise ValueError('跨场道具须引用可定位的前序证据')
+        first = min((r['start'] for r in records.values() if r['scene'] == sid), default=None)
+        if first is None:
+            raise ValueError('跨场道具目标场没有来源记录')
+        if 'unit_id' in anchor and 'record_id' not in anchor:
+            previous = units.get(anchor['unit_id'])
+            if (previous is None or type(anchor.get('version')) is not int
+                    or previous.get('version') != anchor['version'] or previous['span'][1] > first):
+                raise ValueError('跨场道具前序单元不存在、版本变化或时间边界不成立')
+            inherited = any(p.get('asset_id') == aid and same_holder(p.get('holder_id'), holder)
+                            for p in previous.get('continuity_props', []))
+            direct = aid in previous.get('prop_ids', []) and any(
+                same_holder(cid, holder) for cid in previous.get('character_ids', []))
+            evidence_text = previous.get('source_text', '')
+            if inherited:
+                evidence_text += '\n' + '\n'.join(p['carry_state'] for p in previous['continuity_props']
+                                                   if p['asset_id'] == aid and same_holder(p['holder_id'], holder))
+            if not (inherited or direct) or anchor['evidence'] not in evidence_text:
+                raise ValueError('跨场道具前序单元未包含所声明道具、主体或精确证据')
+        elif 'record_id' in anchor and 'unit_id' not in anchor:
+            previous = records.get(anchor['record_id'])
+            source_scene = scenes.get(previous['scene']) if previous else None
+            if (previous is None or previous['end'] > first or not source_scene
+                    or aid not in source_scene.get('prop_ids', [])
+                    or not any(same_holder(cid, holder) for cid in scene_asset_ids(source_scene)['characters'])
+                    or anchor['evidence'] not in previous['text']):
+                raise ValueError('跨场道具来源锚点须为该道具及主体已登记的前序场精确证据')
+        else:
+            raise ValueError('跨场道具anchor须选用前序unit_id或record_id之一')
+    return copy.deepcopy(sorted(rows, key=lambda row: (row['scene_id'], row['asset_id'])))
+
+
+def apply_carry_props(state, units, rows):
+    """Attach reviewed-later production decisions once per scene, not per shot."""
+    scene_ids = {sid for unit in units for sid in unit['scene_ids']}
+    validated = validate_carry_props(state, rows, scene_ids)
+    for unit in units:
+        local = [row for row in validated if row['scene_id'] in unit['scene_ids']]
+        if local:
+            unit['continuity_props'] = local
+
+
+def unit_carry_props(units):
+    """Recover one declaration per scene/prop from persisted unit projections."""
+    rows = {}
+    for unit in units:
+        for row in unit.get('continuity_props', []):
+            key = (row['scene_id'], row['asset_id'])
+            if key in rows and rows[key] != row:
+                raise ValueError('同场同一道具的延续声明不一致')
+            rows[key] = row
+    return copy.deepcopy([rows[key] for key in sorted(rows)])
+
 # scene-text-v1 keeps continuity in the visible shot prose.  These are
 # authoring-template cues, not a ban on real continuity wording: a concrete
 # action such as “接续上一单元的转身” remains valid.  The parser owns the
