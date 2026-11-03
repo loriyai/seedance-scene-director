@@ -145,6 +145,102 @@ class CompactAuthoringTraceTest(unittest.TestCase):
         self.assertPasses(report)
         self.assertEqual(report['semantic_review'], 'not_performed')
         self.assertTrue(report['limits'])
+        self.assertEqual(report['warnings'], [])
+
+    def test_body_meta_check_distinguishes_targets_from_ordinary_chinese(self):
+        original = self.units[0]['shots'][0]['text']
+        cases = [
+            ('看不得孩子挨饿', False), ('顾不得衣袖沾水', False),
+            ('舍不得放下杯子', False), ('不得不转身', False),
+            ('门边贴着“禁止吸烟”', False), ('逐页审核账本', False),
+            ('不得生成字幕', True), ('禁止添加额外人物', True),
+            ('不得擅自改写台词', True), ('禁止新增人物', True),
+            ('不要改变人物身份', True), ('“不得显示系统面板”', True),
+            ('后台审核要求', True),
+        ]
+        for prose, blocked in cases:
+            with self.subTest(prose=prose):
+                self.units[0]['shots'][0]['text'] = original.replace('桌侧相机', prose + '；桌侧相机')
+                report = self.validate()
+                self.assertEqual('AUTHORING_META_PROMPT' in self.codes(report), blocked)
+                self.assertEqual(report['status'], 'blocked' if blocked else 'passed', report['errors'])
+
+    def make_repeated_unit(self, lengths=(4, 4, 4, 4, 4, 4)):
+        original = self.units[0]['shots'][0]
+        shots, cursor = [], 0
+        for index, length in enumerate(lengths, 1):
+            shot = copy.deepcopy(original)
+            shot.update(start=cursor, end=cursor + length)
+            shot['text'] = shot['text'].replace(
+                '·00秒-04秒[镜头1-', f'·{cursor:02d}秒-{cursor + length:02d}秒[镜头{index}-')
+            shots.append(shot)
+            cursor += length
+        self.units[0].update(shots=shots, duration=cursor)
+
+    def test_all_statistical_risks_are_review_warnings_for_v4(self):
+        self.make_repeated_unit()
+        report = self.validate()
+        self.assertPasses(report)
+        self.assertEqual(report['errors'], [])
+        self.assertEqual({item['code'] for item in report['warnings']}, {
+            'AUTHORING_UNIFORM_TIMING', 'AUTHORING_UNIFORM_TRANSITION',
+            'AUTHORING_UNIFORM_SOUND', 'AUTHORING_TEMPLATE_REUSE',
+        })
+        gate.require(report)
+        self.assertEqual(report['semantic_review'], 'not_performed')
+
+    def test_uniform_timing_warning_keeps_threshold_and_basis_contract(self):
+        original = copy.deepcopy(self.units)
+        for lengths, warned in [((4, 4, 4, 4, 5, 6), True),
+                                ((4, 4, 4, 3, 5, 6), False),
+                                ((1,) * 13 + (2,) * 7, True),
+                                ((1,) * 12 + (2,) * 8, False),
+                                ((4, 4, 4, 4, 4), False)]:
+            with self.subTest(lengths=lengths):
+                self.units = copy.deepcopy(original)
+                self.make_repeated_unit(lengths)
+                report = self.validate()
+                self.assertPasses(report)
+                self.assertEqual('AUTHORING_UNIFORM_TIMING' in {
+                    item['code'] for item in report['warnings']}, warned)
+        self.units = original
+        self.make_repeated_unit()
+        trace = self.trace()
+        trace['timing_distribution_basis'] = '测试来源为六次等间隔滴水，逐次观察相同自然周期。'
+        original_trace = copy.deepcopy(trace)
+        report = self.validate(trace)
+        self.assertPasses(report)
+        self.assertIn('AUTHORING_UNIFORM_TIMING', {item['code'] for item in report['warnings']})
+        self.assertEqual(trace, original_trace)
+
+    def test_statistical_warnings_do_not_override_true_placeholder_errors(self):
+        self.make_repeated_unit()
+        shot = self.units[0]['shots'][0]
+        shot['text'] = shot['text'].replace('桌侧相机', '镜头平滑跟随后在动作结果处停稳；桌侧相机')
+        self.units[0]['global'] = '不同景层保持可见关系'
+        report = self.validate()
+        self.assertEqual(report['status'], 'blocked')
+        self.assertTrue({'AUTHORING_GENERIC_CAMERA', 'AUTHORING_GENERIC_STATION'} <= self.codes(report))
+        self.assertIn('AUTHORING_UNIFORM_TIMING', {item['code'] for item in report['warnings']})
+        with self.assertRaises(gate.AuthoringGateError):
+            gate.require(report)
+
+    def test_body_collector_reports_independent_hard_errors_without_mutation(self):
+        self.units[0]['shots'][0]['text'] = (
+            '·00秒-04秒[镜头1-提杯]：（@{CHAR0001}的中景；转场：硬切）'
+            '不得生成字幕；说话者在当前关系中完成一次清楚的发声与回应；'
+            '镜头平滑跟随后在动作结果处停稳。音效：杯底离桌的轻响。')
+        self.units[0]['global'] = '不同景层保持可见关系'
+        before = copy.deepcopy(self.units)
+        errors = gate.body_errors(self.units)
+        self.assertEqual({item['code'] for item in errors}, {
+            'AUTHORING_META_PROMPT', 'AUTHORING_TEMPLATE_PHRASE',
+            'AUTHORING_GENERIC_CAMERA', 'AUTHORING_LIGHTING_UNDER_SPECIFIED',
+            'AUTHORING_DEPTH_MISSING', 'AUTHORING_GENERIC_STATION',
+        })
+        self.assertTrue(all(item.get('shot') == 'SC0001/u01#1'
+                            for item in errors if item['code'] != 'AUTHORING_GENERIC_STATION'))
+        self.assertEqual(self.units, before)
 
     def test_missing_natural_timing_is_not_replaced_by_duration(self):
         trace = self.trace()
@@ -286,13 +382,14 @@ class CompactAuthoringTraceTest(unittest.TestCase):
         self.assertEqual(bound['source_span'], [0, 10])
         self.assertPasses(self.validate(bound))
 
-    def test_template_shell_and_identity_rotated_reuse_remain_blocked(self):
-        original = copy.deepcopy(self.units)
+    def test_fixed_template_shell_remains_blocked(self):
         self.units[0]['shots'][0]['text'] = self.units[0]['shots'][0]['text'].replace(
             '双手缓慢把杯子', '说话者在当前关系中完成一次清楚的发声与回应；双手缓慢把杯子')
-        with self.subTest(risk='template_shell'):
-            self.assertIn('AUTHORING_TEMPLATE_PHRASE', self.codes(self.validate()))
-        self.units = original
+        report = self.validate()
+        self.assertIn('AUTHORING_TEMPLATE_PHRASE', self.codes(report))
+        self.assertEqual(report['status'], 'blocked')
+
+    def test_identity_rotated_similarity_requires_review_without_blocking(self):
         second = copy.deepcopy(self.units[0]['shots'][0])
         second.update(start=4, end=8,
                       text=second['text'].replace('CHAR0001', 'CHAR0002').replace(
@@ -302,8 +399,11 @@ class CompactAuthoringTraceTest(unittest.TestCase):
         trace = self.trace()
         trace['units'][0]['shots'][1]['viewing_decision'] = '另一人物的持杯动作作为第二个观看决定。'
         trace['units'][0]['shots'][1]['natural_timing'] = '另一人物在本镜演出持杯，不借用前镜作者依据。'
-        with self.subTest(risk='rotated_identity_same_body'):
-            self.assertIn('AUTHORING_TEMPLATE_REUSE', self.codes(self.validate(trace)))
+        report = self.validate(trace)
+        self.assertPasses(report)
+        reuse = [item for item in report['warnings'] if item['code'] == 'AUTHORING_TEMPLATE_REUSE']
+        self.assertEqual(len(reuse), 1)
+        self.assertEqual(reuse[0]['shots'], ['SC0001/u01#1', 'SC0001/u01#2'])
 
     def test_metadata_binding_does_not_fill_absent_semantic_decisions(self):
         decisions = self.trace()
@@ -444,6 +544,37 @@ class TraceBindingIntegrationTest(unittest.TestCase):
         }
         self.decisions = self.project / 'authored-decisions.json'
         director.write_json(self.decisions, self.decisions_data)
+
+    def test_source_bound_spoken_prohibitions_pass_parser_and_authoring_gate(self):
+        before = self.fixture.snapshot()
+        for spoken in ('不得进入后院。', '不要动我的杯子。', '禁止靠近窗户。'):
+            with self.subTest(spoken=spoken):
+                state = director.load(self.project)
+                state['records'], state['length'] = director.build_records(
+                    self.fixture.script.replace('把消息发给@群里。', spoken), state['ledger'])
+                authored = self.fixture.authored_text().replace('把消息发给@群里。', spoken)
+                authored = authored.replace('音效：',
+                    '浅景深使双手清晰、门框在焦外；主光：左侧窗光照亮手背，'
+                    '辅光：桌面反射托住杯底暗部。音效：')
+                raw = authored.encode('utf-8')
+                units = text_core.parse(authored, state)
+                parts = [part for unit in units for shot in unit['shots'] for part in shot['dialogue_parts']]
+                self.assertIn(spoken, [part['text'] for part in parts])
+                context = 'synthetic-parser-context'
+                trace = gate.bind_metadata(self.decisions_data, raw, units, context)
+                path = self.project / 'spoken-prohibition.authoring.json'
+                director.write_json(path, trace)
+                report = gate.validate(self.project, state, raw, units, context, path)
+                self.assertEqual(report['status'], 'passed', report['errors'])
+                self.assertEqual(report['semantic_review'], 'not_performed')
+                # A source line containing a prohibition does not exempt body
+                # prose from its independent rendering-instruction check.
+                units[0]['shots'][0]['text'] = units[0]['shots'][0]['text'].replace(
+                    '浅景深', '“不得显示系统面板”；浅景深')
+                report = gate.validate(self.project, state, raw, units, context, path)
+                self.assertIn('AUTHORING_META_PROMPT', {item['code'] for item in report['errors']})
+        after = self.fixture.snapshot()
+        self.assertEqual({key: after[key] for key in before}, before)
 
     def test_bind_trace_writes_only_new_metadata_envelope(self):
         before = self.fixture.snapshot()

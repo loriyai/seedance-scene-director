@@ -5,6 +5,7 @@ Legacy milestones remain readable; unknown coverage stays explicit.
 """
 import hashlib
 import json
+import math
 from pathlib import Path
 import uuid
 
@@ -19,8 +20,26 @@ PHASES = {
     'handoff': ('handoff_started', 'handoff_finished'),
 }
 COVERAGES = {'full', 'partial', 'unspecified'}
-MILESTONES = {name for pair in PHASES.values() for name in pair}
+WAIT_REASONS = {'reviewer_busy', 'dependencies_unready', 'not_dispatched',
+                'preparing_handoff', 'user_paused', 'unknown'}
+OBSERVATION_PAIRS = {
+    'source_read': ('source_read_started', 'source_read_finished'),
+    'conception': ('conception_started', 'conception_finished'),
+    'source_preparation_to_manuscript': ('source_read_started', 'manuscript_ready'),
+    'draft_to_manuscript': ('draft_started', 'manuscript_ready'),
+    'manuscript_to_first_preview': ('manuscript_ready', 'first_native_preview'),
+    'candidate_to_review_start': ('candidate_ready', 'review_started'),
+    'preview_to_review_submission': ('first_native_preview', 'review_submitted'),
+    'submission_to_review_start': ('review_submitted', 'review_started'),
+    'review_to_report': ('review_started', 'review_report_finished'),
+    'report_to_root_acceptance': ('review_report_finished', 'root_accepted'),
+}
+OBSERVATION_EVENTS = {name for pair in OBSERVATION_PAIRS.values() for name in pair}
+MILESTONES = ({name for pair in PHASES.values() for name in pair}
+              | (OBSERVATION_EVENTS - {'first_native_preview'})
+              | {'draft_saved', 'draft_finished', 'review_waiting'})
 PREVIEW_PRODUCER = 'storyboard_text_delivery.preview'
+COMMAND_MEASUREMENT_KIND = 'actual_subprocess_wall_time_not_model_or_semantic_review'
 
 
 def identified(rows):
@@ -94,6 +113,7 @@ def read_events(project):
         stamp(row['at'])
         if not isinstance(row['event'], str) or not row['event'].strip():
             raise ValueError('事件名称不能为空')
+        _validate_wait_reason(row['event'], row.get('reason'), row.get('note'))
     rows = identified(rows)
     from project_paths import read_metadata, resolve
     if read_metadata(project):
@@ -105,8 +125,17 @@ def read_events(project):
     return rows
 
 
+def _validate_wait_reason(name, reason, note):
+    if name == 'review_waiting':
+        if not isinstance(reason, str) or reason not in WAIT_REASONS or not isinstance(note, str) or not note.strip():
+            raise ValueError('review_waiting须提供有效reason与实际观察note')
+    elif reason is not None:
+        raise ValueError('reason仅用于review_waiting的实际等待状态变化')
+
+
 def record_event(project, name, *, at, scene=None, note=None, activity_id=None,
-                 coverage=None, issue_kind=None, artifact=None, producer=None, invalidates=None):
+                 coverage=None, issue_kind=None, artifact=None, producer=None, invalidates=None,
+                 reason=None):
     project = Path(project).resolve()
     from project_paths import assert_writable
     assert_writable(project)
@@ -115,6 +144,7 @@ def record_event(project, name, *, at, scene=None, note=None, activity_id=None,
     if not isinstance(name, str) or not name.strip():
         raise ValueError('事件名称不能为空')
     stamp(at)
+    _validate_wait_reason(name, reason, note)
     if coverage is not None and coverage not in COVERAGES:
         raise ValueError('coverage须为full/partial/unspecified')
     if issue_kind is not None and (issue_kind not in WORK_CATEGORIES
@@ -144,6 +174,7 @@ def record_event(project, name, *, at, scene=None, note=None, activity_id=None,
         'scene': scene, 'note': note, 'activity_id': activity_id,
         'coverage': coverage, 'issue_kind': issue_kind,
         'artifact': artifact, 'producer': producer, 'invalidates': invalidates,
+        'reason': reason,
     }.items() if value is not None})
     folder = project / 'text-storyboards'
     folder.mkdir(exist_ok=True)
@@ -200,13 +231,123 @@ def invalidate_event(project, event_id, *, at, note):
 
 
 def _window(phase, scene, activity, start, end):
-    return {'phase': phase, 'scene': scene, 'activity_id': activity,
+    coverage = start.get('coverage', 'unspecified') if start else 'unspecified'
+    if any(event and event.get('coverage') == 'partial' for event in (start, end)):
+        coverage = 'partial'
+    result = {'phase': phase, 'scene': scene, 'activity_id': activity,
             'started_at': start['at'] if start else None,
             'finished_at': end['at'] if end else None,
             'elapsed_seconds': (stamp(end['at']) - stamp(start['at'])).total_seconds()
             if start and end else None,
             'bounds': 'missing_start' if start is None else 'missing_finish' if end is None else 'bounded',
-            'measurement_coverage': start.get('coverage', 'unspecified') if start else 'unspecified'}
+            'measurement_coverage': coverage,
+            'start_event': start, 'end_event': end}
+    if phase in {'review', 'recheck'}:
+        result['meaning'] = ('实际阅读开始至实际报告完成的观察区间，含其中的中断。'
+                             if end and end['event'] == 'review_report_finished' else
+                             f'历史{phase}_finished可能记录主代理验收闭环，不能据此确定实际报告完成时刻。')
+    elif phase == 'draft':
+        result['meaning'] = 'draft_started至预览的记录区间；note与full声明均不能证明覆盖全部构思创作。'
+    return result
+
+
+def _native_preview(row):
+    """Recognize a recorded native success, without rechecking historical files."""
+    artifact = row.get('artifact')
+    if row.get('producer') != PREVIEW_PRODUCER or not isinstance(artifact, dict):
+        return False
+    digests = [artifact.get(key) for key in ('draft_sha256', 'context_sha256', 'output_sha256')]
+    span = artifact.get('span')
+    scenes = artifact.get('scenes')
+    return (all(isinstance(value, str) and len(value) == 64
+                and all(c in '0123456789abcdef' for c in value) for value in digests)
+            and isinstance(span, list) and len(span) == 2
+            and all(type(value) is int for value in span) and 0 <= span[0] < span[1]
+            and isinstance(scenes, list) and scenes
+            and all(isinstance(scene, str) and scene for scene in scenes)
+            and len(set(scenes)) == len(scenes) and row.get('scene') in scenes
+            and all(isinstance(artifact.get(key), str) and Path(artifact[key]).is_absolute()
+                    for key in ('draft', 'output'))
+            and Path(artifact['draft']).resolve() != Path(artifact['output']).resolve())
+
+
+def _observed_window(name, scene, activity, attempt, start, end):
+    result = _window(name, scene, activity, start, end)
+    result['attempt_index'] = attempt
+    return result
+
+
+def _milestone_views(rows):
+    """Pair observations within actual scene/activity attempts, never file mtimes."""
+    groups, current = [], {}
+    aliases = {'draft_saved': 'manuscript_ready', 'draft_finished': 'candidate_ready',
+               'previewed': 'first_native_preview', 'recheck_started': 'review_started'}
+    for row in rows:
+        name = row['event']
+        if name not in MILESTONES:
+            continue
+        _validate_wait_reason(name, row.get('reason'), row.get('note'))
+        if name == 'previewed' and not _native_preview(row):
+            continue
+        name = aliases.get(name, name)
+        key = (row.get('scene'), row.get('activity_id'))
+        group = current.get(key)
+        prior = group['milestones'] if group else {}
+        restart = (
+            name == 'revision_started'
+            or (name == 'revision_finished' and 'revision_started' not in prior
+                and any(item in prior for item in ('review_started', 'review_report_finished', 'root_accepted')))
+            or (name in {'source_read_started', 'draft_started', 'conception_started',
+                         'review_submitted', 'review_started'} and name in prior)
+            or (name in {'source_read_started', 'draft_started'}
+                and any(item in prior for item in ('manuscript_ready', 'first_native_preview',
+                                                   'review_submitted', 'review_started')))
+            or (name == 'review_submitted' and any(item in prior for item in (
+                'review_started', 'review_report_finished', 'review_finished', 'recheck_finished', 'root_accepted')))
+            or (name == 'review_waiting' and any(item in prior for item in (
+                'review_report_finished', 'review_finished', 'recheck_finished', 'root_accepted')))
+        )
+        if group is None or restart:
+            group = {'scene': key[0], 'activity_id': key[1],
+                     'attempt_index': group['attempt_index'] + 1 if group else 1,
+                     'milestones': {}, 'events': []}
+            groups.append(group)
+            current[key] = group
+        group['events'].append(row)
+        group['milestones'].setdefault(name, row)
+    windows, waiting = [], []
+    for group in groups:
+        scene, activity, attempt = (group[key] for key in ('scene', 'activity_id', 'attempt_index'))
+        points = group['milestones']
+        for name, (left, right) in OBSERVATION_PAIRS.items():
+            start, end = points.get(left), points.get(right)
+            if start or end:
+                # An observed endpoint preceding the start cannot bound this
+                # interval. Keep both as independent incomplete observations.
+                if start and end and stamp(end['at']) < stamp(start['at']):
+                    windows.append(_observed_window(name, scene, activity, attempt, None, end))
+                    end = None
+                windows.append(_observed_window(name, scene, activity, attempt, start, end))
+        transitions = [row for row in group['events']
+                       if row['event'] in {'review_waiting', 'review_submitted', 'review_started', 'recheck_started'}
+                       or row is points.get('first_native_preview')]
+        start, reason = None, 'unknown'
+        for transition in transitions:
+            if start is not None or transition['event'] in {'review_waiting', 'review_started', 'recheck_started'}:
+                window = _observed_window('handoff_reason', scene, activity, attempt, start, transition)
+                window['reason'] = reason
+                waiting.append(window)
+            if transition['event'] in {'review_started', 'recheck_started'}:
+                start = None
+                break
+            start = transition
+            reason = transition.get('reason', 'unknown')
+        if start is not None:
+            window = _observed_window('handoff_reason', scene, activity, attempt, start, None)
+            window['reason'] = reason
+            waiting.append(window)
+        group['milestones'] = {name: points.get(name) for name in sorted(OBSERVATION_EVENTS)}
+    return groups, windows, waiting
 
 
 def summarize(rows):
@@ -223,22 +364,34 @@ def summarize(rows):
     wall = (stamp(measured[-1]['at']) - stamp(measured[0]['at'])).total_seconds() \
         if starts and finish_index is not None else None
     mapping = {name: (phase, side) for phase, pair in PHASES.items() for side, name in enumerate(pair)}
-    pending, windows = {}, []
+    mapping['review_report_finished'] = ('review', 1)
+    pending, windows, report_closed = {}, [], set()
     for row in measured:
         if row['event'] not in mapping:
             continue
         phase, side = mapping[row['event']]
         key = (phase, row.get('scene'), row.get('activity_id'))
+        if row['event'] == 'review_report_finished':
+            recheck_key = ('recheck', row.get('scene'), row.get('activity_id'))
+            if key not in pending and recheck_key in pending:
+                key = recheck_key
+            elif key not in pending and (key in report_closed or recheck_key in report_closed):
+                continue
         if side == 0:
+            report_closed.discard(key)
             if key in pending:
                 windows.append(_window(*key, pending.pop(key), None))
             pending[key] = row
         else:
+            if row['event'] in {'review_finished', 'recheck_finished', 'review_report_finished'} and key in report_closed and key not in pending:
+                continue
             # A subsequent revision/assembly preview is an artifact milestone,
             # not another draft end with an invented missing start.
             if row['event'] == 'previewed' and row.get('producer') == PREVIEW_PRODUCER and key not in pending:
                 continue
             windows.append(_window(*key, pending.pop(key, None), row))
+            if row['event'] == 'review_report_finished':
+                report_closed.add(key)
     windows.extend(_window(*key, start, None) for key, start in pending.items())
     spans = [(stamp(w['started_at']), stamp(w['finished_at'])) for w in windows
              if w['bounds'] == 'bounded']
@@ -275,18 +428,76 @@ def summarize(rows):
         if kind or row['event'] in inferred and row.get('note'):
             issues.append({**row, 'issue_kind': kind or inferred[row['event']],
                            'classification_source': 'explicit' if kind else 'legacy_event_name'})
+    observations, milestone_windows, reason_windows = _milestone_views(measured)
     return {'events': rows, 'current_run_events': raw_recent, 'effective_run_events': recent,
             'invalidated_events': invalidated, 'total_wall_seconds': wall,
             'complete': bool(starts and finish_index is not None), 'model_seconds': None,
             'phase_windows': windows, 'measured_windows': totals, 'by_phase': phase_totals,
             'by_scene': scene_totals,
             'handoff_gaps': gaps, 'issues': issues,
+            'milestone_observations': observations, 'milestone_windows': milestone_windows,
+            'handoff_reason_windows': reason_windows,
+            'milestone_meanings': {
+                'source_read': '记录的来源阅读区间可同时包含构思，保留原note，不据名称断言纯阅读耗时。',
+                'conception': '仅有实际构思起止观察时计区间，缺失边界留空。',
+                'source_preparation_to_manuscript': '来源阅读开始至首份候选稿保存的准备、构思与保存合并区间。',
+                'draft_to_manuscript': 'draft_started至首份候选稿保存，可能只覆盖临近保存的后段。',
+                'manuscript_to_first_preview': '首份候选稿保存至首个具有原生成功产物记录的预览。',
+                'candidate_to_review_start': 'candidate_ready或历史draft_finished观察至实际阅读开始，与首个成功预览分别展示。',
+                'preview_to_review_submission': '预览至实际派审事件的观察区间，包含准备和等待。',
+                'submission_to_review_start': '派审观察至实际阅读开始，按记录边界解释。',
+                'review_to_report': '实际首审或recheck_started复看阅读开始至报告完成，保留原事件与note，缺失报告事件时不能用root验收代替。',
+                'report_to_root_acceptance': '报告完成至主代理验收，缺失边界留空。',
+            },
             'coverage_warnings': [w for w in windows if w['bounds'] != 'bounded'
                                   or w['measurement_coverage'] != 'full'],
             'note': '阶段/审阅可能重叠，不相加；未记录start与complete时总时长未知。'
                     'full仅是记录者声明，非自动证明；partial或unspecified不代表完整创作耗时。'
-                    '未覆盖时间包含未打点工作，不能直接称等待或浪费。'}
+                    '未覆盖时间包含未打点工作，不能直接称等待或浪费。'
+                    'milestone_windows是同一事件的不同观察视图，不叠加到阶段或总时长。'
+                    '等待原因仅从实际review_waiting打点起生效，之前未知，不向前补填。'}
 
 
-def timing(project):
-    return summarize(read_events(project))
+def _command_measurements(paths):
+    measurements, seen = [], set()
+    for value in paths or []:
+        path = Path(value).resolve()
+        if path in seen:
+            continue
+        seen.add(path)
+        raw = path.read_bytes()
+        row = json.loads(raw.decode('utf-8-sig'))
+        valid = isinstance(row, dict) and row.get('measurement_kind') == COMMAND_MEASUREMENT_KIND
+        if valid:
+            elapsed, command = row.get('elapsed_seconds'), row.get('command')
+            code, finished = row.get('returncode'), row.get('finished_at')
+            running = elapsed is None and code is None and finished is None
+            valid = (row.get('phase') in {'context', 'bind', 'preview', 'review_verify', 'commit_readback'}
+                     and isinstance(command, list) and bool(command)
+                     and all(isinstance(part, str) and part for part in command)
+                     and (running or (type(code) is int and finished is not None
+                                      and type(elapsed) in (int, float)
+                                      and math.isfinite(elapsed) and elapsed >= 0)))
+        try:
+            start = stamp(row['started_at'])
+            end = stamp(row['finished_at']) if row.get('finished_at') is not None else None
+            valid = valid and (end is None or end >= start)
+        except (KeyError, TypeError, AttributeError, ValueError):
+            valid = False
+        if not valid:
+            raise ValueError('本地命令计时须包含有效实际起点与命令，完成时须具备结束边界、有限非负时长和返回码：' + str(path))
+        measurements.append({**row, 'path': str(path), 'sha256': hashlib.sha256(raw).hexdigest(),
+                             'finished_at': row.get('finished_at'), 'elapsed_seconds': row.get('elapsed_seconds'),
+                             'returncode': row.get('returncode'),
+                             'bounds': 'bounded' if end is not None else 'missing_finish',
+                             'timestamp_elapsed_seconds': (end - start).total_seconds() if end is not None else None})
+    return measurements
+
+
+def timing(project, command_logs=None):
+    result = summarize(read_events(project))
+    result['command_measurements'] = _command_measurements(command_logs)
+    result['command_measurement_note'] = ('仅读取显式提供的实际本地subprocess计时，保留单调时钟时长及时间戳跨度。'
+                                          '合法start-only记录的结束、时长与返回码留空，不能从当前时刻补算。'
+                                          '这些记录可能嵌套于阶段区间，分别展示，不计为模型时间或加入阶段总时长。')
+    return result

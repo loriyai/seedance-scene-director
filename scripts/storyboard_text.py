@@ -331,10 +331,19 @@ def _speaker(asset, scene_id=None):
     return asset.get("scene_source_speakers", {}).get(scene_id, asset.get("source_speaker", fallback))
 
 
+class TextValidationError(ValueError):
+    """Independent diagnostics for structurally parsed, source-checked units."""
+
+    def __init__(self, errors, units=None):
+        self.errors = errors
+        self.units = units
+        super().__init__('；'.join(row['message'] for row in errors))
+
+
 def _check(units, state, *, allow_partial_tail=False):
     records, record_map, scenes, assets = _context(state)
     keys, previous_last, ordered_dialogue, actual_order = set(), None, [], []
-    chunks, units_by_record = {}, {}
+    chunks, units_by_record, errors = {}, {}, []
     for unit in units:
         key = unit["draft_key"]
         _require(key not in keys, f"重复作者单元键：{key}")
@@ -346,11 +355,17 @@ def _check(units, state, *, allow_partial_tail=False):
                      f"{key}：单元来源范围不连续/重复；仅允许相邻单元共享一条边界来源记录")
         previous_last = b
         expected_sets = list(dict.fromkeys(scenes[sid]["scene_asset_id"] for sid in unit["scene_ids"]))
-        _require(unit["set_ids"] == expected_sets, f"{key}：场景SET名单与来源场次及顺序不一致")
+        if unit["set_ids"] != expected_sets:
+            errors.append({'code': 'SCENE_REFERENCE_LIST', 'unit': key,
+                           'message': f"{key}：场景SET名单与来源场次及顺序不一致"})
         allowed_chars = set().union(*(_scene_characters(scenes[sid]) for sid in unit["scene_ids"]))
         allowed_props = set().union(*(set(scenes[sid].get("prop_ids", [])) for sid in unit["scene_ids"]))
-        _require(set(unit["character_ids"]) <= allowed_chars, f"{key}：人物名单包含不属于来源场次的资产")
-        _require(set(unit["character_ids"] + expected_sets) <= set(assets), f"{key}：人物/场景名单存在未知资产")
+        if not set(unit["character_ids"]) <= allowed_chars:
+            errors.append({'code': 'CHARACTER_REFERENCE_SCOPE', 'unit': key,
+                           'message': f"{key}：人物名单包含不属于来源场次的资产"})
+        if not set(unit["character_ids"] + expected_sets) <= set(assets):
+            errors.append({'code': 'UNKNOWN_LISTED_ASSET', 'unit': key,
+                           'message': f"{key}：人物/场景名单存在未知资产"})
         allowed = set(unit["character_ids"]) | set(expected_sets) | allowed_props
         used = _refs(unit["global"], key + "人物站位")
         used += _refs(unit["time"] + unit["weather"], key + "时间天气")
@@ -395,18 +410,21 @@ def _check(units, state, *, allow_partial_tail=False):
         for rid in expected_dialogue:
             if rid not in ordered_dialogue:
                 ordered_dialogue.append(rid)
-        _require(set(used) <= allowed and set(used) <= set(assets), f"{key}：引用资产不存在、未列入人物名单或不属于来源场次：{sorted(set(used) - (allowed & set(assets)))}")
+        missing = sorted(set(used) - (allowed & set(assets)))
+        if missing:
+            errors.append({'code': 'ASSET_REFERENCE_SCOPE', 'unit': key, 'assets': missing,
+                           'message': f"{key}：引用资产不存在、未列入人物名单或不属于来源场次：{missing}"})
         unit["prop_ids"] = list(dict.fromkeys(aid for aid in used if aid.startswith("PROP")))
         unit["asset_ids"] = list(dict.fromkeys(unit["character_ids"] + expected_sets + unit["prop_ids"]))
     for issue in character_reference_issues(state, units):
         place = '人物站位' if issue['field'] == 'global' else f'镜头{issue["shot"]}正文'
-        _require(False, f'{issue["unit"]}/{place}：{issue["code"]}（{issue["mention"]}）；{issue["message"]}')
+        errors.append({**issue, 'message': f'{issue["unit"]}/{place}：{issue["code"]}（{issue["mention"]}）；{issue["message"]}'})
     # Continuity wording is checked at the authored-text choke point.  The
     # transition field may say “动作接续”; only generic continuity prose in
     # the visible shot body is blocked here.
     from continuity import validate_prompt_continuity
     for issue in validate_prompt_continuity(units):
-        _require(False, f'{issue["unit"]}/镜头{issue["shot"]}：{issue["code"]}；{issue["message"]}')
+        errors.append({**issue, 'message': f'{issue["unit"]}/镜头{issue["shot"]}：{issue["code"]}；{issue["message"]}'})
     collapsed = [rid for i, rid in enumerate(actual_order) if not i or rid != actual_order[i - 1]]
     _require(collapsed == ordered_dialogue, "台词片段顺序与原文不同，或同一台词被其他台词打断")
     for rid in ordered_dialogue:
@@ -440,6 +458,8 @@ def _check(units, state, *, allow_partial_tail=False):
                 actual = "".join(units_by_record[rid][unit["draft_key"]])
                 expected = d.portion(record_map[rid][1], *unit["span"])
                 _require(actual == expected, f'{unit["draft_key"]}/{rid}：跨单元台词边界标点须留在前段，保持可独立复核的原文切片')
+    if errors:
+        raise TextValidationError(errors, units)
 
 
 def _slice_state(state, source_span):

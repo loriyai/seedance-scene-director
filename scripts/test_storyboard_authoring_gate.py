@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import tempfile
@@ -101,6 +102,66 @@ class StoryboardAuthoringGateTest(unittest.TestCase):
         self.assertEqual(report['status'], 'passed')
         self.assertEqual(report['shot_count'], 1)
         self.assertEqual(report['shot_keys'], ['SC0001/u01#1'])
+        self.assertEqual(report['warnings'], [])
+
+    def test_ordinary_prose_is_not_a_meta_instruction(self):
+        original = self.units[0]['shots'][0]['text']
+        for prose in ('看不得孩子挨饿', '顾不得衣袖沾水', '舍不得放下杯子',
+                      '不得不转身', '门边贴着“禁止吸烟”', '逐页审核账本'):
+            with self.subTest(prose=prose):
+                self.units[0]['shots'][0]['text'] = original.replace('抬头，', prose + '；抬头，')
+                path = self.write_trace()
+                report = gate.validate(self.project, self.state, self.draft, self.units, self.context, path)
+                self.assertEqual(report['status'], 'passed', report['errors'])
+
+    def test_rendering_prohibitions_still_block_including_quoted_meta(self):
+        original = self.units[0]['shots'][0]['text']
+        for prose in ('不得生成字幕', '禁止添加额外人物', '不要改变人物身份',
+                      '不得擅自改写台词', '禁止新增人物',
+                      '“不得显示系统面板”', '后台审核要求'):
+            with self.subTest(prose=prose):
+                self.units[0]['shots'][0]['text'] = original.replace('抬头，', prose + '；抬头，')
+                path = self.write_trace()
+                report = gate.validate(self.project, self.state, self.draft, self.units, self.context, path)
+                self.assertEqual(report['status'], 'blocked')
+                self.assertIn('AUTHORING_META_PROMPT', {item['code'] for item in report['errors']})
+
+    def repeated_trace(self):
+        path = self.write_trace()
+        trace = json.loads(path.read_text(encoding='utf-8'))
+        shot = self.units[0]['shots'][0]
+        self.units[0]['shots'] = [dict(shot, start=index * 4, end=(index + 1) * 4)
+                                   for index in range(6)]
+        self.units[0]['duration'] = 24
+        row = trace['units'][0]['shots'][0]
+        trace['units'][0]['shots'] = [dict(copy.deepcopy(row), shot_key=f'SC0001/u01#{index}')
+                                     for index in range(1, 7)]
+        trace['unit_organization']['units'][0]['duration_seconds'] = 24
+        trace.pop('timing_distribution_basis')
+        path.write_text(json.dumps(trace, ensure_ascii=False), encoding='utf-8')
+        return path
+
+    def test_all_statistical_risks_are_review_warnings_for_v3(self):
+        path = self.repeated_trace()
+        report = gate.validate(self.project, self.state, self.draft, self.units, self.context, path)
+        self.assertEqual(report['status'], 'passed', report['errors'])
+        self.assertEqual(report['errors'], [])
+        self.assertEqual({item['code'] for item in report['warnings']}, {
+            'AUTHORING_UNIFORM_TIMING', 'AUTHORING_UNIFORM_TRANSITION',
+            'AUTHORING_UNIFORM_SOUND', 'AUTHORING_TEMPLATE_REUSE',
+        })
+        gate.require(report)
+
+    def test_statistical_warnings_do_not_override_hard_camera_error_for_v3(self):
+        path = self.repeated_trace()
+        shot = self.units[0]['shots'][0]
+        shot['text'] = shot['text'].replace('抬头，', '镜头平滑跟随后在动作结果处停稳；抬头，')
+        report = gate.validate(self.project, self.state, self.draft, self.units, self.context, path)
+        self.assertEqual(report['status'], 'blocked')
+        self.assertIn('AUTHORING_GENERIC_CAMERA', {item['code'] for item in report['errors']})
+        self.assertIn('AUTHORING_UNIFORM_TIMING', {item['code'] for item in report['warnings']})
+        with self.assertRaises(gate.AuthoringGateError):
+            gate.require(report)
 
     def test_meta_prompt_is_blocked(self):
         self.units[0]['shots'][0]['text'] = self.units[0]['shots'][0]['text'].replace(
@@ -109,7 +170,7 @@ class StoryboardAuthoringGateTest(unittest.TestCase):
         report = gate.validate(self.project, self.state, self.draft, self.units, self.context, path)
         self.assertIn('AUTHORING_META_PROMPT', {item['code'] for item in report['errors']})
 
-    def test_uniform_duration_requires_explicit_basis(self):
+    def test_stale_trace_coverage_still_blocks(self):
         self.units[0]['shots'] = [dict(self.units[0]['shots'][0], start=0, end=4),
                                   dict(self.units[0]['shots'][0], start=4, end=8)]
         self.units[0]['span'] = [0, 8]

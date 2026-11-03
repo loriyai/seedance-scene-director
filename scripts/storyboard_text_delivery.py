@@ -37,6 +37,32 @@ def require_dialogue_capacity(units):
     return report
 
 
+def _delivery_errors(camera, capacity):
+    errors = []
+    for row in camera['errors']:
+        errors.append({**row, 'code': 'CAMERA_CONSTRAINT',
+                       'message': f'摄影约束：{row["unit"]}/镜头{row["shot"]}：{row["kind"]}'})
+    for row in capacity['errors']:
+        errors.append({**row,
+                       'message': f'台词容量下限：{row["unit"]}/镜头{row["shot"]}：{row["code"]}'})
+    return errors
+
+
+def _raise_parsed_diagnostics(error, state, replace_ids=None, *, check_camera=True, source_trace=None):
+    """Enrich only source-checked parser failures without rereading or writing."""
+    from speech_timing_audit import text_dialogue_capacity
+    errors = list(error.errors)
+    if state.get('storyboard_authoring_policy') == storyboard_authoring_gate.POLICY:
+        errors.extend(storyboard_authoring_gate.body_errors(error.units))
+        if isinstance(source_trace, dict) and source_trace.get('version') == 4:
+            errors.extend(storyboard_authoring_gate.source_mapping_errors(state, error.units, source_trace))
+    camera = {'errors': []}
+    if check_camera:
+        camera = text_core.camera_constraints(error.units, *text_core.camera_context(state, error.units, replace_ids))
+    errors.extend(_delivery_errors(camera, text_dialogue_capacity(error.units)))
+    raise text_core.TextValidationError(errors) from error
+
+
 def check_incremental(project, draft, span=None):
     """Read only an authored scene prefix; not a preview or delivery approval.
 
@@ -51,7 +77,10 @@ def check_incremental(project, draft, span=None):
     ratio = get_ratio(project, state)
     profile = ratio_profiles.profile_summary(ratio)
     raw = draft.read_bytes()
-    units = text_core.parse_incremental(raw.decode('utf-8-sig'), state, span)
+    try:
+        units = text_core.parse_incremental(raw.decode('utf-8-sig'), state, span)
+    except text_core.TextValidationError as exc:
+        _raise_parsed_diagnostics(exc, state)
     camera = text_core.camera_constraints(units, *text_core.camera_context(state, units))
     require_camera_constraints(camera)
     capacity = require_dialogue_capacity(units)
@@ -86,7 +115,13 @@ def bind_trace(project, draft, decisions, output=None, span=None):
     project, draft, decisions = (Path(value).resolve() for value in (project, draft, decisions))
     state = d.load(project)
     raw = draft.read_bytes()
-    units = text_core.parse(raw.decode('utf-8-sig'), state, source_span=list(span) if span else None)
+    authored = d.read_json(decisions)
+    try:
+        units = text_core.parse(raw.decode('utf-8-sig'), state, source_span=list(span) if span else None)
+    except text_core.TextValidationError as exc:
+        if not isinstance(authored, dict) or authored.get('version') != 4:
+            exc.errors.extend(storyboard_authoring_gate.source_mapping_errors(state, exc.units, authored))
+        _raise_parsed_diagnostics(exc, state, source_trace=authored)
     actual_span = [units[0]['span'][0], units[-1]['span'][1]]
     if span is not None:
         d.require(list(span) == actual_span, '草稿未覆盖指定来源范围')
@@ -96,7 +131,9 @@ def bind_trace(project, draft, decisions, output=None, span=None):
         d.require(actual_span == [records[0]['start'], records[-1]['end']],
                   '局部稿件绑定须提供准确--span')
     context = context_hash(state, project)
-    authored = d.read_json(decisions)
+    mapping_errors = storyboard_authoring_gate.source_mapping_errors(state, units, authored)
+    if mapping_errors:
+        _raise_parsed_diagnostics(text_core.TextValidationError(mapping_errors, units), state)
     bound = storyboard_authoring_gate.bind_metadata(authored, raw, units, context)
     target = safe_output(state, project, output or storyboard_authoring_gate.trace_path(draft),
                          (draft, decisions))
@@ -106,7 +143,7 @@ def bind_trace(project, draft, decisions, output=None, span=None):
     return {'status': 'bound', 'authoring_trace': str(target),
             'draft_sha256': bound['draft_sha256'], 'context_sha256': context,
             'semantic_review': 'not_performed',
-            'limits': '仅绑定元数据，未检查或生成创作依据，仍须完整preview和独立审阅。'}
+            'limits': '仅核对明确来源定位并绑定元数据，未判断或生成创作内容，仍须完整preview和独立审阅。'}
 
 
 def digest(value):
@@ -134,13 +171,37 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
                   '不连续的指定单元请分别保存局部草稿并提交；不要把中间未选剧情混入修改')
         parse_span = [selected_old[0]['span'][0], selected_old[-1]['span'][1]]
         d.require(span is None or list(span) == parse_span, '--span与指定修改单元范围不同')
-    units, info = text_core._parse_for_delivery(raw, state, source_span=parse_span)
+    try:
+        units, info = text_core._parse_for_delivery(raw, state, source_span=parse_span)
+    except text_core.TextValidationError as exc:
+        trace = None
+        if state.get('storyboard_authoring_policy') == storyboard_authoring_gate.POLICY:
+            path = storyboard_authoring_gate.trace_path(draft, authoring_trace)
+            try:
+                trace = d.read_json(path)
+            except OSError:
+                exc.errors.append({'code': 'AUTHORING_TRACE_MISSING', 'message': f'缺少作者依据：{path}'})
+            except ValueError:
+                exc.errors.append({'code': 'AUTHORING_TRACE_FORMAT', 'message': '作者依据JSON无法读取'})
+            else:
+                if not isinstance(trace, dict):
+                    exc.errors.append({'code': 'AUTHORING_TRACE_INVALID', 'message': '作者依据必须是对象'})
+            if isinstance(trace, dict) and trace.get('version') == 4:
+                expected = {'draft_sha256': hashlib.sha256(draft_bytes).hexdigest(),
+                            'context_sha256': context_hash(state, project)}
+                for field, value in expected.items():
+                    if trace.get(field) != value:
+                        exc.errors.append({'code': 'AUTHORING_TRACE_BINDING',
+                                           'message': f'作者依据绑定不匹配：{field}；旧依据不用于当前来源诊断'})
+                        trace = None
+                        break
+        _raise_parsed_diagnostics(exc, state, replace_ids, check_camera=check_camera, source_trace=trace)
     context = context_hash(state, project)
     authoring = storyboard_authoring_gate._validate_for_delivery(
         project, state, draft_bytes, units, context, authoring_trace,
         draft_path=draft, observations_summary=info['observations'])
-    storyboard_authoring_gate.require(authoring)
-    info['dialogue_capacity'] = require_dialogue_capacity(units)
+    from speech_timing_audit import text_dialogue_capacity
+    info['dialogue_capacity'] = text_dialogue_capacity(units)
     selected = list(dict.fromkeys(sid for unit in units for sid in unit['scene_ids']))
     actual_span = [units[0]['span'][0], units[-1]['span'][1]]
     if replace_ids:
@@ -198,10 +259,27 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
         for unit, identity in zip(units, identities):
             unit.update(identity)
     camera = text_core.camera_constraints(units, *text_core.camera_context(state, units, replace_ids))
+    diagnostics = _delivery_errors({'errors': []}, info['dialogue_capacity'])
     if check_camera:
-        require_camera_constraints(camera)
+        try:
+            require_camera_constraints(camera)
+        except ValueError:
+            if not camera['errors']:
+                raise
+            diagnostics.extend(_delivery_errors(camera, {'errors': []}))
+    try:
+        storyboard_authoring_gate.require(authoring)
+    except storyboard_authoring_gate.AuthoringGateError as exc:
+        # Preserve the gate report while collecting independent delivery errors.
+        exc.errors = list(authoring.get('errors', [])) + diagnostics
+        if diagnostics:
+            exc.args = (str(exc) + '；' + '；'.join(row['message'] for row in diagnostics),)
+        raise
+    if diagnostics:
+        raise text_core.TextValidationError(diagnostics)
     info['camera_constraints'] = camera
     info['warnings'].extend(camera['warnings'])
+    info['warnings'].extend(authoring.get('warnings', []))
     binding = {'draft_sha256': hashlib.sha256(draft_bytes).hexdigest(),
                'context_sha256': context,
                'header_sha256': d.sha(header)}
@@ -394,8 +472,8 @@ def event(project, name, scene=None, note=None, **fields):
     return storyboard_metrics.record_event(project, name, at=now(), scene=scene, note=note, **fields)
 
 
-def timing(project):
-    return storyboard_metrics.timing(project)
+def timing(project, command_logs=None):
+    return storyboard_metrics.timing(project, command_logs=command_logs)
 
 
 def commit(project, draft, request_id, review, output, span=None,
@@ -560,12 +638,16 @@ def main():
     p.add_argument('--activity-id', help='同场同阶段并行或多次尝试时区分工作窗口')
     p.add_argument('--coverage', choices=sorted(storyboard_metrics.COVERAGES))
     p.add_argument('--issue-kind', choices=sorted(storyboard_metrics.WORK_CATEGORIES))
+    p.add_argument('--reason', choices=sorted(storyboard_metrics.WAIT_REASONS),
+                   help='review_waiting的当前实际原因，配合--note说明观察依据')
     p = commands.add_parser('invalidate-event', help='追加撤销错误阶段事件的记录，不修改原日志')
     p.add_argument('--project', type=Path, required=True)
     p.add_argument('--event-id', required=True)
     p.add_argument('--note', required=True)
     p = commands.add_parser('timing')
     p.add_argument('--project', type=Path, required=True)
+    p.add_argument('--command-log', type=Path, action='append', default=[],
+                   help='可重复指定已有真实命令计时JSON，与创作及审阅窗口分别展示')
     p = commands.add_parser('context', help='只读导出一场来源、合法引用、版本与已交付边界')
     p.add_argument('--project', type=Path, required=True)
     p.add_argument('--scene', required=True)
@@ -597,20 +679,24 @@ def main():
                 historical_receipt=receipt))
             result = {'output':str(target), **d.receipt_summary(receipt)}
         elif args.command == 'event':
+            d.require(args.name != 'delivered', 'delivered由实际commit保存后记录，不能手工宣告')
             result = event(args.project, args.name, args.scene, args.note,
-                           activity_id=args.activity_id, coverage=args.coverage, issue_kind=args.issue_kind)
+                           activity_id=args.activity_id, coverage=args.coverage,
+                           issue_kind=args.issue_kind, reason=args.reason)
         elif args.command == 'invalidate-event':
             result = storyboard_metrics.invalidate_event(args.project, args.event_id, at=now(), note=args.note)
         elif args.command == 'context':
             result = scene_context(args.project, args.scene, args.span)
         else:
-            result = timing(args.project)
+            result = timing(args.project, command_logs=args.command_log)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (ValueError, OSError, KeyError, TypeError) as exc:
         result = {'status': 'error', 'message': str(exc)}
         if isinstance(exc, storyboard_authoring_gate.AuthoringGateError):
-            result['errors'] = exc.report.get('errors', [])
+            result['errors'] = getattr(exc, 'errors', exc.report.get('errors', []))
             result['authoring_gate'] = exc.report
+        elif isinstance(exc, text_core.TextValidationError):
+            result['errors'] = exc.errors
         print(json.dumps(result, ensure_ascii=False))
         return 1
     return 0
