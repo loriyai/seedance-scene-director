@@ -332,6 +332,10 @@ def bind(args):
              "header_hash": video_header.digest(header) if header is not None else None,
              "header_policy": video_header.POLICY if header is not None else None,
              "storyboard_authoring_policy": "shot-by-shot-v1",
+             # New bound projects use the append-only authoring-session-v5
+             # protocol.  The separate authoring session file is created only
+             # when the writer explicitly starts a session after binding.
+             "authoring_session_protocol": "authoring-session-v5",
              "ranges": [], "units": [], "next_numbers": {}, "receipts": []}
     if (project / video_settings.RATIO_FILE).exists() or (project / video_settings.WORKFLOW_FILE).exists():
         ratio = video_settings.get_ratio(project, required=True)

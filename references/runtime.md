@@ -23,6 +23,14 @@ python <skill>/scripts/canvas.py preflight --project <project> --target <画布�
 
 设置命令按实际选择执行，不同时执行示例中的两种ratio保存方式。`header --file`要求输入两行非空固定抬头并独立保存为项目`video-header.txt`；`--choice 1`为16:9，`--choice 2`为9:16；比例保存后记录分段方式、人数或自定义范围、同步选择和画布网址。同步意图为是且已有网址时，立即运行只读`canvas.py preflight`并保存`canvas/preflight.json`；预检未通过不得进入标准化。比例保存后由统一画幅配置绑定`landscape-v1`或`portrait-v1`，新分镜单元冻结该配置，历史回执仍按原格式读取。正式分段计划的生成、目标切点、局部连续性审查、全局择点、摘要与精确范围接口统一见[剧本分工规则](script-partition.md)。范围和异常确认按[工作流](storyboard-workflow.md#范围定位与历史检查)。原位rebind未实现，来源/台账变化用[绑定变更边界](binding-changes.md)，不能手改session摘要。
 
+### 项目绑定与作者会话状态
+
+入口设置、原文准备和资产阶段在未绑定项目中运行。此状态允许没有`session.json`，恢复时必须读取`intake-status`、`project-contract.json`、已保存来源和阶段产物，不能把缺少`session.json`报告为损坏。`director.py bind`完成后才进入绑定状态并创建`session.json`；只有绑定状态可以调用分镜上下文、范围和作者会话接口。
+
+作者会话属于绑定项目的分镜状态。首次起草先调用官方`authoring-session-v5`启动入口，创建唯一会话、写作者身份、准确范围、父稿摘要和空事件链。启动不写正文、不分配正式编号、不创建receipt。作者写入首个镜头后追加事件链，随后才能运行完整`check`、`preview`或`commit`。缺少绑定状态时返回`PROJECT_UNBOUND`；绑定存在但会话尚未启动时返回`AUTHORING_SESSION_NOT_STARTED`；不得让`session.json`缺失或作者会话缺失退化为操作系统文件异常。
+
+作者会话结束后保存不可变来源证明。正文修订必须在新会话中声明父稿摘要，旧会话保持只读。恢复时按项目绑定摘要、作者会话摘要、正文摘要、事件链摘要和范围共同核对，任一项不一致即停止当前新稿流程并保留现场。历史receipt按其历史协议读取，不创建新的作者会话。
+
 ## 文本分镜接口
 
 新文字分镜的绑定/范围命令、check/preview/commit/render和场级报告，唯一维护在[文本母稿格式与接口](storyboard-text-format.md#文本分镜接口)；本页不重复接口内容。

@@ -791,10 +791,30 @@ def _validate_for_delivery(project, state, draft_bytes, units, expected_context_
         value = None
     validator = _validate_v3 if isinstance(value, dict) and value.get("version") == LEGACY_VERSION else _validate_v4
     if validator is _validate_v4:
-        return validator(project, state, draft_bytes, units, expected_context_sha256,
-                         explicit_trace, draft_path, observations_summary=observations_summary)
-    return validator(project, state, draft_bytes, units, expected_context_sha256,
-                     explicit_trace, draft_path)
+        report = validator(project, state, draft_bytes, units, expected_context_sha256,
+                           explicit_trace, draft_path, observations_summary=observations_summary)
+    else:
+        report = validator(project, state, draft_bytes, units, expected_context_sha256,
+                           explicit_trace, draft_path)
+
+    # New bound projects add an append-only authoring-session-v5 envelope.  The
+    # historical v4 validator remains unchanged for fixture and pre-migration
+    # states that do not carry the protocol field.
+    if state.get("authoring_session_protocol") == "authoring-session-v5":
+        import authoring_session
+        expected_scope = [units[0]["span"][0], units[-1]["span"][1]]
+        v5 = authoring_session.validate_for_delivery(
+            project, draft_bytes, units, expected_scope, trace=value)
+        report = copy.deepcopy(report)
+        report["authoring_session_protocol"] = authoring_session.PROTOCOL
+        report["authoring_session"] = v5
+        report["provenance_manifest"] = v5.get("provenance_manifest")
+        report["authoring_event_chain"] = v5.get("authoring_event_chain")
+        report["authoring_event_chain_sha256"] = v5.get("authoring_event_chain_sha256")
+        report["errors"] = list(report.get("errors", [])) + list(v5.get("errors", []))
+        report["status"] = "blocked" if report["errors"] else "passed"
+        report["enforced"] = True
+    return report
 
 
 class AuthoringGateError(ValueError):

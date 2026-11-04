@@ -83,18 +83,27 @@ python <skill>/scripts/director.py range --project <project> --start <起点整�
 
 ## 文本分镜接口
 
-入口为 `scripts/storyboard_text_delivery.py`，内部调用文本解析器和新项目的`shot-by-shot-v1`作者闸门；不运行旧authoring gates、review_gate或效果编译。作者侧车不改变`scene-text-v1`最终TXT模板，默认路径为`<draft>.authoring.json`，也可用`--authoring-trace`显式指定，但新稿的侧车必须由`authoring-session-v5`事件链派生。旧项目和历史回执仍按原协议读取；历史回执重导出须核对项目中保存的完整回执，替换后的旧单元也只能沿该已保存回执读取。
+入口为 `scripts/storyboard_text_delivery.py`，内部调用文本解析器和新项目的`shot-by-shot-v1`作者闸门；不运行旧authoring gates、review_gate或效果编译。作者会话启动、状态读取、事件追加和结束由同一官方`authoring-session-v5`接口维护。首次起草先启动会话，启动时不要求正文或侧车存在；完整`check`、`preview`和`commit`只接受已启动且未封存的会话，`commit`成功后会话转为只读封存状态。作者侧车不改变`scene-text-v1`最终TXT模板，默认路径为`<draft>.authoring.json`，也可用`--authoring-trace`显式指定，但新稿的侧车必须由`authoring-session-v5`事件链派生。旧项目和历史回执仍按原协议读取；历史回执重导出须核对项目中保存的完整回执，替换后的旧单元也只能沿该已保存回执读取。
+
+作者会话的官方命令入口为`scripts/authoring_session.py`。命令只保存会话状态和写作者已经提供的来源证明，不生成、改写或重排正文；`start`只能在已绑定项目中执行，`scope`使用已核对的来源记录起止整数，修订会话另传父稿摘要。首次起草时先执行`start`，正文和侧车可以尚不存在；作者保存首个镜头后，按正文顺序对每个镜头执行`event`，其中`new-body-sha256`和`source-record`必须来自写作者已保存的实际内容。`status`只读当前会话；成功`commit`后由交付入口关闭会话，只有在需要单独结束会话且已核对作者稿摘要时才执行`close`。会话关闭后不得追加事件，修订必须启动新会话。
+
+```text
+python <skill>/scripts/authoring_session.py start --project <project> --scope <START> <END> --writer-identity <writer-id> [--parent-draft-sha256 <sha256>]
+python <skill>/scripts/authoring_session.py status --project <project>
+python <skill>/scripts/authoring_session.py event --project <project> --draft <draft.txt> --shot-key <draft-key#镜号> --new-body-sha256 <sha256> --source-record <L…> [--source-record <L…>] [--parent-shot-sha256 <sha256>]
+python <skill>/scripts/authoring_session.py close --project <project> [--draft-sha256 <sha256>]
+```
 
 ```text
 python <skill>/scripts/storyboard_text_delivery.py check --project <project> --draft <draft.txt> [--authoring-trace <trace.json>]
-python <skill>/scripts/storyboard_text_delivery.py bind-trace --project <project> --draft <draft.txt> --decisions <authoring-session-v5不可变输出.json> [--output <新侧车.json>] [--span START END]
+python <skill>/scripts/storyboard_text_delivery.py bind-trace --project <project> --draft <draft.txt> --decisions <作者会话输出的v4侧车.json> [--output <新侧车.json>] [--span START END]
 python <skill>/scripts/storyboard_text_delivery.py check --incremental --project <project> --draft <draft.txt>
 python <skill>/scripts/storyboard_text_delivery.py preview --project <project> --draft <draft.txt> [--authoring-trace <trace.json>]
 python <skill>/scripts/storyboard_text_delivery.py commit --project <project> --draft <draft.txt> --request-id <本次唯一ID> --review <场级审阅.json> --output <新交付.txt> [--authoring-trace <trace.json>]
 python <skill>/scripts/storyboard_text_delivery.py render --project <project> --request-id <已提交ID> --output <新导出.txt>
 ```
 
-新绑定项目的完整`check`、`preview`和`commit`读取`<draft>.authoring.json`，也可用`--authoring-trace`指定，但该侧车必须同时包含本节规定的`provenance_manifest`和`authoring_event_chain`。新稿采用`policy: shot-by-shot-v1`、`version: 4`的侧车字段格式，正文写入协议为`authoring-session-v5`；两者不是同一版本号。旧v3侧车按原协议检查，不自动转换或改写历史回执。侧车不进入最终提示词，正文仍是唯一执行文本；侧车只能证明来源链，不能成为正文写入源。命令示例中的`--decisions`仅是传递官方作者会话的不可变输出，不是自由依据入口；调用者不得新建、编辑、复制或替换该文件。实现无法验证其会话身份、事件链摘要和父稿关系时，新稿不得调用`bind-trace`，必须直接失败。
+新绑定项目的完整`check`、`preview`和`commit`读取`<draft>.authoring.json`，也可用`--authoring-trace`指定，但该侧车必须同时包含本节规定的`provenance_manifest`和`authoring_event_chain`。新稿采用`policy: shot-by-shot-v1`、`version: 4`的逐镜依据字段格式，正文写入协议为`authoring-session-v5`；v4表示侧车字段版本，v5表示正文作者会话协议，两者必须由同一会话绑定。旧v3侧车按原协议检查，不自动转换或改写历史回执。侧车不进入最终提示词，正文仍是唯一执行文本；侧车只能证明来源链，不能成为正文写入源。`bind-trace`的输入必须是官方作者会话输出，调用者不得新建、编辑、复制或替换其中的会话证明和事件链。实现无法验证会话身份、事件链摘要、父稿关系或会话状态时，必须返回结构化错误并停止当前新稿流程。
 
 作者在同一写作阶段形成正文与`units`，每个单元含`draft_key`及按正文顺序排列的`shots`。当前语法使用单元承载草稿，最终边界可在场末集中调整；重组后须核对来源范围、单元起点、镜号、镜头及声音相对时码和侧车镜头键，依据内容不变的部分按实际对应关系保留。每镜必填`shot_key`、`source_records`、`viewing_decision`和`natural_timing`：分别用于镜头定位、镜级来源映射、本镜观看选择的具体依据，以及自然时长与必要声画关系的简述。`viewing_decision`合并原`beat`/`focus_note`的作用，说明当前需要读清的变化、关系或信息，以及取景或切点为何服务这一任务；不能只复述情绪名称、景别或运动手法。`natural_timing`说明实际动作、整次发言或必要观察如何占用时间及其先后或同期关系，不复制整段动作，也不把已分配镜窗反写成自然估时。需要数值估时时，对整次发言保留一处自然估时，跨镜只说明必要分配关系，不另建音频计划。
 
@@ -106,7 +115,7 @@ python <skill>/scripts/storyboard_text_delivery.py render --project <project> --
 
 `unit_organization`使用`policy: prefer_26_30_at_unit_boundaries_v2`，其`units`按正文顺序列`draft_key`。正常26～30秒单元不要求重复时长、分类或达到目标的理由；4～25秒单元填写`reason_code`及具体`reason`。原因代码沿用`scene_boundary`、`selected_range_end`、`merge_exceeds_30`、`incompatible_generation`、`semantic_cut`、`candidate_not_compatible`；存在26～30秒相邻直接组合候选而未选用时，须用后两类说明实际不兼容条件。只读诊断也列出在既有镜间边界移动单元切点的26～30秒时长可能性，这些不表示自然切点已获批准；作者和主审按[单元组织](storyboard-rules.md#单元组织)判断合法性，不只检查原单元能否整体合并。程序不改镜长、不选切点、不重组单元。
 
-`draft_sha256`、`context_sha256`和`source_span`由`bind-trace`依据实际稿件及项目生成。作者会话先保存已经写好的v4依据、`provenance_manifest`和`authoring_event_chain`，再运行该命令另存到新的侧车路径。命令不改正文、原依据、session或审阅，也不生成观看决定或时间依据。默认输出为`<draft>.authoring.json`，已有路径须另存并通过`--authoring-trace`使用，局部范围传同一个`--span`。单镜/单元时长、声源签名及单元时长分类由正文派生，不再重复维护。绑定后仍须完整`preview`与独立审阅，不能以重新绑定摘要代替实际修改和阅读。`timing_distribution_basis`和`transition_distribution_basis`作为历史可选字段继续接受，新稿不因镜长集中或转场重复而必填，也不通过填写它们消除统计警告。
+`draft_sha256`、`context_sha256`和`source_span`由`bind-trace`依据实际稿件及项目生成。作者会话输出必须同时包含作者已经写好的v4依据字段和官方会话产生的`authoring_session_protocol`、`provenance_manifest`、`authoring_event_chain`及其摘要；运行该命令只把这些已存在的证明绑定到新的侧车路径。命令不改正文、原依据、session或审阅，也不生成观看决定或时间依据；`authoring_session.py`只维护会话状态和来源证明，不承载v4创作字段。默认输出为`<draft>.authoring.json`，已有路径须另存并通过`--authoring-trace`使用，局部范围传同一个`--span`。单镜/单元时长、声源签名及单元时长分类由正文派生，不再重复维护。绑定后仍须完整`preview`与独立审阅，不能以重新绑定摘要代替实际修改和阅读。`timing_distribution_basis`和`transition_distribution_basis`作为历史可选字段继续接受，新稿不因镜长集中或转场重复而必填，也不通过填写它们消除统计警告。
 
 ### 作者会话与来源证明
 

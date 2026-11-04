@@ -18,6 +18,7 @@ import batch_naming
 import ratio_profiles
 import storyboard_text as text_core
 import storyboard_authoring_gate
+import authoring_session
 from storyboard_context import (context_hash, scene_context, context_scope,
                                 candidate_context_policy, SCOPED_CONTEXT_POLICY)
 import storyboard_metrics
@@ -27,6 +28,18 @@ from video_header import read as read_header, POLICY as HEADER_POLICY
 
 POLICY = 'scene-text-v1'
 EXPORT_FORMAT = 'ratio-summary-v1'
+
+
+def _load_state(project):
+    """Load a bound project with a stable error for the unbound state."""
+    authoring_session.require_bound(project)
+    try:
+        return d.load(project)
+    except FileNotFoundError as exc:
+        path = Path(project).resolve() / 'session.json'
+        raise authoring_session.AuthoringSessionError(
+            'PROJECT_UNBOUND', f'项目尚未绑定标准剧本和资产：{path}', path=str(path)
+        ) from exc
 
 
 def _candidate_scope(state, draft, authoring_trace, span):
@@ -81,7 +94,9 @@ def check_incremental(project, draft, span=None, authoring_trace=None):
     allocating IDs or changing the default complete-scene validation.
     """
     project, draft = Path(project).resolve(), Path(draft).resolve()
-    state = d.load(project)
+    state = _load_state(project)
+    if state.get('authoring_session_protocol') == authoring_session.PROTOCOL:
+        authoring_session.active(project)
     d.require(state.get('style_hash'), '请先保存本项目风格')
     header = read_header(project, state, required=bool(state.get('header_hash')))
     ratio = get_ratio(project, state)
@@ -123,14 +138,24 @@ def now():
 
 
 def bind_trace(project, draft, decisions, output=None, span=None):
-    """Save metadata around authored v4 decisions; never infer creative data."""
+    """Save metadata around authored decisions; never infer creative data.
+
+    A v5-bound project must already have an active authoring session.  The
+    session is read and verified here, then its immutable manifest and event
+    chain are copied into the v4-compatible sidecar envelope.
+    """
     from project_paths import assert_writable
 
     assert_writable(project)
     project, draft, decisions = (Path(value).resolve() for value in (project, draft, decisions))
-    state = d.load(project)
+    state = _load_state(project)
     raw = draft.read_bytes()
     authored = d.read_json(decisions)
+    v5_required = state.get('authoring_session_protocol') == authoring_session.PROTOCOL
+    if v5_required:
+        # Starting a session never creates a draft; binding is the first
+        # operation that may require the completed shot event chain.
+        authoring_session.active(project)
     from continuity import carry_declarations
     from source_references import declarations
     import production_cast as casting
@@ -156,10 +181,35 @@ def bind_trace(project, draft, decisions, output=None, span=None):
         _raise_parsed_diagnostics(text_core.TextValidationError(mapping_errors, units), state)
     bound = storyboard_authoring_gate.bind_metadata(authored, raw, units, context,
                 context_policy=SCOPED_CONTEXT_POLICY)
+    if v5_required:
+        session_report = authoring_session.validate_for_delivery(
+            project, raw, units, actual_span, trace=authored)
+        if session_report.get('status') != 'passed':
+            errors = session_report.get('errors') or [
+                {'code': 'AUTHORING_SESSION_INVALID', 'message': '作者会话未通过交付验证'}]
+            raise authoring_session.AuthoringSessionError(
+                errors[0].get('code', 'AUTHORING_SESSION_INVALID'),
+                errors[0].get('message', '作者会话未通过交付验证'),
+                errors=errors,
+            )
+        bound.update(
+            authoring_session_protocol=authoring_session.PROTOCOL,
+            provenance_manifest=session_report['provenance_manifest'],
+            authoring_event_chain=session_report['authoring_event_chain'],
+            authoring_event_chain_sha256=session_report['authoring_event_chain_sha256'],
+        )
     target = safe_output(state, project, output or storyboard_authoring_gate.trace_path(draft),
                          (draft, decisions))
     d.require(draft.read_bytes() == raw and context_hash(state, project, scope=scope) == context,
               '绑定期间输入发生变化，请重新读取')
+    if v5_required:
+        # Recheck the append-only session at the write boundary so a concurrent
+        # event or draft change cannot produce a stale provenance sidecar.
+        final_session = authoring_session.validate_for_delivery(
+            project, raw, units, actual_span)
+        d.require(final_session.get('status') == 'passed', '绑定期间作者会话变化，请重新读取')
+        d.require(final_session['provenance_manifest'] == bound['provenance_manifest'],
+                  '绑定期间作者来源证明变化，请重新读取')
     write_preview(target, (json.dumps(bound, ensure_ascii=False, indent=2) + '\n').encode('utf-8'))
     return {'status': 'bound', 'authoring_trace': str(target),
             'draft_sha256': bound['draft_sha256'], 'context_sha256': context,
@@ -174,7 +224,7 @@ def digest(value):
 def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
             authoring_trace=None):
     project, draft = Path(project).resolve(), Path(draft).resolve()
-    state = d.load(project)
+    state = _load_state(project)
     d.require(state.get('style_hash'), '请先保存本项目风格')
     header = read_header(project, state, required=bool(state.get('header_hash')))
     header_policy = HEADER_POLICY if header is not None else d.HEADER_POLICY
@@ -601,7 +651,7 @@ def _recover_committed(project, state, receipt, draft, output, span, replace_ids
         d.require(hashlib.sha256(rendered.encode('utf-8')).hexdigest() == receipt['output_sha256'],
                   '历史回执与原交付内容摘要不一致')
     # Recheck the saved receipt and both caller-owned inputs at the write boundary.
-    current = d.load(project)
+    current = _load_state(project)
     d.require(next((r for r in current['receipts'] if r['request_id'] == receipt['request_id']), None) == receipt,
               '恢复期间历史回执变化，请重读后重试')
     d.require(hashlib.sha256(Path(draft).read_bytes()).hexdigest() == draft_hash, '恢复期间作者稿变化')
@@ -622,7 +672,7 @@ def commit(project, draft, request_id, review, output, span=None,
     assert_writable(project)
     project = Path(project).resolve()
     d.require(isinstance(request_id, str) and request_id.strip(), 'request_id不能为空')
-    current = d.load(project)
+    current = _load_state(project)
     prior = next((r for r in current['receipts'] if r['request_id'] == request_id), None)
     if prior is not None:
         return _recover_committed(project, current, prior, draft, output, span,
@@ -734,8 +784,12 @@ def commit(project, draft, request_id, review, output, span=None,
         d.save(project, working)
     d.atomic_text(target, rendered)
     event(project, 'delivered', note=request_id)
+    session_close = None
+    if state.get('authoring_session_protocol') == authoring_session.PROTOCOL:
+        session_close = authoring_session.close(project, info['draft_sha256'])
     return {'status': 'committed', 'output': str(target), 'ids': [u['id'] for u in units],
             'names': [u['display_name'] for u in units], 'canvas_sync': 'not_requested',
+            **({'authoring_session': session_close} if session_close else {}),
             **d.receipt_summary(receipt)}
 
 
@@ -815,7 +869,7 @@ def main():
             result = commit(args.project, args.draft, args.request_id, args.review, args.output,
                             args.span, args.replace_ids, args.range_confirmation, args.authoring_trace)
         elif args.command == 'render':
-            state = d.load(args.project)
+            state = _load_state(args.project)
             receipt = next((r for r in state['receipts'] if r['request_id'] == args.request_id), None)
             d.require(receipt is not None, '提交记录不存在')
             target = safe_output(state, args.project, args.output)
@@ -837,7 +891,10 @@ def main():
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (ValueError, OSError, KeyError, TypeError) as exc:
         result = {'status': 'error', 'message': str(exc)}
-        if isinstance(exc, storyboard_authoring_gate.AuthoringGateError):
+        if isinstance(exc, authoring_session.AuthoringSessionError):
+            result['code'] = exc.code
+            result.update(exc.details)
+        elif isinstance(exc, storyboard_authoring_gate.AuthoringGateError):
             result['errors'] = getattr(exc, 'errors', exc.report.get('errors', []))
             result['authoring_gate'] = exc.report
         elif isinstance(exc, text_core.TextValidationError):
