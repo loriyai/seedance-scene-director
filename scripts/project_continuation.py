@@ -152,9 +152,14 @@ def resume(project, state=None):
             point.update(stage='delivered', committed_request_id=completed['request_id'],
                          output=completed['output'])
         if point['stage'] == 'passed_pending_delivery':
-            from storyboard_context import context_hash
+            from storyboard_context import context_hash, context_scope, SCOPED_CONTEXT_POLICY
             report = read(paths.resolve(project, point['artifacts']['review']['path']))
-            current = context_hash(state, project)
+            snapshot = read(paths.resolve(project, point['artifacts']['context']['path']))
+            scope = None
+            if snapshot.get('versions', {}).get('context_policy') == SCOPED_CONTEXT_POLICY:
+                trace = {**snapshot, 'policy': 'shot-by-shot-v1', 'version': 4}
+                scope = context_scope(state, snapshot['span'], trace)
+            current = context_hash(state, project, scope=scope)
             bridge = review_bridge(project, point['artifacts']['draft']['sha256'], current)
             point['ready_for_commit'] = report['context_sha256'] == current or bool(bridge)
             if not point['ready_for_commit']:

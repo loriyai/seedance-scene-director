@@ -178,7 +178,7 @@ class SceneTextPerformanceTests(unittest.TestCase):
         self.fx.draft.write_bytes(original_draft)
 
     def test_preview_context_drift_is_rejected_before_write_or_event(self):
-        context = delivery.context_hash(d.load(self.fx.project), self.fx.project)
+        context = d.read_json(gate.trace_path(self.fx.draft))['context_sha256']
         with patch.object(delivery, 'context_hash', side_effect=[context, 'changed-context']):
             with self.assertRaisesRegex(ValueError, '上下文在预览期间变化'):
                 delivery.preview(self.fx.project, self.fx.draft)

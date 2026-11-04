@@ -148,6 +148,8 @@ def job_total(job):
         # Old manifests did not freeze the eligible target count. Do not infer
         # it from all files or rescan today's changed/missing folder as history.
         return job["options"].get("image_target_count")
+    if job["session"].get("_canvas_asset_keys"):
+        return len(job["session"]["_canvas_asset_keys"])
     ledger = job["session"]["ledger"]
     return (sum(item.get("visual_mode") != "prompt_only" for item in ledger.get("characters", []))
             + len(ledger.get("scene_assets", [])) + len(ledger.get("props", [])))
@@ -164,6 +166,8 @@ def input_scope(session, kind, selected_ids):
     # Appending a new range does not invalidate an already frozen sync job.
     scope = {k: session.get(k) for k in
              ("files", "drafts", "style_hash", "header_hash", "header_policy", "ledger", "video_style")}
+    if session.get("_canvas_transfer"):
+        scope["canvas_transfer"] = session["_canvas_transfer"]
     if kind in ("videos", "references"):
         units = {u["id"]: u for u in session["units"]}
         d.require(all(i in units for i in selected_ids), "任务分镜已被移除")
@@ -174,6 +178,9 @@ def input_scope(session, kind, selected_ids):
 def frozen_input_scope(project, session, job):
     """Keep a frozen job digest while checking relocated inputs by content."""
     from project_paths import read_metadata, resolve
+    if job['options'].get('transfer'):
+        from canvas_transfer import project_session
+        session = project_session(project, session, job['options']['transfer'], job['kind'], job['options']['ids'])
     scope = input_scope(session, job['kind'], job['options']['ids'])
     if read_metadata(project):
         scope = copy.deepcopy(scope)
@@ -186,7 +193,7 @@ def frozen_input_scope(project, session, job):
 
 
 def enqueue(project, kind, request_id=None, ids=None, folder=None, decisions=None,
-            start=False, existing_only=False, references_only=False):
+            start=False, existing_only=False, references_only=False, transfer=None):
     project = Path(project).resolve()
     d.require(kind in ("assets", "videos", "references", "images"), "不支持的后台任务类型")
     d.require(project != d.ROOT and d.ROOT not in project.parents, "项目不能位于Skill安装目录")
@@ -196,6 +203,10 @@ def enqueue(project, kind, request_id=None, ids=None, folder=None, decisions=Non
     selected = [u["id"] for u in c.selected_units(session, request_id, ids)] if kind in ("videos", "references") else []
     options = {"request_id": request_id, "ids": selected, "decisions": decisions or {},
                "existing_only": existing_only or kind == "references", "references_only": references_only or kind == "references"}
+    if transfer is not None:
+        from canvas_transfer import reference, project_session
+        options["transfer"] = reference(transfer)
+        session = project_session(project, session, options["transfer"], kind, selected)
     if kind in ("assets", "videos", "references"):
         options["sync_protocol"] = c.BATCH_PROTOCOL
     if kind == "images":
@@ -276,6 +287,9 @@ class JobInputGuard:
         if "source" in files:
             scenes = resolve(self.project, files['source']['path']).parent / 'scenes'
             paths.extend([scenes, *scenes.glob("*.txt")])
+        if self.job["options"].get("transfer"):
+            from canvas_transfer import watched_paths
+            paths.extend(watched_paths(self.project, self.job["options"]["transfer"]))
         if self.job["kind"] == "images":
             folder = Path(self.job["options"]["folder"])
             # Watching directories detects added/renamed files without rehashing
@@ -663,11 +677,9 @@ def recover_dead_operation_locks(project):
     if binding:
         paths.append(Path(tempfile.gettempdir()) / ("seedance-canvas-" + c.digest([binding["account_id"], binding["canvas_id"]]) + ".lock"))
     for path in paths:
-        if path.exists():
-            raw = path.read_text(encoding="utf-8")
-            d.require(raw.strip().isdigit(), "旧操作锁格式异常，需人工检查")
-            if not alive(int(raw)) and path.read_text(encoding="utf-8") == raw:
-                path.unlink()  # Only a provably dead PID; journal recovery still runs before writes.
+        # The CLI adapter owns the lock format and process birth identity.
+        # Journal recovery still runs before any resumed remote write.
+        c.recover_operation_lock(path, alive)
 
 
 def run_job(project, manifest, check_control, progress):
@@ -806,6 +818,7 @@ def main():
     parser.add_argument("--ids", nargs="+")
     parser.add_argument("--folder", type=Path)
     parser.add_argument("--decisions", type=Path)
+    parser.add_argument("--transfer", type=Path)
     parser.add_argument("--start", action="store_true")
     parser.add_argument("--choice", choices=("1", "2"))
     parser.add_argument("--event-id")
@@ -820,7 +833,7 @@ def main():
     try:
         if args.command == "enqueue":
             result = enqueue(args.project, args.kind, args.request_id, args.ids, args.folder,
-                             read(args.decisions) if args.decisions else None, args.start)
+                             read(args.decisions) if args.decisions else None, args.start, transfer=args.transfer)
         elif args.command == "recover-assets":
             d.require(args.operation_id, "恢复必须指定原操作ID")
             result = recover_assets(args.project, args.operation_id, args.apply, args.fingerprint)

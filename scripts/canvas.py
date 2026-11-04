@@ -240,11 +240,92 @@ def save(project, state):
     d.write_json(state_path(project), state)
 
 
+def process_start_identity(pid):
+    """Return a process birth identity, or None when it cannot be verified."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+        kernel.GetProcessTimes.restype = wintypes.BOOL
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            created, exited, system, user = (wintypes.FILETIME() for _ in range(4))
+            if not kernel.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
+                                          ctypes.byref(system), ctypes.byref(user)):
+                return None
+            return "windows:" + str((created.dwHighDateTime << 32) | created.dwLowDateTime)
+        finally:
+            kernel.CloseHandle(handle)
+    if sys.platform.startswith("linux"):
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+            start_ticks = stat[stat.rfind(")") + 2:].split()[19]
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            return f"linux:{boot}:{start_ticks}"
+        except (OSError, IndexError):
+            return None
+    return None
+
+
+def _remove_owned_operation_lock(path, expected):
+    """Do not remove a lock whose saved ownership has changed."""
+    try:
+        if path.read_text(encoding="utf-8") != expected:
+            return False
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def recover_operation_lock(path, process_alive):
+    """Recover a dead owner; unknown identity and live legacy PIDs stay locked."""
+    path = Path(path)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    text = raw.strip()
+    if text.isdigit() and int(text) > 0:
+        pid, recorded_start = int(text), None
+    else:
+        try:
+            owner = json.loads(text)
+        except (ValueError, TypeError):
+            owner = None
+        valid = (isinstance(owner, dict) and owner.get("policy") == "canvas-operation-lock-v1"
+                 and isinstance(owner.get("pid"), int) and not isinstance(owner["pid"], bool)
+                 and owner["pid"] > 0 and isinstance(owner.get("owner_token"), str)
+                 and bool(owner["owner_token"].strip())
+                 and (owner.get("process_start") is None or
+                      isinstance(owner["process_start"], str) and bool(owner["process_start"].strip())))
+        if not valid:
+            fail("LOCK_OWNER_INVALID", "操作锁归属格式无法确认；已保留锁，需核对原进程与日志。")
+        pid, recorded_start = owner["pid"], owner.get("process_start")
+    stale = not process_alive(pid)
+    if not stale and recorded_start is not None:
+        current_start = process_start_identity(pid)
+        stale = current_start is not None and current_start != recorded_start
+    return _remove_owned_operation_lock(path, raw) if stale else False
+
+
 @contextlib.contextmanager
 def project_lock(project):
     directory = Path(project) / "canvas"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "operation.lock"
+    pid = os.getpid()
+    owner = json.dumps({"policy": "canvas-operation-lock-v1", "pid": pid,
+                        "process_start": process_start_identity(pid),
+                        "owner_token": uuid.uuid4().hex}, sort_keys=True)
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
@@ -252,7 +333,7 @@ def project_lock(project):
     canvas_lock = None
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(str(os.getpid()))
+            handle.write(owner)
         binding = read_state(project).get("binding")
         if binding:
             canvas_lock = Path(tempfile.gettempdir()) / ("seedance-canvas-" + digest([binding["account_id"], binding["canvas_id"]]) + ".lock")
@@ -262,12 +343,12 @@ def project_lock(project):
                 canvas_lock = None
                 fail("BUSY", "该画布已有CLI批量操作正在进行，请稍后续接。")
             with os.fdopen(shared_fd, "w", encoding="utf-8") as handle:
-                handle.write(str(os.getpid()))
+                handle.write(owner)
         yield
     finally:
         if canvas_lock:
-            canvas_lock.unlink(missing_ok=True)
-        path.unlink(missing_ok=True)
+            _remove_owned_operation_lock(canvas_lock, owner)
+        _remove_owned_operation_lock(path, owner)
 
 
 def normalize_team_id(value):
@@ -988,6 +1069,10 @@ def desired_assets(session):
         ordered.append(by_key[key])
     for item in result:
         visit(item["key"])
+    keys = session.get("_canvas_asset_keys")
+    if keys is not None:
+        d.require(set(keys) <= set(by_key), "同步资产范围包含未知图片资产")
+        ordered = [item for item in ordered if item["key"] in keys]
     return ordered
 
 
@@ -1369,7 +1454,8 @@ def desired_videos(session, state, doc, units, bind_references=False, failures=N
                                 "unit_ids": [unit["id"]], **black_issue})
         convert = reference_renderer(unit_refs, [*d.reference_catalog(session).values(), "黑幕"])
         try:
-            prompt = d.render_unit(session, unit, reference_text=convert if flags[unit["id"]] else None)
+            from canvas_transfer import render_unit as render_transfer_unit
+            prompt = render_transfer_unit(session, unit, reference_text=convert if flags[unit["id"]] else None)
             if edge_only_black(unit):
                 d.require(black_prompt_absent(prompt, black), "独立黑幕引用不能出现在提示词正文中")
         except (ValueError, KeyError, TypeError) as exc:
@@ -1380,7 +1466,7 @@ def desired_videos(session, state, doc, units, bind_references=False, failures=N
         reference_keys = set(unit_asset_ids(session, unit))
         if edge_only_black(unit) or "@黑幕" in prompt or unit_refs.get("黑幕") and unit_refs["黑幕"] in prompt:
             reference_keys.add("BLACK")
-        wanted.append({"key": unit["id"], "name": unit.get("display_name", unit["id"]), "kind": "video", "version": unit["version"],
+        wanted.append({"key": unit["id"], "name": session.get("_canvas_transfer", {}).get("aliases", {}).get(unit["id"], unit.get("display_name", unit["id"])), "kind": "video", "version": unit["version"],
                        "duration": unit["duration"], "prompt": prompt, "references_bound": flags[unit["id"]],
                        **({"video_ratio": unit["video_ratio"]} if "video_ratio" in unit else {}),
                        **({"ratio_profile": unit["ratio_profile"]} if unit.get("ratio_profile") else {}),

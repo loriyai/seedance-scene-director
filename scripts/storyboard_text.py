@@ -367,19 +367,28 @@ def _check(units, state, *, allow_partial_tail=False, _diagnostics=()):
                      f"{key}：单元来源范围不连续/重复；仅允许相邻单元共享一条边界来源记录")
         previous_last = b
         expected_sets = list(dict.fromkeys(scenes[sid]["scene_asset_id"] for sid in unit["scene_ids"]))
-        if unit["set_ids"] != expected_sets:
+        local_refs = unit.get('source_references', [])
+        set_refs = [r for r in local_refs if r['asset_id'].startswith('SET')]
+        allowed_sets = set(expected_sets) | {r['asset_id'] for r in set_refs}
+        each_scene = all(set(unit['set_ids']) & ({scenes[sid]['scene_asset_id']} |
+                         {r['asset_id'] for r in set_refs if r['scene_id'] == sid})
+                         for sid in unit['scene_ids'])
+        if ((not set_refs and unit["set_ids"] != expected_sets)
+                or not set(unit['set_ids']) <= allowed_sets or not each_scene):
             errors.append({'code': 'SCENE_REFERENCE_LIST', 'unit': key,
                            'message': f"{key}：场景SET名单与来源场次及顺序不一致"})
         allowed_chars = set().union(*(_scene_characters(scenes[sid]) for sid in unit["scene_ids"]))
         allowed_props = set().union(*(set(scenes[sid].get("prop_ids", [])) for sid in unit["scene_ids"]))
         allowed_props.update(row['asset_id'] for row in unit.get('continuity_props', []))
+        allowed_props.update(row['asset_id'] for row in local_refs if row['asset_id'].startswith('PROP'))
+        allowed_chars.update(row["asset_id"] for row in unit.get("production_cast", []))
         if not set(unit["character_ids"]) <= allowed_chars:
             errors.append({'code': 'CHARACTER_REFERENCE_SCOPE', 'unit': key,
                            'message': f"{key}：人物名单包含不属于来源场次的资产"})
-        if not set(unit["character_ids"] + expected_sets) <= set(assets):
+        if not set(unit["character_ids"] + unit["set_ids"]) <= set(assets):
             errors.append({'code': 'UNKNOWN_LISTED_ASSET', 'unit': key,
                            'message': f"{key}：人物/场景名单存在未知资产"})
-        allowed = set(unit["character_ids"]) | set(expected_sets) | allowed_props
+        allowed = set(unit["character_ids"]) | set(unit["set_ids"]) | allowed_props
         used = _refs(unit["global"], key + "人物站位")
         used += _refs(unit["time"] + unit["weather"], key + "时间天气")
         cursor, speech_end, local_dialogue = 0, 0, []
@@ -399,12 +408,16 @@ def _check(units, state, *, allow_partial_tail=False, _diagnostics=()):
                              and part["voice"] == "非人物播报", f"{key}/{rid}：非人物播报声源与原文不一致")
                 else:
                     ids = part.get("character_ids", [part.get("character_id")])
+                    from production_cast import voice_actor
+                    actor = voice_actor(unit, record, assets)
+                    if actor:
+                        valid_speaker = ids == [actor['asset_id']]
+                    else:
+                        valid_speaker = (all(cid in _scene_characters(scenes[record["scene"]]) for cid in ids)
+                            and "、".join(_speaker(assets[cid], record["scene"]) for cid in ids if cid in assets) == record["speaker"])
                     _require(isinstance(ids, list) and ids and len(ids) == len(set(ids))
-                             and all(cid in unit["character_ids"]
-                                     and cid in _scene_characters(scenes[record["scene"]])
-                                     and cid in assets for cid in ids)
-                            and "、".join(_speaker(assets[cid], record["scene"]) for cid in ids) == record["speaker"],
-                             f"{key}/{rid}：台词说话人与来源台账不一致")
+                             and all(cid in unit["character_ids"] and cid in assets for cid in ids)
+                             and valid_speaker, f"{key}/{rid}：台词说话人与来源台账或已授权制作对应不一致")
                     used.extend(ids)
                 _require("@" not in part["direction"], f"{key}/{rid}：语气括注只写声音表现，不写资产引用")
                 t0, t1 = Decimal(str(part["start"])), Decimal(str(part["end"]))
@@ -428,7 +441,7 @@ def _check(units, state, *, allow_partial_tail=False, _diagnostics=()):
             errors.append({'code': 'ASSET_REFERENCE_SCOPE', 'unit': key, 'assets': missing,
                            'message': f"{key}：引用资产不存在、未列入人物名单或不属于来源场次：{missing}"})
         unit["prop_ids"] = list(dict.fromkeys(aid for aid in used if aid.startswith("PROP")))
-        unit["asset_ids"] = list(dict.fromkeys(unit["character_ids"] + expected_sets + unit["prop_ids"]))
+        unit["asset_ids"] = list(dict.fromkeys(unit["character_ids"] + unit["set_ids"] + unit["prop_ids"]))
     for issue in character_reference_issues(state, units):
         place = '人物站位' if issue['field'] == 'global' else f'镜头{issue["shot"]}正文'
         errors.append({**issue, 'message': f'{issue["unit"]}/{place}：{issue["code"]}（{issue["mention"]}）；{issue["message"]}'})
@@ -493,13 +506,17 @@ def _slice_state(state, source_span):
     return dict(state, records=clipped)
 
 
-def parse(text, state, source_span=None, *, continuity_props=None):
+def parse(text, state, source_span=None, *, continuity_props=None, source_references=None, production_cast=None):
     """Return checked metadata derived solely from author text and bound state."""
-    context = _slice_state(state, source_span)
+    import production_cast as casting
+    context = casting.context(_slice_state(state, source_span), production_cast or [])
     diagnostics = []
     units = _parse_units(text, context, _diagnostics=diagnostics)
     from continuity import apply_carry_props
     apply_carry_props(state, units, continuity_props or [])
+    from source_references import apply
+    apply(context, units, source_references or [])
+    casting.apply(context, units, production_cast or [])
     _check(units, context, _diagnostics=diagnostics)
     if source_span is not None:
         _require([units[0]["span"][0], units[-1]["span"][1]] == list(source_span),
@@ -507,7 +524,7 @@ def parse(text, state, source_span=None, *, continuity_props=None):
     return units
 
 
-def parse_incremental(text, state, source_span=None, *, continuity_props=None):
+def parse_incremental(text, state, source_span=None, *, continuity_props=None, source_references=None, production_cast=None):
     """Inspect only an authored scene prefix, without completing any content.
 
     A final spoken fragment may stop at an exact source prefix and the last
@@ -515,11 +532,15 @@ def parse_incremental(text, state, source_span=None, *, continuity_props=None):
     delivery constraint is relaxed: callers must use the full route before
     preview/review.  Source clipping here is a read-only validation view.
     """
-    context = _slice_state(state, source_span)
+    import production_cast as casting
+    context = casting.context(_slice_state(state, source_span), production_cast or [])
     diagnostics = []
     units = _parse_units(text, context, _diagnostics=diagnostics)
     from continuity import apply_carry_props
     apply_carry_props(state, units, continuity_props or [])
+    from source_references import apply
+    apply(context, units, source_references or [])
+    casting.apply(context, units, production_cast or [])
     records, record_map, _, _ = _context(context)
     scene_ids = {sid for unit in units for sid in unit['scene_ids']}
     _require(len(scene_ids) == 1, "增量检查只允许当前单场的连续前缀")
@@ -552,6 +573,8 @@ def validate(state, units):
     _require(all(isinstance(u, dict) and isinstance(u.get("source_text"), str) for u in units), "分镜单元缺少唯一作者文本source_text")
     _require(all(isinstance(u.get("span"), list) and len(u["span"]) == 2 for u in units), "分镜单元缺少有效span")
     from continuity import unit_carry_props
+    from source_references import from_units
+    import production_cast as casting
     text = "\n".join(u["source_text"] for u in units)
     span = [units[0]["span"][0], units[-1]["span"][1]]
     saved = list(state.get('units', []))
@@ -559,27 +582,39 @@ def validate(state, units):
     if all(unit in saved for unit in units):
         # Historical projections keep their accepted references even if an
         # earlier anchor has subsequently acquired a new production version.
-        context = _slice_state(state, span)
+        context = casting.context(_slice_state(state, span), casting.from_units(units))
         fresh = _parse_units(text, context)
         for unit, current in zip(units, fresh):
             if unit.get('continuity_props'):
                 import copy
                 current['continuity_props'] = copy.deepcopy(unit['continuity_props'])
+            if unit.get('source_references'):
+                import copy
+                current['source_references'] = copy.deepcopy(unit['source_references'])
+            if unit.get('production_cast'):
+                import copy
+                current['production_cast'] = copy.deepcopy(unit['production_cast'])
         _check(fresh, context)
     else:
-        fresh = parse(text, state, source_span=span, continuity_props=unit_carry_props(units))
+        fresh = parse(text, state, source_span=span, continuity_props=unit_carry_props(units),
+                      source_references=from_units(units), production_cast=casting.from_units(units))
     _require(len(fresh) == len(units), "作者文本单元数与缓存不一致")
     for unit, current in zip(units, fresh):
         for field in PROJECTION_FIELDS:
             _require(unit.get(field) == current.get(field), f'{current["draft_key"]}：派生字段{field}与作者文本不一致；请重新parse')
         _require(unit.get('continuity_props') == current.get('continuity_props'),
                  f'{current["draft_key"]}：跨场道具声明与当前候选不一致')
+        _require(unit.get('source_references') == current.get('source_references'),
+                 f'{current["draft_key"]}：来源引用声明与当前候选不一致')
+        _require(unit.get('production_cast') == current.get('production_cast'),
+                 f'{current["draft_key"]}：制作人物对应与当前候选不一致')
     return _summary(state, fresh)
 
 
-def _parse_for_delivery(text, state, source_span=None, *, continuity_props=None):
+def _parse_for_delivery(text, state, source_span=None, *, continuity_props=None, source_references=None, production_cast=None):
     """Use only the result just parsed here; no caller-supplied cache is trusted."""
-    units = parse(text, state, source_span=source_span, continuity_props=continuity_props)
+    units = parse(text, state, source_span=source_span, continuity_props=continuity_props,
+                  source_references=source_references, production_cast=production_cast)
     return units, _summary(state, units)
 
 
@@ -884,6 +919,12 @@ def _require_render_authorization(state, unit, authoring_gate=None):
     _require(isinstance(draft_key, str) and any(
         str(key).startswith(draft_key + "#") for key in shot_keys),
              "渲染单元未包含在当前逐镜写作闸门结果中；请重新prepare并逐镜复审")
+    import production_cast as casting
+    _require(unit.get('production_cast', []) == casting.project(gate.get('production_cast', []), unit),
+             '渲染单元的制作人物对应未绑定当前作者闸门')
+    from source_references import project
+    _require(unit.get('source_references', []) == project(gate.get('source_references', []), unit),
+             '渲染单元的来源引用声明未绑定当前作者闸门')
     if unit.get('continuity_props'):
         expected = [row for row in gate.get('continuity_props', []) if row['scene_id'] in unit['scene_ids']]
         _require(unit['continuity_props'] == expected, '渲染单元的跨场道具声明未绑定当前作者闸门')
@@ -900,6 +941,9 @@ def _render_unit(state, unit, context_data, reference_text=None, *, authoring_ga
     _require_render_authorization(state, unit, authoring_gate)
     import director as d
     import ratio_profiles
+    import production_cast as casting
+    if unit.get("production_cast"):
+        context_data = _context(casting.context(state, unit["production_cast"]))
     parsed = _parse_units(unit["source_text"], state, _context_data=context_data)
     _require(len(parsed) == 1, "单元source_text须恰好包含一个单元")
     authored = parsed[0]
@@ -952,6 +996,9 @@ def _render_unit(state, unit, context_data, reference_text=None, *, authoring_ga
         for part in shot["dialogue_parts"]:
             if part.get("source_kind") == "non_character":
                 source = part["source_label"]
+            elif casting.voice_actor(unit, record_map[part['record']][1], assets):
+                # A selected production body never replaces the original generic attribution.
+                source = record_map[part['record']][1]['speaker']
             elif "character_ids" in part:
                 # Joint speech remains one source event and one verbatim line.
                 # Stable IDs are validated and retained in the character list;

@@ -3,7 +3,7 @@
   "bundle_format": 1,
   "files": {
     "INSTRUCTIONS.md": "8e01ec419b378bf2ed262400f32578c2238dfe6268aa4f7b9766c22e0f85799f",
-    "references/asset-ledger.md": "1149f30c8ca1092c1c3001c8c0b7e5dfdae5800c06bc6823a3376d479ae8b13c",
+    "references/asset-ledger.md": "5f46567d4b2b72905708a4b2cb4e1a6bbaef113836214d4556d9b9a6fa473685",
     "scripts/asset_impact.py": "5a2e28caa09468111fcbc2609f0e346cd0efbede20f4d12111e6d23531e6de8c",
     "scripts/asset_ledger.py": "7490f921371790563214c865bcc3c2b0e16e4aac201f78ed09ebb2506f805754",
     "scripts/asset_migrate.py": "a8be18a62268c80d11c4a827d9e0a94d40c03ba777e44b1f2024e41cf35200af",

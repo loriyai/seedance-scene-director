@@ -591,7 +591,9 @@ class TraceBindingIntegrationTest(unittest.TestCase):
         self.assertEqual(bound['units'], self.decisions_data['units'])
         self.assertEqual(bound['unit_organization'], self.decisions_data['unit_organization'])
         self.assertEqual(bound['draft_sha256'], hashlib.sha256(self.fixture.draft.read_bytes()).hexdigest())
-        self.assertEqual(bound['context_sha256'], delivery.context_hash(director.load(self.project), self.project))
+        state = director.load(self.project)
+        self.assertEqual(bound['context_sha256'], delivery.context_hash(state, self.project,
+            scope=delivery.context_scope(state, bound['source_span'], bound)))
         units = text_core.parse(self.fixture.draft.read_text(encoding='utf-8'), director.load(self.project))
         self.assertEqual(bound['source_span'], [units[0]['span'][0], units[-1]['span'][1]])
 

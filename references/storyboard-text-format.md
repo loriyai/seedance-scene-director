@@ -4,6 +4,8 @@
 
 `video_ratio`由项目设置统一提供，并在新单元旁冻结对应的`ratio_profile`、版本和摘要：`16:9`绑定`landscape-v1`，`9:16`绑定`portrait-v1`。这些字段属于交付元数据，不进入作者TXT语法、镜头正文或提示词输出；作者依据当前比例配置把构图和运镜落实到实际正文。历史单元可以没有画幅配置字段，读取、渲染和回执导出继续沿用其原协议；替换历史单元时不静默迁移比例。
 
+新 `scene-text-v1` 的正文只能由官方 `authoring-session-v5` 写作者会话创建或修订。本文件定义文本语法、来源证明的绑定方式和提交校验；任何脚本、批处理、包装器、模型调用或修补入口都不得把 creative fields 写入、改写或批量重排作者TXT。没有完整来源证明的旧稿保留为`untrusted_legacy`，只能按其历史协议读取，不能通过重新绑定伪装成新稿。
+
 ```text
 ## SC0001 / u01 / L000003-L000005
 人物：@{CHAR0001}；
@@ -70,7 +72,7 @@ python <skill>/scripts/director.py range --project <project> --start <起点整�
 ## 按场只读上下文
 
 ```text
-python <skill>/scripts/storyboard_text_delivery.py context --project <project> --scene <SC…> [--authoring-trace <v4依据.json>]
+  python <skill>/scripts/storyboard_text_delivery.py context --project <project> --scene <SC…> [--authoring-trace <authoring-session-v5侧车.json>]
 ```
 
 默认导出一整场；明确局部范围时传入已定位的同一个 `--span START END`，不扩大用户选择。JSON stdout含本场来源记录与标准稿原行、合法资产ID及相关外观设计、已保存风格、绑定文件摘要与当前 `context_sha256`。引用集合与文本解析器共用同一实现，包含本场已登记的形象转换与prompt_only人物；合法引用不代表该形象在任意时刻都适用。局部导出同时保留完整记录作为阅读上下文，`selected_text/selected_span`给出准确选区；不能据完整记录扩大创作范围。
@@ -81,22 +83,22 @@ python <skill>/scripts/storyboard_text_delivery.py context --project <project> -
 
 ## 文本分镜接口
 
-入口为 `scripts/storyboard_text_delivery.py`，内部调用文本解析器和新项目的`shot-by-shot-v1`作者闸门；不运行旧authoring gates、review_gate或效果编译。作者侧车不改变`scene-text-v1`最终TXT模板，默认路径为`<draft>.authoring.json`，也可用`--authoring-trace`显式指定。旧项目和历史回执仍按原协议读取；历史回执重导出须核对项目中保存的完整回执，替换后的旧单元也只能沿该已保存回执读取。
+入口为 `scripts/storyboard_text_delivery.py`，内部调用文本解析器和新项目的`shot-by-shot-v1`作者闸门；不运行旧authoring gates、review_gate或效果编译。作者侧车不改变`scene-text-v1`最终TXT模板，默认路径为`<draft>.authoring.json`，也可用`--authoring-trace`显式指定，但新稿的侧车必须由`authoring-session-v5`事件链派生。旧项目和历史回执仍按原协议读取；历史回执重导出须核对项目中保存的完整回执，替换后的旧单元也只能沿该已保存回执读取。
 
 ```text
 python <skill>/scripts/storyboard_text_delivery.py check --project <project> --draft <draft.txt> [--authoring-trace <trace.json>]
-python <skill>/scripts/storyboard_text_delivery.py bind-trace --project <project> --draft <draft.txt> --decisions <已写好的依据.json> [--output <新侧车.json>] [--span START END]
+python <skill>/scripts/storyboard_text_delivery.py bind-trace --project <project> --draft <draft.txt> --decisions <authoring-session-v5不可变输出.json> [--output <新侧车.json>] [--span START END]
 python <skill>/scripts/storyboard_text_delivery.py check --incremental --project <project> --draft <draft.txt>
 python <skill>/scripts/storyboard_text_delivery.py preview --project <project> --draft <draft.txt> [--authoring-trace <trace.json>]
 python <skill>/scripts/storyboard_text_delivery.py commit --project <project> --draft <draft.txt> --request-id <本次唯一ID> --review <场级审阅.json> --output <新交付.txt> [--authoring-trace <trace.json>]
 python <skill>/scripts/storyboard_text_delivery.py render --project <project> --request-id <已提交ID> --output <新导出.txt>
 ```
 
-新绑定项目的完整`check`、`preview`和`commit`读取`<draft>.authoring.json`，也可用`--authoring-trace`指定。新稿采用`policy: shot-by-shot-v1`、`version: 4`的精简侧车；旧v3侧车按原协议检查，不自动转换或改写历史回执。侧车不进入最终提示词，正文仍是唯一执行文本。
+新绑定项目的完整`check`、`preview`和`commit`读取`<draft>.authoring.json`，也可用`--authoring-trace`指定，但该侧车必须同时包含本节规定的`provenance_manifest`和`authoring_event_chain`。新稿采用`policy: shot-by-shot-v1`、`version: 4`的侧车字段格式，正文写入协议为`authoring-session-v5`；两者不是同一版本号。旧v3侧车按原协议检查，不自动转换或改写历史回执。侧车不进入最终提示词，正文仍是唯一执行文本；侧车只能证明来源链，不能成为正文写入源。命令示例中的`--decisions`仅是传递官方作者会话的不可变输出，不是自由依据入口；调用者不得新建、编辑、复制或替换该文件。实现无法验证其会话身份、事件链摘要和父稿关系时，新稿不得调用`bind-trace`，必须直接失败。
 
-作者在同一写作阶段形成正文与`units`，每个单元含`draft_key`及按正文顺序排列的`shots`。当前语法使用单元承载草稿，最终边界可在场末集中调整；重组后须核对来源范围、单元起点、镜号、镜头及声音相对时码和侧车镜头键，依据内容不变的部分按实际对应关系保留。每镜必填`shot_key`、`source_records`、`viewing_decision`和`natural_timing`：分别用于镜头定位、镜级来源映射、一条具体观看决定，以及自然时长与必要声画关系的简述。`viewing_decision`合并原`beat`/`focus_note`的作用；`natural_timing`解释实际负荷，不复制整段动作，也不把已分配镜窗当作自然估时。需要数值估时时，对整次发言保留一处自然估时，跨镜只说明必要分配关系，不另建音频计划。
+作者在同一写作阶段形成正文与`units`，每个单元含`draft_key`及按正文顺序排列的`shots`。当前语法使用单元承载草稿，最终边界可在场末集中调整；重组后须核对来源范围、单元起点、镜号、镜头及声音相对时码和侧车镜头键，依据内容不变的部分按实际对应关系保留。每镜必填`shot_key`、`source_records`、`viewing_decision`和`natural_timing`：分别用于镜头定位、镜级来源映射、本镜观看选择的具体依据，以及自然时长与必要声画关系的简述。`viewing_decision`合并原`beat`/`focus_note`的作用，说明当前需要读清的变化、关系或信息，以及取景或切点为何服务这一任务；不能只复述情绪名称、景别或运动手法。`natural_timing`说明实际动作、整次发言或必要观察如何占用时间及其先后或同期关系，不复制整段动作，也不把已分配镜窗反写成自然估时。需要数值估时时，对整次发言保留一处自然估时，跨镜只说明必要分配关系，不另建音频计划。
 
-侧车中的观看决定只说明本镜的具体选择及必要依据，自然时长只说明实际负荷与声画关系。已在正文表达的完整动作、全场通用限制、规则摘抄及逐条防错说明不再逐镜复述。共同条件保留在既有场级工作材料中一次，单镜只补实际差异或例外，保持现有必填字段可独立定位。程序绑定可确定的摘要和镜头键，作者负责创作依据，不能用复制正文或扩写理由代替正文修正。
+侧车保留足以判断当前选择的简短依据，不增加固定理由句式或字数门槛。“推进怒脸”只重述手法和情绪，“自然说完五秒”只复述时长，均不能单独作为有效依据；依据是否成立须结合来源与实际正文阅读，不能再以关键词存在自证。已在正文表达的完整动作、全场通用限制、规则摘抄及逐条防错说明不再逐镜复述。共同条件保留在既有场级工作材料中一次，单镜只补实际差异或例外，保持现有必填字段可独立定位。程序绑定可确定的摘要和镜头键，作者负责创作依据，不能用复制正文或扩写理由代替正文修正。
 
 动作过程、进入相位、执行者、视线对象和切出状态已在正文明确时，不再强制填写`visual_change`、`entry_phase`、`action_phases`、`actor_ids`、`gaze_target`或重复`cut_reason`。必要时可补`cut_reason`；保持、等待或关键变化后仍需观看时，使用一条`continuation_reason`说明对象、仍在发展的内容和结束条件，替代重复的`hold_reason`/`tail_load`。复杂且依赖具体时间的位置可填写`timing_constraints: [{"label":"具体动作或发言阶段","start":0,"end":1.5}]`，时间相对于本镜起点，须完整落在镜窗内；这些区间由作者决定，程序不推断或生成。普通镜头不强制填写动作秒数、观察秒数、小数完成点或同期布尔值，不以观察数值未单列判定没有观看负荷，也不用三项全部相加或取最大值批准真实同期关系。
 
@@ -104,7 +106,17 @@ python <skill>/scripts/storyboard_text_delivery.py render --project <project> --
 
 `unit_organization`使用`policy: prefer_26_30_at_unit_boundaries_v2`，其`units`按正文顺序列`draft_key`。正常26～30秒单元不要求重复时长、分类或达到目标的理由；4～25秒单元填写`reason_code`及具体`reason`。原因代码沿用`scene_boundary`、`selected_range_end`、`merge_exceeds_30`、`incompatible_generation`、`semantic_cut`、`candidate_not_compatible`；存在26～30秒相邻直接组合候选而未选用时，须用后两类说明实际不兼容条件。只读诊断也列出在既有镜间边界移动单元切点的26～30秒时长可能性，这些不表示自然切点已获批准；作者和主审按[单元组织](storyboard-rules.md#单元组织)判断合法性，不只检查原单元能否整体合并。程序不改镜长、不选切点、不重组单元。
 
-`draft_sha256`、`context_sha256`和`source_span`由`bind-trace`依据实际稿件及项目生成。作者将已经写好的v4依据保存到独立JSON后运行该命令，另存到新的侧车路径。命令不改正文、原依据、session或审阅，也不生成观看决定或时间依据。默认输出为`<draft>.authoring.json`，已有路径须另存并通过`--authoring-trace`使用，局部范围传同一个`--span`。单镜/单元时长、声源签名及单元时长分类由正文派生，不再重复维护。绑定后仍须完整`preview`与独立审阅，不能以重新绑定摘要代替实际修改和阅读。`timing_distribution_basis`和`transition_distribution_basis`作为历史可选字段继续接受，新稿不因镜长集中或转场重复而必填，也不通过填写它们消除统计警告。
+`draft_sha256`、`context_sha256`和`source_span`由`bind-trace`依据实际稿件及项目生成。作者会话先保存已经写好的v4依据、`provenance_manifest`和`authoring_event_chain`，再运行该命令另存到新的侧车路径。命令不改正文、原依据、session或审阅，也不生成观看决定或时间依据。默认输出为`<draft>.authoring.json`，已有路径须另存并通过`--authoring-trace`使用，局部范围传同一个`--span`。单镜/单元时长、声源签名及单元时长分类由正文派生，不再重复维护。绑定后仍须完整`preview`与独立审阅，不能以重新绑定摘要代替实际修改和阅读。`timing_distribution_basis`和`transition_distribution_basis`作为历史可选字段继续接受，新稿不因镜长集中或转场重复而必填，也不通过填写它们消除统计警告。
+
+### 作者会话与来源证明
+
+新稿的侧车必须同时包含由官方作者会话派生的`provenance_manifest`和`authoring_event_chain`。`provenance_manifest`至少记录`protocol: authoring-session-v5`、`session_id`、`writer_identity`、`parent_draft_sha256`（首稿为`null`）、准确`scope`、`skill_version`、当前`draft_sha256`及`authoring_event_chain_sha256`；`authoring_event_chain`按正文顺序保存每个创建或修订镜头的`event_id`、`shot_key`、父镜头摘要、新正文摘要、来源记录和事件链摘要。两者必须由同一作者会话产生，不能由自由侧车、复制的JSON或正文摘要事后补造。
+
+`bind-trace`只能从上述会话事件链派生侧车和来源证明；`--authoring-trace`即使指定了路径，也只能读取包含完整来源证明且与当前会话一致的侧车。`check`、`preview`、`commit`、`validate`和`render`必须同时核对当前正文摘要、事件链摘要、父稿摘要、会话身份、范围和侧车摘要。任一项缺失或不一致时，分别返回明确的`PROVENANCE_MISSING`、`AUTHORING_CHAIN_BROKEN`、`EXTERNAL_DRAFT_MUTATION`或等价失败状态，并停止后续预览、提交和新协议导出；不得重新计算摘要、复制侧车或沿用旧预览消除失败。
+
+正文修补只有两种合法形态：`metadata-only`修补，且`draft_sha256`必须不变；或逐镜修订，必须开启新的`authoring-session-v5`，声明上一版摘要为父稿并重新生成事件链、侧车、预览和独立审阅。`repair`、`check`、`preview`和`commit`本身不得写入creative fields。没有来源证明的旧稿只能按历史回执读取并标记`untrusted_legacy`，不得通过`bind-trace`或其他重绑入口升级为受信任的新稿。
+
+上述校验是新稿接口的运行前置条件。当前 CLI 或运行时无法验证会话身份、事件链摘要、父稿关系和会话外修改时，必须返回`IMPLEMENTATION_UNAVAILABLE`或等价失败状态并停止新稿的`preview`、`commit`和画布同步；不得以现有 v4 侧车、自由`decisions`、重新计算摘要或旧预览代替来源证明。历史 receipt 的读取和原协议导出不受此条件影响。
 
 check返回统计、`draft_sha256`、`context_sha256`及`semantic_review: not_performed`。`observations`提供单元时长分布、26～30秒目标摘要、同场来源连续且合计不超过上限的相邻组合候选，以及按镜长分组的摄影措辞统计；候选列表仍是非阻断观察，不自动合并或改稿，但完整作者闸门会要求每个单元提交对应的组织决定，并阻断未证明的短单元或未关闭的可合并候选。摄影统计仅识别镜头开头摄影分句的词面，含混或未识别项明确保留，不能将主体动作、对白或词频当作相机运动的语义证据。preview已包含同版check，同时保存实际排版预览，不占正式编号。同一prepare使用本次实际解析结果、索引及单元候选统计，渲染批次共享当前索引；独立公开校验仍重读作者文本核对派生字段，渲染仍执行当前作者闸门或历史回执授权。预览结束及提交锁内核对相应输入变化，不以缓存代替绑定。不要在预览前后紧邻重复check。只查错误/摘要时单独check即可。默认覆盖所选完整场景；用户明确局部范围时，check/preview/commit传同一个 `--span START END`，使用现有locate/range所得正文坐标，不猜范围。
 
@@ -147,6 +159,56 @@ commit使用现有session保存稳定ID、展示名、范围、版本和receipt�
 文字commit不自动排队Canvas。已明确授权的节点任务按[画布流程](canvas-workflow.md)使用支持文本回执的适配入口。旧receipt继续 `director.py render --project <project> --request-id <旧ID>`；混合项目不要用旧director check/commit提交文字单元。
 
 同一`request_id`的提交重试先核对原回执、实际作者稿、原作者侧车、操作方式、范围及交付路径。核对一致后按原已审版本返回`already_committed`，交付原件缺失时恢复原内容。后续提交导致当前上下文变化，不要求已成功提交的相同稿件重新绑定。重试输入、冻结单元或实际输出存在冲突时保留现场并报错，另存导出使用`render`。首次提交及新的修订请求继续执行完整的当前绑定、检查和独立审阅。
+
+### 上下文绑定与真实影响
+
+新v4的显式`bind-trace`保存`context_policy: selected-content-context-v3`，只读context在`versions.context_policy`返回相同政策；所有正常入口使用同一准确选区和当前声明计算绑定。当前候选所依据的全局来源、完整记录与台账、风格、固定抬头、比例配置、分段计划、入口设置及规则/解析器版本仍完整绑定。
+
+已提交历史只纳入与准确选区相交的全部单元、最近真实前后边界的全部单元、当前`continuity_props`明确引用的单元锚点，以及当前`production_cast`稳定身体键实际关联的已存单元。同边界的多个相关单元全部保留，不按同场排除跨场邻接。相关单元绑定完整保存对象，包含版本和正文；新增更近的邻居或交叉内容同样属于实际变化。只在原最近边界之外且没有声明依赖的无关提交，不改变当前候选绑定，不触发重新出稿、绑定或审阅。
+
+本地手动交付与关联项目历史按实际交叠和最近边界定位，保留相关稿件、输出及已存单元的摘要；无法定位span的旧外部回执保守保留原整体历史绑定。导入清单与实际依赖文件继续完整验证，不能以局部绑定免除文件核验。当前声明的来源证据、资产、授权和稳定身体仍受各自协议约束，不能用同名或同图扩大实体关联。
+
+绑定完成、预览写边界和提交锁内按同一选区与声明重新核验。真实相关输入变化时，先确认影响，更新匹配依据及实际预览，独立主审按差异复核，复用未变且未受影响的阅读；不能只刷新摘要冒充审阅。continuation的待交付核查读取所保存政策、选区和声明，不自动批准。单元正式编号仍由提交分配，预计标题递进本身不等于创作正文变化。
+
+未标`context_policy`的旧侧车和未启用当前逐镜作者政策的旧项目继续`content-context-v2`，不静默转换。新规则或程序代码实际变化仍使未提交旧候选需要一次影响核对及新绑定。已保存回执的导出与同请求重试沿当时冻结协议，不重算当前局部上下文，不改原session摘要或历史审阅。明确新建绑定才启用新政策。
+
+### 精确来源的既有参考
+
+同一标准场内的来源事件实际使用其他既有布景或主要道具，而台账未登记本场引用关系时，v4作者依据可增加顶层`source_references`。它只授予当前候选精确来源记录的引用资格，不修改原文、场头、SC、人物、LOC、资产身份、设计或台账，也不把当前用图自动认作跨场同一实体。需新增或修改资产时仍按绑定变更流程处理；常规持有延续继续使用下节`continuity_props`，两者可并存。
+
+```json
+{
+  "source_references": [{
+    "scene_id": "SC0001",
+    "asset_id": "SET0002",
+    "source_records": ["L000003"],
+    "evidence": [{"record_id": "L000003", "quote": "本记录内实际选区的原文字句"}],
+    "basis": "说明该事件使用这项既有参考的具体关系与依据"
+  }]
+}
+```
+
+每个声明只含上述五个字段，同场同一资产声明一次；资产须为库内真实SET或PROP，不接受CHAR或未知资产。`source_records`须为当前候选实际选区内、属于`scene_id`的不重复记录，`evidence`逐条恰好覆盖这些记录，quote须逐字存在于实际选区的文本内；context返回的完整未选记录不能作为越界依据。数组和证据顺序归一化，不能通过排序改变引用范围。每个单元只继承其真实消费记录与声明的交集；相邻单元共享来源动作记录时可分别继承同条依据，不增加逐镜表。
+
+正文场景行按本单元实际发生位置顺序列SET。具有本单元来源声明的SET可替代默认主SET，连续跨空间单元可列多个实际SET；未声明的其他空间仍不合法。没有SET声明的来源场继续按既有默认主SET及顺序校验，PROP声明不能放宽SET规则；场景行不能留空。单元`main_scene/scene_ids`仍由原文SC确定，不因位置转换增加SC、换人或新剧情。每镜与人物站位中的资产仍按当前单元合法集合校验，不能借同场别的记录扩用参考。
+
+`context --authoring-trace`只读导出当前场及选区的声明资格和相关设计；未提供声明时保持原台账引用。`bind-trace`、完整及增量check、preview和commit校验同一声明，完整提交还绑定稿件、上下文快照、侧车、作者闸门与独立审阅。预览复用及request身份含非空声明；改变声明或依据须重新匹配预览及实审。声明仅随对应unit和receipt冻结，重试按原声明及原侧车恢复，历史没有该字段时保持原语义，不据当前新增许可重批旧稿。
+
+程序只确认类型、ID、SC、记录、选区、精确证据与绑定。独立主审须实际阅读相关原文、既有设计及已接受的地点/物体关系，核实参考在每个单元的位置、用途和连续性；quote存在不证明同店、同物或剧情关系，声明存在也不证明动作覆盖或省略合法。仍沿既有场级审阅记录真实结论，不增加自证批准字段，不以空引用或孤立局部取景绕开来源动作。
+
+### 来源人物的制作对应
+
+v4顶层可选`production_cast`保存已授权的精确人物制作对应，不改变源人物槽位、泛称、声源标签、原话或绑定台账。每行必填`scene_id`、`actor_key`、`source_asset_id`、`asset_id`、`source_records`、`evidence: [{record_id, quote}]`、`basis`及`authorization: {path, sha256}`，可选`kind`、`sample_id`、`asset`。`kind`默认`performer`，另接受`visual_group`和`appearance`。`actor_key`是稳定制作身体键，不能作为新增姓名或剧情身份。分配的语义边界只在[人物资产规则](../modules/screenplay-standardizer/references/asset-ledger.md#泛称人物的制作分配与连续身份)维护。
+
+`source_asset_id`必须是本场原槽位的合法CHAR，`asset_id`为真实既有CHAR或本行提供的补充CHAR。从已设计群板固定个体时，`sample_id`须定位该板实际样本；`visual_group`只复用多人视觉造型，不把样本数量当作剧情人数。同一身体换装保留已经核实的年龄、体型、面貌和发型，身份及成员连续性仍须实际审阅。正文在需要区分时使用可辨视觉特征，不输出内部样本键，也不让整块群板随单人台词共同做口型。
+
+声明限定于本候选实际消费的来源记录，每条quote逐字存在于对应裁剪选区。投影到单元只保留消费记录交集。只有`performer`、该记录属于本行且原speaker对应源槽位时，声音使用目标CHAR，导出称谓继续使用该原记录speaker；不改原台词、声音类型或发声人数。其他人物和群体不因共用一条动作记录自动取得发声或身份资格。
+
+`authorization.path`为实际项目授权记录绝对路径，`sha256`绑定其字节。新候选核验`status: user_explicitly_approved`、`authorized_operations`含`production_cast`，以及`items`逐项的`scene_ids`、`source_records`和`span`；附带`asset`还须包含`supplemental_character_assets`授权。记录可以绑定用户对该范围、该类操作的明确整体委托，具体演员和造型选择另记为代理制作决定，不能冒记为用户逐项选择。范围必须逐项匹配，不使用分散选区的凸包或其他范围的授权。
+
+`asset`只补充尚无设计的原CHAR或新增CHAR，允许字段为`id/name/source_entry/source_speaker/visual_mode/visual_design/image_prompt/image_format/appearance`。保存完整实际提示词、16:9图片格式和相应设计，不覆盖已有已设计资产，不与既有名称及来源身份冲突。设计只在候选只读上下文叠加，随单元与回执冻结，不写回原绑定台账，不生成图片或云节点。实际新增参考须完成相应设计与当前候选审阅，再进入正式提交；不能只靠字段非空认定设计合格。
+
+context、bind-trace、完整及增量check、preview、commit、validate和render使用同一声明。非空对应进入作者闸门摘要、侧车、预览复用和请求身份；对应或设计改变后重新匹配预览与独立审阅。新预览及提交边界复核实际授权摘要。原回执重试核对冻结声明和原侧车，不重读当前授权文件，不回填历史；无该字段的旧稿保持原协议。结构通过仍为`semantic_review: not_performed`。授权不扩大分镜范围，主代理仍核对真实选区和历史范围确认。
 
 ### 跨场道具延续引用
 

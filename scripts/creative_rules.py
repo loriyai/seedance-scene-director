@@ -20,7 +20,7 @@ REQUIRED_FILES = (
     'assets/fixed-header-visual-v2.txt', 'assets/fixed-header-visual-v3.txt', 'scripts/director.py',
     'scripts/review_gate.py', 'scripts/scene_review.py', 'scripts/creative_rules.py',
     'scripts/authoring_gates.py', 'scripts/storyboard_assembly.py',
-    'scripts/shot_dependencies.py', 'scripts/continuity.py', 'scripts/draft_revision.py',
+    'scripts/shot_dependencies.py', 'scripts/continuity.py', 'scripts/source_references.py', 'scripts/production_cast.py', 'scripts/draft_revision.py',
     'scripts/batch_naming.py', 'scripts/shot_review.py', 'scripts/storyboard_preflight.py',
     'scripts/staging_preflight.py', 'scripts/dialogue_layout.py',
     'scripts/speech_timing_audit.py', 'scripts/audio_sources.py',

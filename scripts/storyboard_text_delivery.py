@@ -18,7 +18,8 @@ import batch_naming
 import ratio_profiles
 import storyboard_text as text_core
 import storyboard_authoring_gate
-from storyboard_context import context_hash, scene_context
+from storyboard_context import (context_hash, scene_context, context_scope,
+                                candidate_context_policy, SCOPED_CONTEXT_POLICY)
 import storyboard_metrics
 import segment_naming
 from video_settings import get_ratio
@@ -26,6 +27,15 @@ from video_header import read as read_header, POLICY as HEADER_POLICY
 
 POLICY = 'scene-text-v1'
 EXPORT_FORMAT = 'ratio-summary-v1'
+
+
+def _candidate_scope(state, draft, authoring_trace, span):
+    path = storyboard_authoring_gate.trace_path(draft, authoring_trace)
+    try:
+        trace = d.read_json(path)
+    except (OSError, ValueError):
+        trace = None
+    return context_scope(state, span, trace, policy=candidate_context_policy(trace, state))
 
 
 def require_dialogue_capacity(units):
@@ -79,7 +89,9 @@ def check_incremental(project, draft, span=None, authoring_trace=None):
     raw = draft.read_bytes()
     try:
         units = text_core.parse_incremental(raw.decode('utf-8-sig'), state, span,
-            continuity_props=storyboard_authoring_gate.candidate_carry_props(draft, authoring_trace))
+            continuity_props=storyboard_authoring_gate.candidate_carry_props(draft, authoring_trace),
+            source_references=storyboard_authoring_gate.candidate_source_references(draft, authoring_trace),
+            production_cast=storyboard_authoring_gate.candidate_production_cast(draft, authoring_trace))
     except text_core.TextValidationError as exc:
         _raise_parsed_diagnostics(exc, state)
     camera = text_core.camera_constraints(units, *text_core.camera_context(state, units))
@@ -87,6 +99,7 @@ def check_incremental(project, draft, span=None, authoring_trace=None):
     capacity = require_dialogue_capacity(units)
     selected = list(dict.fromkeys(sid for unit in units for sid in unit['scene_ids']))
     actual_span = [units[0]['span'][0], units[-1]['span'][1]]
+    scope = _candidate_scope(state, draft, authoring_trace, actual_span)
     return {
         'status': 'incremental_checked', 'validation_scope': 'authored_prefix_only',
         'semantic_review': 'not_performed', 'delivery_eligible': False,
@@ -95,7 +108,8 @@ def check_incremental(project, draft, span=None, authoring_trace=None):
         'total_duration': sum(unit['duration'] for unit in units),
         'span': actual_span, 'scenes': selected,
         'draft_sha256': hashlib.sha256(raw).hexdigest(),
-        'context_sha256': context_hash(state, project),
+        'context_sha256': context_hash(state, project, scope=scope),
+        'context_binding': scope,
         'video_ratio': ratio,
         'ratio_profile': profile,
         'camera_constraints': camera, 'dialogue_capacity': capacity,
@@ -118,9 +132,11 @@ def bind_trace(project, draft, decisions, output=None, span=None):
     raw = draft.read_bytes()
     authored = d.read_json(decisions)
     from continuity import carry_declarations
+    from source_references import declarations
+    import production_cast as casting
     try:
         units = text_core.parse(raw.decode('utf-8-sig'), state, source_span=list(span) if span else None,
-                               continuity_props=carry_declarations(authored))
+                               continuity_props=carry_declarations(authored), source_references=declarations(authored), production_cast=casting.declarations(authored))
     except text_core.TextValidationError as exc:
         if not isinstance(authored, dict) or authored.get('version') != 4:
             exc.errors.extend(storyboard_authoring_gate.source_mapping_errors(state, exc.units, authored))
@@ -133,14 +149,16 @@ def bind_trace(project, draft, decisions, output=None, span=None):
         records = [record for record in state['records'] if record['scene'] in scenes]
         d.require(actual_span == [records[0]['start'], records[-1]['end']],
                   '局部稿件绑定须提供准确--span')
-    context = context_hash(state, project)
+    scope = context_scope(state, actual_span, authored)
+    context = context_hash(state, project, scope=scope)
     mapping_errors = storyboard_authoring_gate.source_mapping_errors(state, units, authored)
     if mapping_errors:
         _raise_parsed_diagnostics(text_core.TextValidationError(mapping_errors, units), state)
-    bound = storyboard_authoring_gate.bind_metadata(authored, raw, units, context)
+    bound = storyboard_authoring_gate.bind_metadata(authored, raw, units, context,
+                context_policy=SCOPED_CONTEXT_POLICY)
     target = safe_output(state, project, output or storyboard_authoring_gate.trace_path(draft),
                          (draft, decisions))
-    d.require(draft.read_bytes() == raw and context_hash(state, project) == context,
+    d.require(draft.read_bytes() == raw and context_hash(state, project, scope=scope) == context,
               '绑定期间输入发生变化，请重新读取')
     write_preview(target, (json.dumps(bound, ensure_ascii=False, indent=2) + '\n').encode('utf-8'))
     return {'status': 'bound', 'authoring_trace': str(target),
@@ -176,7 +194,9 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
         d.require(span is None or list(span) == parse_span, '--span与指定修改单元范围不同')
     try:
         units, info = text_core._parse_for_delivery(raw, state, source_span=parse_span,
-            continuity_props=storyboard_authoring_gate.candidate_carry_props(draft, authoring_trace))
+            continuity_props=storyboard_authoring_gate.candidate_carry_props(draft, authoring_trace),
+            source_references=storyboard_authoring_gate.candidate_source_references(draft, authoring_trace),
+            production_cast=storyboard_authoring_gate.candidate_production_cast(draft, authoring_trace))
     except text_core.TextValidationError as exc:
         trace = None
         if state.get('storyboard_authoring_policy') == storyboard_authoring_gate.POLICY:
@@ -192,7 +212,8 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
                     exc.errors.append({'code': 'AUTHORING_TRACE_INVALID', 'message': '作者依据必须是对象'})
             if isinstance(trace, dict) and trace.get('version') == 4:
                 expected = {'draft_sha256': hashlib.sha256(draft_bytes).hexdigest(),
-                            'context_sha256': context_hash(state, project)}
+                            'context_sha256': context_hash(state, project, scope=_candidate_scope(
+                                state, draft, authoring_trace, [exc.units[0]['span'][0], exc.units[-1]['span'][1]]))}
                 for field, value in expected.items():
                     if trace.get(field) != value:
                         exc.errors.append({'code': 'AUTHORING_TRACE_BINDING',
@@ -200,7 +221,8 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
                         trace = None
                         break
         _raise_parsed_diagnostics(exc, state, replace_ids, check_camera=check_camera, source_trace=trace)
-    context = context_hash(state, project)
+    scope = _candidate_scope(state, draft, authoring_trace, [units[0]['span'][0], units[-1]['span'][1]])
+    context = context_hash(state, project, scope=scope)
     authoring = storyboard_authoring_gate._validate_for_delivery(
         project, state, draft_bytes, units, context, authoring_trace,
         draft_path=draft, observations_summary=info['observations'])
@@ -294,6 +316,7 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
                                                if unit.get('video_ratio') is not None)),
             'ratio_profiles': list({profile['profile_id']: profile for profile in profiles}.values()),
             'semantic_review': 'not_performed',
+            'context_binding': scope,
             'authoring_gate': authoring,
             'history': d.range_review(state, actual_span, project=project) if not replace_ids else None}
     from project_continuation import review_bridge
@@ -416,16 +439,18 @@ def write_preview(target, payload):
 def _require_current_preview(project, draft, state, info):
     d.require(hashlib.sha256(draft.read_bytes()).hexdigest() == info['draft_sha256'],
               '作者稿在预览期间变化，请重新运行预览')
-    d.require(context_hash(state, project) == info['context_sha256'],
+    d.require(context_hash(state, project, scope=info.get('context_binding')) == info['context_sha256'],
               '分镜上下文在预览期间变化，请重新运行预览和核对审阅')
     _require_current_carry_trace(info)
 
 
 def _require_current_carry_trace(info):
     gate = info.get('authoring_gate', {})
-    if gate.get('continuity_props'):
+    if any(gate.get(k) for k in ('continuity_props', 'source_references', 'production_cast')):
         d.require(d.file_hash(gate['trace_path']) == gate['trace_sha256'],
-                  '跨场道具依据在执行期间变化，请重新绑定并核对审阅')
+                  '候选引用依据在执行期间变化，请重新绑定并核对审阅')
+    from production_cast import require_current_authorizations
+    require_current_authorizations(gate.get('production_cast', []))
 
 
 def preview(project, draft, output=None, span=None, replace_ids=None, activity_id=None,
@@ -439,7 +464,7 @@ def preview(project, draft, output=None, span=None, replace_ids=None, activity_i
                            authoring_gate=info.get('authoring_gate')).encode('utf-8')
     artifact = {key: info[key] for key in ('draft_sha256', 'context_sha256', 'span', 'scenes')}
     artifact.update(draft=str(draft), output_sha256=hashlib.sha256(payload).hexdigest())
-    if info.get('authoring_gate', {}).get('continuity_props'):
+    if any(info.get('authoring_gate', {}).get(k) for k in ('continuity_props', 'source_references', 'production_cast')):
         artifact['authoring_trace_sha256'] = info['authoring_gate']['trace_sha256']
     rows, _ = storyboard_metrics.effective_events(storyboard_metrics.read_events(project))
     starts = [i for i, row in enumerate(rows) if row['event'] == 'start']
@@ -518,8 +543,16 @@ def _recover_committed(project, state, receipt, draft, output, span, replace_ids
                'ratio_profiles': list(dict.fromkeys(u['ratio_profile'] for u in units
                                                    if u.get('ratio_profile')))}
     carried = unit_carry_props(units)
+    from source_references import declarations, from_units, normalize
+    source_refs = from_units(units)
+    import production_cast as casting
+    cast_rows = casting.from_units(units)
     if carried:
         binding['continuity_props'] = carried
+    if source_refs:
+        binding['source_references'] = source_refs
+    if cast_rows:
+        binding['production_cast'] = cast_rows
     d.require(digest(binding) == receipt.get('request_hash'),
               'request_id已用于其他内容；历史请求绑定不一致')
     # Compare syntax projections to the exact original bytes. Do not rejudge
@@ -543,6 +576,8 @@ def _recover_committed(project, state, receipt, draft, output, span, replace_ids
                   'request_id已用于其他内容；作者依据与原交付不同')
         trace = json.loads(trace_raw.decode('utf-8-sig'))
         d.require(carry_declarations(trace) == carried, '历史跨场道具承诺与原作者依据不一致')
+        d.require(normalize(declarations(trace)) == source_refs, '历史来源引用与原作者依据不一致')
+        d.require(casting.declarations(trace) == cast_rows, '历史制作人物对应与原作者依据不一致')
         shot_keys = [f'{u["draft_key"]}#{i}' for u in units for i in range(1, len(u['shots']) + 1)]
         d.require(gate.get('shot_keys') == shot_keys and gate.get('shot_count') == len(shot_keys),
                   '历史作者闸门镜头范围与回执不一致')
@@ -552,6 +587,10 @@ def _recover_committed(project, state, receipt, draft, output, span, replace_ids
                    'shot_count': len(shot_keys), 'source_span': trace.get('source_span')}
         if carried:
             payload['continuity_props'] = carried
+        if source_refs:
+            payload['source_references'] = source_refs
+        if cast_rows:
+            payload['production_cast'] = cast_rows
         d.require(digest(payload) == gate.get('gate_digest'), '历史作者闸门绑定摘要不一致')
     verify_review(final_review, frozen_info)
     d.require(Path(output).resolve() == Path(receipt['output']).resolve(),
@@ -598,8 +637,16 @@ def commit(project, draft, request_id, review, output, span=None,
                            'ratio_profiles': [p['profile_id'] for p in info.get('ratio_profiles', [])]}
     from continuity import unit_carry_props
     carried = unit_carry_props(units)
+    from source_references import from_units
+    source_refs = from_units(units)
+    import production_cast as casting
+    cast_rows = casting.from_units(units)
     if carried:
         request_binding['continuity_props'] = carried
+    if source_refs:
+        request_binding['source_references'] = source_refs
+    if cast_rows:
+        request_binding['production_cast'] = cast_rows
     request_hash = digest(request_binding)
     require_camera_constraints(info['camera_constraints'])
     final_review = verify_review(d.read_json(review), info)
@@ -618,7 +665,7 @@ def commit(project, draft, request_id, review, output, span=None,
                   if mode == 'append' and plan is None else batch_naming._lock(scope))
     with allocation as batch_label:
         d.require(d.read_json(project / 'session.json')['revision'] == state['revision'], '项目已有新的提交；重读后重试')
-        d.require(context_hash(state, project) == info['context_sha256'],
+        d.require(context_hash(state, project, scope=info.get('context_binding')) == info['context_sha256'],
                   '比例、拆分方案或规则在提交期间变化；请重新预览和核对审阅')
         _require_current_carry_trace(info)
         working = copy.deepcopy(state)

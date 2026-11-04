@@ -61,7 +61,10 @@ GENERIC_CAMERA = re.compile(r"相关动作的进入相位起拍|镜头平滑跟�
 GENERIC_LIGHT = re.compile(r"环境光方向与主体明暗落点保持连续|均匀漫射日光落在.+暗部保留真实层次")
 DEPTH_WORDS = re.compile(r"景深|焦外|虚化|焦点")
 CONCRETE_LIGHT = re.compile(r"左侧|右侧|前方|后方|侧面|逆光|顶光|低位|漫射|阴影|明部|暗部|高光|轮廓")
-MAIN_FILL_LIGHT = re.compile(r"主光\s*[:：].{1,80}(?:辅光|环境反射|反射光|补光)\s*[:：]", re.S)
+MAIN_FILL_LIGHT = re.compile(
+    r"主光\s*[:：][^；;。\r\n]{1,80}?(?:辅光|环境反射|反射光|补光)\s*[:：]"
+    r"[^；;。\r\n]+"
+)
 CONCRETE_CUT = re.compile(r"切出|接入|动作锚点|视线锚点|声音先行|结果读清|落点")
 
 
@@ -119,9 +122,14 @@ def body_errors(units, *, legacy=False):
             if GENERIC_CAMERA.search(body):
                 errors.append({"code": "AUTHORING_GENERIC_CAMERA", "shot": key,
                                "message": "摄影路径不得使用泛化占位句"})
-            if GENERIC_LIGHT.search(body) or not CONCRETE_LIGHT.search(body) or not MAIN_FILL_LIGHT.search(body):
+            # Camera directions, action shadows and later sentences cannot
+            # supply the concrete terms missing from the lighting clause.
+            # This remains a lexical diagnostic, not a semantic approval.
+            lighting = MAIN_FILL_LIGHT.search(body)
+            if (lighting is None or GENERIC_LIGHT.search(lighting.group(0))
+                    or not CONCRETE_LIGHT.search(lighting.group(0))):
                 errors.append({"code": "AUTHORING_LIGHTING_UNDER_SPECIFIED", "shot": key,
-                               "message": "正文须落实具体主光、辅光或反射关系和明暗落点"})
+                               "message": "光照描述本身须落实具体主光、辅光或反射关系和明暗落点，不能借用摄影或动作中的方向与明暗词"})
             if not DEPTH_WORDS.search(body):
                 errors.append({"code": "AUTHORING_DEPTH_MISSING", "shot": key,
                                "message": "正文须落实实际清晰与焦外关系"})
@@ -443,13 +451,18 @@ def _validate_v3(project, state, draft_bytes, units, expected_context_sha256,
             "gate_digest": payload["gate_digest"]}
 
 
-def bind_metadata(trace, draft_bytes, units, context_sha256):
+def bind_metadata(trace, draft_bytes, units, context_sha256, *, context_policy=None):
     """Bind authored decisions without generating or changing creative fields."""
     import copy
 
     if trace.get("policy") != POLICY or trace.get("version") != VERSION:
         raise ValueError("仅对当前v4作者依据绑定元数据；不自动转换旧侧车")
     result = copy.deepcopy(trace)
+    if context_policy is not None:
+        from storyboard_context import LEGACY_CONTEXT_POLICY, SCOPED_CONTEXT_POLICY
+        if context_policy not in (LEGACY_CONTEXT_POLICY, SCOPED_CONTEXT_POLICY):
+            raise ValueError('未知的分镜上下文绑定协议')
+        result['context_policy'] = context_policy
     result.update(draft_sha256=hashlib.sha256(draft_bytes).hexdigest(),
                   context_sha256=context_sha256,
                   source_span=[units[0]["span"][0], units[-1]["span"][1]])
@@ -465,6 +478,24 @@ def candidate_carry_props(draft_path, explicit_trace=None):
     except (OSError, ValueError):
         return []
     return carry_declarations(trace)
+
+
+def candidate_source_references(draft_path, explicit_trace=None):
+    from source_references import declarations
+    try:
+        trace = json.loads(trace_path(draft_path, explicit_trace).read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError):
+        return []
+    return declarations(trace)
+
+
+def candidate_production_cast(draft_path, explicit_trace=None):
+    from production_cast import declarations
+    try:
+        trace = json.loads(trace_path(draft_path, explicit_trace).read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError):
+        return []
+    return declarations(trace)
 
 
 def _source_cues(record):
@@ -642,6 +673,30 @@ def _validate_v4(project, state, draft_bytes, units, expected_context_sha256,
             raise ValueError('已解析单元与当前侧车的跨场道具声明不一致')
     except ValueError as exc:
         errors.append({'code': 'AUTHORING_CONTINUITY_PROPS', 'message': str(exc)})
+    from source_references import declarations, from_units, validate
+    source_refs = []
+    try:
+        declared_refs = declarations(trace)
+        if declared_refs:
+            import storyboard_text
+            context = storyboard_text._slice_state(state, [units[0]['span'][0], units[-1]['span'][1]])
+            source_refs = validate(context, declared_refs, [rid for u in units for rid in u['source_records']])
+        if from_units(units) != source_refs:
+            raise ValueError('已解析单元与当前侧车的来源引用声明不一致')
+    except ValueError as exc:
+        errors.append({'code': 'AUTHORING_SOURCE_REFERENCES', 'message': str(exc)})
+    import production_cast as casting
+    cast_rows = []
+    try:
+        cast_rows = casting.declarations(trace)
+        if cast_rows:
+            import storyboard_text
+            scoped = storyboard_text._slice_state(state, [units[0]['span'][0], units[-1]['span'][1]])
+            cast_rows = casting.validate(scoped, units, cast_rows)
+        if casting.from_units(units) != cast_rows:
+            raise ValueError('已解析单元与当前侧车的制作人物对应不一致')
+    except (OSError, ValueError) as exc:
+        errors.append({'code': 'AUTHORING_PRODUCTION_CAST', 'message': str(exc)})
     draft_sha256 = hashlib.sha256(draft_bytes).hexdigest()
     for field, value, code in (
             ("draft_sha256", draft_sha256, "AUTHORING_TRACE_DRAFT_BINDING"),
@@ -703,6 +758,10 @@ def _validate_v4(project, state, draft_bytes, units, expected_context_sha256,
                "shot_count": len(expected_keys), "source_span": trace.get("source_span")}
     if carried:
         payload['continuity_props'] = carried
+    if source_refs:
+        payload['source_references'] = source_refs
+    if cast_rows:
+        payload['production_cast'] = cast_rows
     return {**payload, "enforced": True, "status": "blocked" if errors else "passed",
             "errors": errors, "warnings": warnings,
             "trace_path": str(path), "shot_keys": expected_keys,

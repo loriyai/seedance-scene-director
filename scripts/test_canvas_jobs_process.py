@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 import canvas as c
 import canvas_jobs as jobs
@@ -15,6 +16,39 @@ import director as d
 
 
 class BackgroundProcessChecks(unittest.TestCase):
+    def setUp(self):
+        sandbox = tempfile.TemporaryDirectory(prefix="seedance-process-test-")
+        self.addCleanup(sandbox.cleanup)
+        self.enterContext(patch.object(tempfile, "tempdir", sandbox.name))
+        self.enterContext(patch.dict(os.environ, {"TEMP": sandbox.name, "TMP": sandbox.name}))
+
+    def await_worker_entry(self, worker, project):
+        deadline = time.monotonic() + 10
+        while not (project / 'entered').exists() and worker.poll() is None and time.monotonic() < deadline:
+            time.sleep(.02)
+        if (project / 'entered').exists():
+            return
+        stdout, stderr = worker.communicate(timeout=5) if worker.poll() is not None else (b'', b'')
+        state = jobs.status(project)
+        self.fail("后台测试worker未进入runner；" + json.dumps({
+            "returncode": worker.poll(), "stdout": stdout.decode('utf-8', 'replace'),
+            "stderr": stderr.decode('utf-8', 'replace'), "worker": state.get('worker'),
+            "jobs": [{key: job.get(key) for key in ('status', 'stage', 'error')}
+                     for job in state.get('jobs', [])]}, ensure_ascii=False))
+
+    def test_early_exit_diagnostic_includes_process_and_job_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            worker = unittest.mock.Mock()
+            worker.poll.return_value = 0
+            worker.communicate.return_value = (b'worker output', b'worker detail')
+            state = {"worker": {"status": "stopped"}, "jobs": [
+                {"status": "needs_attention", "error": {"code": "BUSY"}}]}
+            with patch.object(jobs, 'status', return_value=state), self.assertRaises(AssertionError) as caught:
+                self.await_worker_entry(worker, Path(temporary))
+            message = str(caught.exception)
+            for expected in ('returncode', 'worker output', 'worker detail', 'BUSY', 'needs_attention'):
+                self.assertIn(expected, message)
+
     def test_independent_monitor_notifies_after_forced_worker_exit(self):
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary)
@@ -65,10 +99,7 @@ jobs.monitor_worker(project, int(sys.argv[3]), 'offline-kill-test')
             worker = subprocess.Popen([sys.executable, '-c', worker_source, str(project), str(Path(__file__).parent)], **options)
             monitor = None
             try:
-                deadline = time.monotonic() + 10
-                while not (project / 'entered').exists() and worker.poll() is None and time.monotonic() < deadline:
-                    time.sleep(.02)
-                self.assertTrue((project / 'entered').exists())
+                self.await_worker_entry(worker, project)
                 monitor = subprocess.Popen([sys.executable, '-c', monitor_source, str(project), str(Path(__file__).parent), str(worker.pid)], **options)
                 worker.kill()
                 worker.communicate(timeout=5)
@@ -128,10 +159,7 @@ jobs.run_worker(project, runner=run)
                 options['creationflags'] = subprocess.CREATE_NO_WINDOW
             process = subprocess.Popen([sys.executable, '-c', runner, str(project), str(Path(__file__).parent)], **options)
             try:
-                deadline = time.monotonic() + 10
-                while not (project / 'entered').exists() and process.poll() is None and time.monotonic() < deadline:
-                    time.sleep(.02)
-                self.assertTrue((project / 'entered').exists())
+                self.await_worker_entry(process, project)
                 self.assertTrue(jobs.status(project)['worker_active'])
                 session['units'].append({'id': 'local-new-unit', 'version': 1, 'prompt': '本地新分镜'})
                 session['ranges'].append({'span': [0, 10]})
