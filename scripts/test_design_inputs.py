@@ -117,7 +117,7 @@ class DesignInputTests(unittest.TestCase):
 
     def test_cli_refuses_overwrite_and_check_has_no_write_side_effect(self):
         out=self.work/'index.json'
-        command=[sys.executable,'-B',str(SKILL/'modules/screenplay-standardizer/scripts/design_inputs.py')]
+        command=[sys.executable,'-B','-X','utf8',str(SKILL/'modules/screenplay-standardizer/scripts/design_inputs.py')]
         args=['prepare',str(self.script),str(self.source),str(self.work/'ledger.json'),
               '--style-file',str(self.style),'--output',str(out)]
         first=subprocess.run(command+args,capture_output=True,text=True,encoding='utf-8')
