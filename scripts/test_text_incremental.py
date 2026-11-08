@@ -102,7 +102,7 @@ class IncrementalAuthorChecks(unittest.TestCase):
             delivery.check_incremental(self.fx.project, self.draft(text))
         blocks = self.fx.authored_text(self.fx.state['records'][:2]).strip().split('\n\n')
         blocks[1] = blocks[1].replace('00秒-04秒', '00秒-01秒').replace('0.2-2.8', '0.1-0.9')
-        with self.assertRaisesRegex(ValueError, 'DIALOGUE_CAPACITY'):
+        with self.assertRaisesRegex(ValueError, 'SPEECH_READING_CAPACITY'):
             delivery.check_incremental(self.fx.project, self.draft('\n\n'.join(blocks)))
 
     def test_multiscene_prefix_rejected_without_changing_default_complete_route(self):

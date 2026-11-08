@@ -596,7 +596,7 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
     result = {"schema_version": 2, "source_digest": digest(new_paragraphs), "scenes": scenes,
               "characters": characters, "locations": locations, "props": props,
               "retired_ids": sorted(retired), "inactive_assets": inactive, "pending_reviews": pending}
-    for field in ("asset_policy", "group_policy", "character_variant_policy", "image_design_version", "visual_style", "identity_anchors", "delivery_contract"):
+    for field in ("asset_policy", "group_policy", "character_variant_policy", "character_appearance_policy", "image_design_version", "visual_style", "identity_anchors", "delivery_contract"):
         if field in old:
             result[field] = copy.deepcopy(old[field])
     if old.get("schema_version") == 3:

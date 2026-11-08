@@ -34,11 +34,19 @@ def boundary(cli):
     callback() if callable(callback) else c.check_control(cli)
 
 
-def snapshot(cli, state, previous, items, sources=()):
+def snapshot(cli, state, previous, items, sources=(), asset_reference_policy=None):
     boundary(cli)
     value = cli.batch_snapshot(state["binding"])
     fresh = value["document"]
-    for node_id in {i.get("node_id") for i in items} | set(sources):
+    targets = {i.get('node_id') for i in items}
+    from canvas_asset_reference_policy import source_target
+    for node_id in targets | set(sources):
+        if node_id and node_id not in targets:
+            identity = source_target(asset_reference_policy, previous, node_id)
+            if identity['action'] == 'bound_asset_identity':
+                if not c.target_satisfied(fresh, identity):
+                    c.fail('CONCURRENT_EDIT', '引用资产原节点已消失或类型改变，不能按名称替代。', node_id=node_id)
+                continue
         if node_id and (node_id not in c.nodes(fresh) or node_id not in c.nodes(previous)
                         or c.fingerprint(fresh, node_id) != c.fingerprint(previous, node_id)):
             c.fail("CONCURRENT_EDIT", "批次中的目标或引用资产已变化，停止写入。", node_id=node_id)
@@ -63,16 +71,29 @@ def reserve(project, cli, state, items):
     return ids
 
 
-def submit(project, cli, state, baseline, compiled, targets, receipts=()):
+def submit(project, cli, state, baseline, compiled, targets, receipts=(), asset_reference_policy=None):
     """Save the complete request before sending. Never replay an ambiguous batch."""
     patches = compiled["patches"]
+    policy = asset_reference_policy
+    if policy is not None:
+        # A reference-only choice cannot smuggle any asset field mutation through
+        # an SDK patch, including source node metadata stored in the root asset.
+        for row in policy['nodes'].values():
+            nid = row['node_id']
+            d.require(c.fingerprint(compiled['document'], nid) == c.fingerprint(baseline['document'], nid),
+                      '按绑定ID引用不得编译任何资产字段写入：' + nid)
     # Source selection changes after compilation must not silently validate an
     # older plan. Sources without media are valid and still receive real edges.
     touched = {t["node_id"] for t in targets}
     sources = {sid for nid in touched for sid in c.node_asset_ids(c.prompt_of(compiled["document"], nid))}
     sources.update(e["source"] for nid in touched for e in reference_edges(compiled["document"], nid))
-    targets.extend({"action": "asset_snapshot", "node_id": sid, "value": c.fingerprint(compiled["document"], sid)}
-                   for sid in sources - touched)
+    from canvas_asset_reference_policy import source_target
+    for sid in sources - touched:
+        target = source_target(policy, compiled['document'], sid)
+        if target['action'] == 'bound_asset_identity':
+            target['consumers'] = sorted(nid for nid in touched if sid in c.node_asset_ids(c.prompt_of(compiled['document'], nid))
+                or any(e['source'] == sid for e in reference_edges(compiled['document'], nid)))
+        targets.append(target)
     if not patches:
         return None
     c.check_control(cli)
@@ -265,7 +286,10 @@ def prepare_assets(project, cli, session, state, doc, plan, summary):
     return doc, summary
 
 
-def sync_videos(project, cli, state, doc, plan, pending, context, references_only=False, batch_size=DEFAULT_BATCH_SIZE):
+def sync_videos(project, cli, state, doc, plan, pending, context, references_only=False, batch_size=DEFAULT_BATCH_SIZE, asset_reference_policy=None):
+    policy_args = {'asset_reference_policy': asset_reference_policy} if asset_reference_policy is not None else {}
+    if asset_reference_policy is not None:
+        context['asset_reference_policy'] = asset_reference_policy
     positions = c.layout_positions(doc, plan)
     created = updated = reused = 0
     verified = set()
@@ -273,7 +297,7 @@ def sync_videos(project, cli, state, doc, plan, pending, context, references_onl
         group = plan[offset:offset + batch_size]
         sources = {sid for i in group for sid in c.node_asset_ids(i["prompt"])}
         sources.update(i["black_node_id"] for i in group if c.edge_only_black(i) and i.get("black_node_id"))
-        baseline = snapshot(cli, state, doc, group, sources)
+        baseline = snapshot(cli, state, doc, group, sources, **policy_args)
         doc = baseline["document"]
         ids = reserve(project, cli, state, group)
         commands, receipts, targets = [], [], []
@@ -324,7 +348,7 @@ def sync_videos(project, cli, state, doc, plan, pending, context, references_onl
             receipt["reference_targets"] = exact_targets(compiled["document"], node_id)
             targets.extend(receipt["reference_targets"])
             d.write_json(receipt["path"], receipt)
-        entry = submit(project, cli, state, baseline, compiled, targets, receipts)
+        entry = submit(project, cli, state, baseline, compiled, targets, receipts, **policy_args)
         try:
             actual = readback(project, cli, state, entry, targets)
         except (ValueError, OSError, KeyError, TypeError) as exc:

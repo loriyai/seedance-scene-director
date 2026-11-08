@@ -446,7 +446,8 @@ def run_job(project, manifest, check_control, progress):
     result = c.sync(project, cli, "videos", request_id=options["request_id"], ids=options["ids"],
                     decisions=options["decisions"], existing_only=options["existing_only"],
                     references_only=options["references_only"], bind_references=True, session_override=session,
-                     progress=node_progress, batch_mode=options.get("sync_protocol") == c.BATCH_PROTOCOL)
+                      progress=node_progress, batch_mode=options.get("sync_protocol") == c.BATCH_PROTOCOL,
+                      **({'asset_reference_policy': options['asset_reference_policy']} if 'asset_reference_policy' in options else {}))
     progress({"completed": len(verified), "total": len(options["ids"]), "node_ids": verified,
               "stage": "verified" if len(verified) == len(options["ids"]) else "needs_attention"})
     if result.get("status") == "synced" and (len(verified) != len(options["ids"]) or result.get("unbound_units") or result.get("skipped")):

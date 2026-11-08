@@ -18,7 +18,6 @@ import batch_naming
 import ratio_profiles
 import storyboard_text as text_core
 import storyboard_authoring_gate
-import authoring_session
 from storyboard_context import (context_hash, scene_context, context_scope,
                                 candidate_context_policy, SCOPED_CONTEXT_POLICY)
 import storyboard_metrics
@@ -28,18 +27,6 @@ from video_header import read as read_header, POLICY as HEADER_POLICY
 
 POLICY = 'scene-text-v1'
 EXPORT_FORMAT = 'ratio-summary-v1'
-
-
-def _load_state(project):
-    """Load a bound project with a stable error for the unbound state."""
-    authoring_session.require_bound(project)
-    try:
-        return d.load(project)
-    except FileNotFoundError as exc:
-        path = Path(project).resolve() / 'session.json'
-        raise authoring_session.AuthoringSessionError(
-            'PROJECT_UNBOUND', f'项目尚未绑定标准剧本和资产：{path}', path=str(path)
-        ) from exc
 
 
 def _candidate_scope(state, draft, authoring_trace, span):
@@ -94,9 +81,7 @@ def check_incremental(project, draft, span=None, authoring_trace=None):
     allocating IDs or changing the default complete-scene validation.
     """
     project, draft = Path(project).resolve(), Path(draft).resolve()
-    state = _load_state(project)
-    if state.get('authoring_session_protocol') == authoring_session.PROTOCOL:
-        authoring_session.active(project)
+    state = d.load(project)
     d.require(state.get('style_hash'), '请先保存本项目风格')
     header = read_header(project, state, required=bool(state.get('header_hash')))
     ratio = get_ratio(project, state)
@@ -106,7 +91,10 @@ def check_incremental(project, draft, span=None, authoring_trace=None):
         units = text_core.parse_incremental(raw.decode('utf-8-sig'), state, span,
             continuity_props=storyboard_authoring_gate.candidate_carry_props(draft, authoring_trace),
             source_references=storyboard_authoring_gate.candidate_source_references(draft, authoring_trace),
-            production_cast=storyboard_authoring_gate.candidate_production_cast(draft, authoring_trace))
+            production_cast=storyboard_authoring_gate.candidate_production_cast(draft, authoring_trace),
+            source_background_slots=storyboard_authoring_gate.candidate_source_background_slots(draft, authoring_trace),
+            source_participant_slots=storyboard_authoring_gate.candidate_source_participant_slots(draft, authoring_trace),
+            source_text_voices=storyboard_authoring_gate.candidate_source_text_voices(draft, authoring_trace))
     except text_core.TextValidationError as exc:
         _raise_parsed_diagnostics(exc, state)
     camera = text_core.camera_constraints(units, *text_core.camera_context(state, units))
@@ -138,30 +126,26 @@ def now():
 
 
 def bind_trace(project, draft, decisions, output=None, span=None):
-    """Save metadata around authored decisions; never infer creative data.
-
-    A v5-bound project must already have an active authoring session.  The
-    session is read and verified here, then its immutable manifest and event
-    chain are copied into the v4-compatible sidecar envelope.
-    """
+    """Save metadata around authored v4 decisions; never infer creative data."""
     from project_paths import assert_writable
 
     assert_writable(project)
     project, draft, decisions = (Path(value).resolve() for value in (project, draft, decisions))
-    state = _load_state(project)
+    state = d.load(project)
     raw = draft.read_bytes()
     authored = d.read_json(decisions)
-    v5_required = state.get('authoring_session_protocol') == authoring_session.PROTOCOL
-    if v5_required:
-        # Starting a session never creates a draft; binding is the first
-        # operation that may require the completed shot event chain.
-        authoring_session.active(project)
+    import source_background_slots as background
+    import source_participant_slots as participants
+    import source_text_voices as text_voices
     from continuity import carry_declarations
     from source_references import declarations
     import production_cast as casting
     try:
         units = text_core.parse(raw.decode('utf-8-sig'), state, source_span=list(span) if span else None,
-                               continuity_props=carry_declarations(authored), source_references=declarations(authored), production_cast=casting.declarations(authored))
+                               continuity_props=carry_declarations(authored), source_references=declarations(authored), production_cast=casting.declarations(authored),
+                               source_background_slots=background.declarations(authored),
+                               source_participant_slots=participants.declarations(authored),
+                               source_text_voices=text_voices.declarations(authored))
     except text_core.TextValidationError as exc:
         if not isinstance(authored, dict) or authored.get('version') != 4:
             exc.errors.extend(storyboard_authoring_gate.source_mapping_errors(state, exc.units, authored))
@@ -181,35 +165,10 @@ def bind_trace(project, draft, decisions, output=None, span=None):
         _raise_parsed_diagnostics(text_core.TextValidationError(mapping_errors, units), state)
     bound = storyboard_authoring_gate.bind_metadata(authored, raw, units, context,
                 context_policy=SCOPED_CONTEXT_POLICY)
-    if v5_required:
-        session_report = authoring_session.validate_for_delivery(
-            project, raw, units, actual_span, trace=authored)
-        if session_report.get('status') != 'passed':
-            errors = session_report.get('errors') or [
-                {'code': 'AUTHORING_SESSION_INVALID', 'message': '作者会话未通过交付验证'}]
-            raise authoring_session.AuthoringSessionError(
-                errors[0].get('code', 'AUTHORING_SESSION_INVALID'),
-                errors[0].get('message', '作者会话未通过交付验证'),
-                errors=errors,
-            )
-        bound.update(
-            authoring_session_protocol=authoring_session.PROTOCOL,
-            provenance_manifest=session_report['provenance_manifest'],
-            authoring_event_chain=session_report['authoring_event_chain'],
-            authoring_event_chain_sha256=session_report['authoring_event_chain_sha256'],
-        )
     target = safe_output(state, project, output or storyboard_authoring_gate.trace_path(draft),
                          (draft, decisions))
     d.require(draft.read_bytes() == raw and context_hash(state, project, scope=scope) == context,
               '绑定期间输入发生变化，请重新读取')
-    if v5_required:
-        # Recheck the append-only session at the write boundary so a concurrent
-        # event or draft change cannot produce a stale provenance sidecar.
-        final_session = authoring_session.validate_for_delivery(
-            project, raw, units, actual_span)
-        d.require(final_session.get('status') == 'passed', '绑定期间作者会话变化，请重新读取')
-        d.require(final_session['provenance_manifest'] == bound['provenance_manifest'],
-                  '绑定期间作者来源证明变化，请重新读取')
     write_preview(target, (json.dumps(bound, ensure_ascii=False, indent=2) + '\n').encode('utf-8'))
     return {'status': 'bound', 'authoring_trace': str(target),
             'draft_sha256': bound['draft_sha256'], 'context_sha256': context,
@@ -224,7 +183,7 @@ def digest(value):
 def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
             authoring_trace=None):
     project, draft = Path(project).resolve(), Path(draft).resolve()
-    state = _load_state(project)
+    state = d.load(project)
     d.require(state.get('style_hash'), '请先保存本项目风格')
     header = read_header(project, state, required=bool(state.get('header_hash')))
     header_policy = HEADER_POLICY if header is not None else d.HEADER_POLICY
@@ -246,7 +205,10 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
         units, info = text_core._parse_for_delivery(raw, state, source_span=parse_span,
             continuity_props=storyboard_authoring_gate.candidate_carry_props(draft, authoring_trace),
             source_references=storyboard_authoring_gate.candidate_source_references(draft, authoring_trace),
-            production_cast=storyboard_authoring_gate.candidate_production_cast(draft, authoring_trace))
+            production_cast=storyboard_authoring_gate.candidate_production_cast(draft, authoring_trace),
+            source_background_slots=storyboard_authoring_gate.candidate_source_background_slots(draft, authoring_trace),
+            source_participant_slots=storyboard_authoring_gate.candidate_source_participant_slots(draft, authoring_trace),
+            source_text_voices=storyboard_authoring_gate.candidate_source_text_voices(draft, authoring_trace))
     except text_core.TextValidationError as exc:
         trace = None
         if state.get('storyboard_authoring_policy') == storyboard_authoring_gate.POLICY:
@@ -470,7 +432,8 @@ def render_units(state, units, preview=False, *, authoring_gate=None,
     if units and all(unit.get('export_format') == EXPORT_FORMAT for unit in units):
         total = sum(unit['duration'] for unit in units)
         minutes, seconds = divmod(total, 60)
-        results.append(f'本次共{len(units)}个分镜单元，总时长 {minutes}分 {seconds}秒')
+        shots = sum(len(unit['shots']) for unit in units)
+        results.append(f'本次共{len(units)}个分镜单元，共 {shots} 镜，总时长 {minutes}分{seconds}秒')
     return '\n\n'.join(results) + '\n'
 
 
@@ -496,11 +459,14 @@ def _require_current_preview(project, draft, state, info):
 
 def _require_current_carry_trace(info):
     gate = info.get('authoring_gate', {})
-    if any(gate.get(k) for k in ('continuity_props', 'source_references', 'production_cast')):
+    if any(gate.get(k) for k in ('continuity_props', 'source_references', 'production_cast', 'source_background_slots', 'source_participant_slots', 'source_text_voices')):
         d.require(d.file_hash(gate['trace_path']) == gate['trace_sha256'],
                   '候选引用依据在执行期间变化，请重新绑定并核对审阅')
     from production_cast import require_current_authorizations
     require_current_authorizations(gate.get('production_cast', []))
+    require_current_authorizations(gate.get('source_background_slots', []))
+    require_current_authorizations(gate.get('source_participant_slots', []))
+    require_current_authorizations(gate.get('source_text_voices', []))
 
 
 def preview(project, draft, output=None, span=None, replace_ids=None, activity_id=None,
@@ -514,7 +480,7 @@ def preview(project, draft, output=None, span=None, replace_ids=None, activity_i
                            authoring_gate=info.get('authoring_gate')).encode('utf-8')
     artifact = {key: info[key] for key in ('draft_sha256', 'context_sha256', 'span', 'scenes')}
     artifact.update(draft=str(draft), output_sha256=hashlib.sha256(payload).hexdigest())
-    if any(info.get('authoring_gate', {}).get(k) for k in ('continuity_props', 'source_references', 'production_cast')):
+    if any(info.get('authoring_gate', {}).get(k) for k in ('continuity_props', 'source_references', 'production_cast', 'source_background_slots', 'source_participant_slots', 'source_text_voices')):
         artifact['authoring_trace_sha256'] = info['authoring_gate']['trace_sha256']
     rows, _ = storyboard_metrics.effective_events(storyboard_metrics.read_events(project))
     starts = [i for i, row in enumerate(rows) if row['event'] == 'start']
@@ -597,12 +563,24 @@ def _recover_committed(project, state, receipt, draft, output, span, replace_ids
     source_refs = from_units(units)
     import production_cast as casting
     cast_rows = casting.from_units(units)
+    import source_background_slots as background
+    import source_participant_slots as participants
+    import source_text_voices as text_voices
+    background_rows = background.from_units(units)
+    participant_rows = participants.from_units(units)
+    text_voice_rows = text_voices.from_units(units)
     if carried:
         binding['continuity_props'] = carried
     if source_refs:
         binding['source_references'] = source_refs
     if cast_rows:
         binding['production_cast'] = cast_rows
+    if background_rows:
+        binding[background.FIELD] = background_rows
+    if participant_rows:
+        binding[participants.FIELD] = participant_rows
+    if text_voice_rows:
+        binding[text_voices.FIELD] = text_voice_rows
     d.require(digest(binding) == receipt.get('request_hash'),
               'request_id已用于其他内容；历史请求绑定不一致')
     # Compare syntax projections to the exact original bytes. Do not rejudge
@@ -628,6 +606,9 @@ def _recover_committed(project, state, receipt, draft, output, span, replace_ids
         d.require(carry_declarations(trace) == carried, '历史跨场道具承诺与原作者依据不一致')
         d.require(normalize(declarations(trace)) == source_refs, '历史来源引用与原作者依据不一致')
         d.require(casting.declarations(trace) == cast_rows, '历史制作人物对应与原作者依据不一致')
+        d.require(background.declarations(trace) == background_rows, '历史静默背景槽与原作者依据不一致')
+        d.require(participants.declarations(trace) == participant_rows, '历史静默来源参与者槽与原作者依据不一致')
+        d.require(text_voices.declarations(trace) == text_voice_rows, '历史原剧情文字声音与原作者依据不一致')
         shot_keys = [f'{u["draft_key"]}#{i}' for u in units for i in range(1, len(u['shots']) + 1)]
         d.require(gate.get('shot_keys') == shot_keys and gate.get('shot_count') == len(shot_keys),
                   '历史作者闸门镜头范围与回执不一致')
@@ -641,6 +622,12 @@ def _recover_committed(project, state, receipt, draft, output, span, replace_ids
             payload['source_references'] = source_refs
         if cast_rows:
             payload['production_cast'] = cast_rows
+        if background_rows:
+            payload[background.FIELD] = background_rows
+        if participant_rows:
+            payload[participants.FIELD] = participant_rows
+        if text_voice_rows:
+            payload[text_voices.FIELD] = text_voice_rows
         d.require(digest(payload) == gate.get('gate_digest'), '历史作者闸门绑定摘要不一致')
     verify_review(final_review, frozen_info)
     d.require(Path(output).resolve() == Path(receipt['output']).resolve(),
@@ -651,7 +638,7 @@ def _recover_committed(project, state, receipt, draft, output, span, replace_ids
         d.require(hashlib.sha256(rendered.encode('utf-8')).hexdigest() == receipt['output_sha256'],
                   '历史回执与原交付内容摘要不一致')
     # Recheck the saved receipt and both caller-owned inputs at the write boundary.
-    current = _load_state(project)
+    current = d.load(project)
     d.require(next((r for r in current['receipts'] if r['request_id'] == receipt['request_id']), None) == receipt,
               '恢复期间历史回执变化，请重读后重试')
     d.require(hashlib.sha256(Path(draft).read_bytes()).hexdigest() == draft_hash, '恢复期间作者稿变化')
@@ -672,7 +659,7 @@ def commit(project, draft, request_id, review, output, span=None,
     assert_writable(project)
     project = Path(project).resolve()
     d.require(isinstance(request_id, str) and request_id.strip(), 'request_id不能为空')
-    current = _load_state(project)
+    current = d.load(project)
     prior = next((r for r in current['receipts'] if r['request_id'] == request_id), None)
     if prior is not None:
         return _recover_committed(project, current, prior, draft, output, span,
@@ -691,12 +678,24 @@ def commit(project, draft, request_id, review, output, span=None,
     source_refs = from_units(units)
     import production_cast as casting
     cast_rows = casting.from_units(units)
+    import source_background_slots as background
+    import source_participant_slots as participants
+    import source_text_voices as text_voices
+    background_rows = background.from_units(units)
+    participant_rows = participants.from_units(units)
+    text_voice_rows = text_voices.from_units(units)
     if carried:
         request_binding['continuity_props'] = carried
     if source_refs:
         request_binding['source_references'] = source_refs
     if cast_rows:
         request_binding['production_cast'] = cast_rows
+    if background_rows:
+        request_binding[background.FIELD] = background_rows
+    if participant_rows:
+        request_binding[participants.FIELD] = participant_rows
+    if text_voice_rows:
+        request_binding[text_voices.FIELD] = text_voice_rows
     request_hash = digest(request_binding)
     require_camera_constraints(info['camera_constraints'])
     final_review = verify_review(d.read_json(review), info)
@@ -784,12 +783,8 @@ def commit(project, draft, request_id, review, output, span=None,
         d.save(project, working)
     d.atomic_text(target, rendered)
     event(project, 'delivered', note=request_id)
-    session_close = None
-    if state.get('authoring_session_protocol') == authoring_session.PROTOCOL:
-        session_close = authoring_session.close(project, info['draft_sha256'])
     return {'status': 'committed', 'output': str(target), 'ids': [u['id'] for u in units],
             'names': [u['display_name'] for u in units], 'canvas_sync': 'not_requested',
-            **({'authoring_session': session_close} if session_close else {}),
             **d.receipt_summary(receipt)}
 
 
@@ -869,7 +864,7 @@ def main():
             result = commit(args.project, args.draft, args.request_id, args.review, args.output,
                             args.span, args.replace_ids, args.range_confirmation, args.authoring_trace)
         elif args.command == 'render':
-            state = _load_state(args.project)
+            state = d.load(args.project)
             receipt = next((r for r in state['receipts'] if r['request_id'] == args.request_id), None)
             d.require(receipt is not None, '提交记录不存在')
             target = safe_output(state, args.project, args.output)
@@ -891,10 +886,7 @@ def main():
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (ValueError, OSError, KeyError, TypeError) as exc:
         result = {'status': 'error', 'message': str(exc)}
-        if isinstance(exc, authoring_session.AuthoringSessionError):
-            result['code'] = exc.code
-            result.update(exc.details)
-        elif isinstance(exc, storyboard_authoring_gate.AuthoringGateError):
+        if isinstance(exc, storyboard_authoring_gate.AuthoringGateError):
             result['errors'] = getattr(exc, 'errors', exc.report.get('errors', []))
             result['authoring_gate'] = exc.report
         elif isinstance(exc, text_core.TextValidationError):

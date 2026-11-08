@@ -75,6 +75,7 @@ def prepare(input_path: Path, workdir: Path) -> None:
         "input": str(input_path.resolve()),
         "format_policy": "standard-screenplay-v1",
         "character_name_policy": scene_character_names.POLICY,
+        "character_appearance_policy": "identity-appearance-v2",
         "paragraphs": [{"id": i, "text": value} for i, value in enumerate(paragraphs, 1)],
     }
     source_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

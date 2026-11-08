@@ -144,9 +144,9 @@ def draft_parts(path):
             kind, value, speaker = "action", TRANSITION.sub("", action), None
         elif "：" in line:
             label, value = line.split("：", 1)
-            speaker = re.sub(r"[（(][^（）()]*[）)]$", "", label).strip()
+            speaker = label.strip() if label.strip() in names else re.sub(r"[（(][^（）()]*[）)]$", "", label).strip()
             kind = "dialogue"
-            cue = re.search(r"[（(]([^（）()]*)[）)]$", label)
+            cue = None if label.strip() in names else re.search(r"[（(]([^（）()]*)[）)]$", label)
             cue_raw = cue.group(0) if cue else ""
             dialogues.append({"line": number, "speaker": speaker, "text": value,
                               "cue": cue.group(1) if cue else "",

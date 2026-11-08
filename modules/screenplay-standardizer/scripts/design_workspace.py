@@ -155,10 +155,10 @@ def _dependencies(data, assignments, records=None):
                 require(dep in ids and catalog[dep][0] == expected, f"{aid}缺少图片派生依赖：{dep}")
                 hard[aid].add(dep)
             variant = item.get("appearance_variant", {})
-            for key in ("base_asset_id", "prop_asset_id"):
+            for key in ("base_asset_id", "reference_asset_id", "prop_asset_id"):
                 if variant.get(key):
                     dep = variant[key]
-                    expected = "characters" if key == "base_asset_id" else "props"
+                    expected = "props" if key == "prop_asset_id" else "characters"
                     require(dep in ids and catalog[dep][0] == expected, f"{aid}缺少{key}依赖")
                     hard[aid].add(dep)
             if variant:
@@ -251,17 +251,10 @@ def _compile(data, records, anchors, assignments, version, style, frozen=None):
             require("identity_anchor_id" not in records[aid] or records[aid]["identity_anchor_id"] == assignments[aid],
                     f"{aid}不可修改冻结身份分配")
             records[aid]["identity_anchor_id"] = assignments[aid]
+    design.inherit_variant_designs({aid: item for aid, (category, item) in catalog.items()
+                                   if category == 'characters'}, records)
     for aid in records:
         category, item = catalog[aid]
-        variant = item.get("appearance_variant")
-        if category == "characters" and variant:
-            value, base = records[aid], records[variant["base_asset_id"]]
-            for key in ("identity_anchor_id", "styling", "appearance_overrides", "override_source_facts"):
-                require(key not in value or value[key] == base.get(key), f"{aid}须继承基础形象的{key}")
-                if key in base:
-                    value[key] = copy.deepcopy(base[key])
-            if base.get("appearance_overrides"):
-                value.setdefault("variant_differences", copy.deepcopy(base.get("variant_differences", [])))
         item["visual_design"] = records[aid]
         design.prepare_image_reference(item, records[aid], version)
     design.validate_image_references(result, records)

@@ -848,6 +848,8 @@ def initialize(script_path: Path, workdir: Path, output: Path, *, observations=N
             character['scene_source_speakers'] = speakers
     if clothing_policy:
         data['character_name_policy'] = scene_character_names.POLICY
+    if settings.get('character_appearance_policy') == 'identity-appearance-v2':
+        data['character_appearance_policy'] = settings['character_appearance_policy']
     if project is not None:
         from project_contract import read_contract
         contract = read_contract(project)
@@ -998,7 +1000,7 @@ def main() -> None:
         if command == "review-apply":
             decision.add_argument("--output", type=Path, required=True)
             decision.add_argument("--report", type=Path, required=True)
-    variants = commands.add_parser("variants", help="按已审原文登记同一人物的佩戴形象与同场切换，输出新草稿后重新design")
+    variants = commands.add_parser("variants", help="按已审原文登记同一人物的换装、造型、佩戴及持续状态切换，输出新草稿后重新design")
     variants.add_argument("script", type=Path)
     variants.add_argument("source", type=Path)
     variants.add_argument("ledger", type=Path)

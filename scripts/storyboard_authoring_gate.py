@@ -61,10 +61,7 @@ GENERIC_CAMERA = re.compile(r"相关动作的进入相位起拍|镜头平滑跟�
 GENERIC_LIGHT = re.compile(r"环境光方向与主体明暗落点保持连续|均匀漫射日光落在.+暗部保留真实层次")
 DEPTH_WORDS = re.compile(r"景深|焦外|虚化|焦点")
 CONCRETE_LIGHT = re.compile(r"左侧|右侧|前方|后方|侧面|逆光|顶光|低位|漫射|阴影|明部|暗部|高光|轮廓")
-MAIN_FILL_LIGHT = re.compile(
-    r"主光\s*[:：][^；;。\r\n]{1,80}?(?:辅光|环境反射|反射光|补光)\s*[:：]"
-    r"[^；;。\r\n]+"
-)
+MAIN_FILL_LIGHT = re.compile(r"主光\s*[:：].{1,80}(?:辅光|环境反射|反射光|补光)\s*[:：]", re.S)
 CONCRETE_CUT = re.compile(r"切出|接入|动作锚点|视线锚点|声音先行|结果读清|落点")
 
 
@@ -122,14 +119,9 @@ def body_errors(units, *, legacy=False):
             if GENERIC_CAMERA.search(body):
                 errors.append({"code": "AUTHORING_GENERIC_CAMERA", "shot": key,
                                "message": "摄影路径不得使用泛化占位句"})
-            # Camera directions, action shadows and later sentences cannot
-            # supply the concrete terms missing from the lighting clause.
-            # This remains a lexical diagnostic, not a semantic approval.
-            lighting = MAIN_FILL_LIGHT.search(body)
-            if (lighting is None or GENERIC_LIGHT.search(lighting.group(0))
-                    or not CONCRETE_LIGHT.search(lighting.group(0))):
+            if GENERIC_LIGHT.search(body) or not CONCRETE_LIGHT.search(body) or not MAIN_FILL_LIGHT.search(body):
                 errors.append({"code": "AUTHORING_LIGHTING_UNDER_SPECIFIED", "shot": key,
-                               "message": "光照描述本身须落实具体主光、辅光或反射关系和明暗落点，不能借用摄影或动作中的方向与明暗词"})
+                               "message": "正文须落实具体主光、辅光或反射关系和明暗落点"})
             if not DEPTH_WORDS.search(body):
                 errors.append({"code": "AUTHORING_DEPTH_MISSING", "shot": key,
                                "message": "正文须落实实际清晰与焦外关系"})
@@ -498,6 +490,33 @@ def candidate_production_cast(draft_path, explicit_trace=None):
     return declarations(trace)
 
 
+def candidate_source_background_slots(draft_path, explicit_trace=None):
+    from source_background_slots import declarations
+    try:
+        trace = json.loads(trace_path(draft_path, explicit_trace).read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError):
+        return []
+    return declarations(trace)
+
+
+def candidate_source_participant_slots(draft_path, explicit_trace=None):
+    from source_participant_slots import declarations
+    try:
+        trace = json.loads(trace_path(draft_path, explicit_trace).read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError):
+        return []
+    return declarations(trace)
+
+
+def candidate_source_text_voices(draft_path, explicit_trace=None):
+    from source_text_voices import declarations
+    try:
+        trace = json.loads(trace_path(draft_path, explicit_trace).read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError):
+        return []
+    return declarations(trace)
+
+
 def _source_cues(record):
     """Return explicit parenthetical performance cues, not inferred actions."""
     label = record.get("label") or ""
@@ -571,7 +590,8 @@ def source_mapping_errors(state, units, trace):
                            "message": "每镜须绑定本单元实际来源记录"})
             source = []
         mapped_records.update(source)
-        dialogue_records = {part["record"] for part in shot.get("dialogue_parts", [])}
+        from source_text_voices import source_record
+        dialogue_records = {source_record(part, unit) for part in shot.get("dialogue_parts", [])}
         if not dialogue_records.issubset(source):
             errors.append({"code": "AUTHORING_TRACE_SOURCE", "shot": key,
                            "message": "本镜全部发声来源须包含在镜级来源映射中"})
@@ -680,7 +700,8 @@ def _validate_v4(project, state, draft_bytes, units, expected_context_sha256,
         if declared_refs:
             import storyboard_text
             context = storyboard_text._slice_state(state, [units[0]['span'][0], units[-1]['span'][1]])
-            source_refs = validate(context, declared_refs, [rid for u in units for rid in u['source_records']])
+            source_refs = validate(context, declared_refs, [rid for u in units for rid in u['source_records']],
+                                   source_state=state)
         if from_units(units) != source_refs:
             raise ValueError('已解析单元与当前侧车的来源引用声明不一致')
     except ValueError as exc:
@@ -697,6 +718,46 @@ def _validate_v4(project, state, draft_bytes, units, expected_context_sha256,
             raise ValueError('已解析单元与当前侧车的制作人物对应不一致')
     except (OSError, ValueError) as exc:
         errors.append({'code': 'AUTHORING_PRODUCTION_CAST', 'message': str(exc)})
+    import source_background_slots as background
+    background_rows = []
+    try:
+        background_rows = background.declarations(trace)
+        if background_rows:
+            import storyboard_text
+            scoped = storyboard_text._slice_state(state, [units[0]['span'][0], units[-1]['span'][1]])
+            background_rows = background.validate(scoped, background_rows,
+                [rid for unit in units for rid in unit['source_records']], source_state=state)
+        if background.from_units(units) != background_rows:
+            raise ValueError('已解析单元与当前侧车的静默背景槽不一致')
+    except (OSError, ValueError) as exc:
+        errors.append({'code': 'AUTHORING_SOURCE_BACKGROUND_SLOTS', 'message': str(exc)})
+    import source_participant_slots as participants
+    participant_rows = []
+    try:
+        participant_rows = participants.declarations(trace)
+        if participant_rows:
+            import storyboard_text
+            scoped = storyboard_text._slice_state(state, [units[0]['span'][0], units[-1]['span'][1]])
+            participant_rows = participants.validate(scoped, participant_rows,
+                [rid for unit in units for rid in unit['source_records']], source_state=state)
+        if participants.from_units(units) != participant_rows:
+            raise ValueError('已解析单元与当前侧车的静默来源参与者槽不一致')
+        participants.require_usage(units, participant_rows)
+    except (OSError, ValueError) as exc:
+        errors.append({'code': 'AUTHORING_SOURCE_PARTICIPANT_SLOTS', 'message': str(exc)})
+    import source_text_voices as text_voices
+    text_voice_rows = []
+    try:
+        text_voice_rows = text_voices.declarations(trace)
+        if text_voice_rows:
+            import storyboard_text
+            scoped = storyboard_text._slice_state(state, [units[0]['span'][0], units[-1]['span'][1]])
+            text_voice_rows = text_voices.validate(scoped, text_voice_rows,
+                [rid for unit in units for rid in unit['source_records']], source_state=state)
+        if text_voices.from_units(units) != text_voice_rows:
+            raise ValueError('已解析单元与当前侧车的原剧情文字声音不一致')
+    except (OSError, ValueError) as exc:
+        errors.append({'code': 'AUTHORING_SOURCE_TEXT_VOICES', 'message': str(exc)})
     draft_sha256 = hashlib.sha256(draft_bytes).hexdigest()
     for field, value, code in (
             ("draft_sha256", draft_sha256, "AUTHORING_TRACE_DRAFT_BINDING"),
@@ -762,6 +823,12 @@ def _validate_v4(project, state, draft_bytes, units, expected_context_sha256,
         payload['source_references'] = source_refs
     if cast_rows:
         payload['production_cast'] = cast_rows
+    if background_rows:
+        payload[background.FIELD] = background_rows
+    if participant_rows:
+        payload[participants.FIELD] = participant_rows
+    if text_voice_rows:
+        payload[text_voices.FIELD] = text_voice_rows
     return {**payload, "enforced": True, "status": "blocked" if errors else "passed",
             "errors": errors, "warnings": warnings,
             "trace_path": str(path), "shot_keys": expected_keys,
@@ -791,30 +858,10 @@ def _validate_for_delivery(project, state, draft_bytes, units, expected_context_
         value = None
     validator = _validate_v3 if isinstance(value, dict) and value.get("version") == LEGACY_VERSION else _validate_v4
     if validator is _validate_v4:
-        report = validator(project, state, draft_bytes, units, expected_context_sha256,
-                           explicit_trace, draft_path, observations_summary=observations_summary)
-    else:
-        report = validator(project, state, draft_bytes, units, expected_context_sha256,
-                           explicit_trace, draft_path)
-
-    # New bound projects add an append-only authoring-session-v5 envelope.  The
-    # historical v4 validator remains unchanged for fixture and pre-migration
-    # states that do not carry the protocol field.
-    if state.get("authoring_session_protocol") == "authoring-session-v5":
-        import authoring_session
-        expected_scope = [units[0]["span"][0], units[-1]["span"][1]]
-        v5 = authoring_session.validate_for_delivery(
-            project, draft_bytes, units, expected_scope, trace=value)
-        report = copy.deepcopy(report)
-        report["authoring_session_protocol"] = authoring_session.PROTOCOL
-        report["authoring_session"] = v5
-        report["provenance_manifest"] = v5.get("provenance_manifest")
-        report["authoring_event_chain"] = v5.get("authoring_event_chain")
-        report["authoring_event_chain_sha256"] = v5.get("authoring_event_chain_sha256")
-        report["errors"] = list(report.get("errors", [])) + list(v5.get("errors", []))
-        report["status"] = "blocked" if report["errors"] else "passed"
-        report["enforced"] = True
-    return report
+        return validator(project, state, draft_bytes, units, expected_context_sha256,
+                         explicit_trace, draft_path, observations_summary=observations_summary)
+    return validator(project, state, draft_bytes, units, expected_context_sha256,
+                     explicit_trace, draft_path)
 
 
 class AuthoringGateError(ValueError):

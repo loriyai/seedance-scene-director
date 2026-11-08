@@ -16,16 +16,14 @@
 | 分段轮次、段内序号及稳定分镜显示名称 | [交付版式](storyboard-rules.md#交付版式)、`scripts/segment_naming.py`与文本交付入口 |
 | 视频比例到分镜画幅配置的统一映射、版本与单元冻结 | `scripts/ratio_profiles.py`；适用创作规则见[画幅配置](storyboard-rules.md#画幅配置) |
 | 新文字分镜的创作、流程和语法 | 下述三份分镜权威资料 |
-| creative fields 的唯一写入源、脚本/工具不得改写正文及能力边界 | [共同执行契约](execution-contract.md#分镜创作与工具边界) |
-| 官方作者会话、正文修订和作者/审阅提交闭环 | [分镜工作流](storyboard-workflow.md#正文写入与修订闭环) |
-| provenance manifest、作者事件链及 bind/check/preview/commit 来源校验 | [文本语法](storyboard-text-format.md#作者会话与来源证明) |
+| 分镜创作与脚本的职责边界、跨代理与包装器约束 | [共同执行契约](execution-contract.md#分镜创作与工具边界) |
 | 连续逐镜核对、按需增量诊断、逐段交付及同类问题闭环 | [分镜工作流](storyboard-workflow.md#范围一次当前场次逐步完成) |
 | 按场来源/资产/版本只读投影与上下文绑定 | `scripts/storyboard_context.py`；合法引用集合复用`storyboard_text.py` |
 | 新文字分镜事件、过程问题及耗时派生 | `scripts/storyboard_metrics.py`；命令仍由`storyboard_text_delivery.py`暴露，口径见[事件计时](storyboard-text-format.md#事件计时) |
 
 同次写稿完成属性去向和字段判断，既有代表组验收处理组合后的语义冲突；不能用增加重复清单、全文扫描或审阅轮次弥补职责不清。工具只验证其能确定的结构、来源和依赖，不以不断扩充题材禁词代替自然语言判断。本表只作导航，不复制各领域规则。
 
-新文字分镜只在[工作流](storyboard-workflow.md)、[创作规则总集](storyboard-rules.md)和[文本语法](storyboard-text-format.md)维护职责；正文写入边界及物理能力限制由[共同执行契约](execution-contract.md)维护，不在本表复制。场级报告绑定最终文件及当前项目上下文，不使用下述旧规则哈希图或逐镜复用证据。规则变化时按真实影响阅读/修订，不自动重做未受影响镜头。
+新文字分镜只在[工作流](storyboard-workflow.md)、[创作规则总集](storyboard-rules.md)和[文本语法](storyboard-text-format.md)维护职责。场级报告绑定最终文件及当前项目上下文，不使用下述旧规则哈希图或逐镜复用证据。规则变化时按真实影响阅读/修订，不自动重做未受影响镜头。
 
 ## 旧JSON规则摘要实现
 

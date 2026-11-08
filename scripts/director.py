@@ -245,13 +245,17 @@ def build_records(script_text, ledger, markers=None):
     from source_compat import action_content, voice_cue_kind
     scenes = {s["number"]: s for s in ledger["scenes"]}
     records, cursor, scene, heading_line = [], 0, None, 0
+    source_labels = set()
     for line_no, raw in enumerate(script_text.splitlines(), 1):
         line = raw.strip()
         heading = re.fullmatch(r"场景(\d+)(?=-(?:日|夜)-(?:内|外)-|：(?:日|夜)·(?:内|外)·)[：-](日|夜)[·-](内|外)[·-](.+)", line)
         if heading:
             scene = scenes[int(heading.group(1))]
             heading_line = line_no
-        elif not line or line.startswith("人物："):
+        elif line.startswith("人物："):
+            source_labels = set(line[3:].rstrip('；').split('；'))
+            continue
+        elif not line:
             continue
         else:
             require(scene is not None, "标准剧本正文出现在场景标题之前")
@@ -262,8 +266,8 @@ def build_records(script_text, ledger, markers=None):
             else:
                 require("：" in line, f"标准剧本第{line_no}行无法识别")
                 label, text = line.split("：", 1)
-                speaker = re.sub(r"[（(][^（）()]*[）)]$", "", label).strip()
-                modifier = re.search(r"[（(]([^（）()]*)[）)]$", label)
+                speaker = label.strip() if label.strip() in source_labels else re.sub(r"[（(][^（）()]*[）)]$", "", label).strip()
+                modifier = None if label.strip() in source_labels else re.search(r"[（(]([^（）()]*)[）)]$", label)
                 cue = modifier.group(1).strip() if modifier else ""
                 voice_kind = voice_cue_kind(cue) or ("画外音" if speaker == "画外音" else None)
                 inner = voice_kind == "内心想法"
@@ -332,10 +336,6 @@ def bind(args):
              "header_hash": video_header.digest(header) if header is not None else None,
              "header_policy": video_header.POLICY if header is not None else None,
              "storyboard_authoring_policy": "shot-by-shot-v1",
-             # New bound projects use the append-only authoring-session-v5
-             # protocol.  The separate authoring session file is created only
-             # when the writer explicitly starts a session after binding.
-             "authoring_session_protocol": "authoring-session-v5",
              "ranges": [], "units": [], "next_numbers": {}, "receipts": []}
     if (project / video_settings.RATIO_FILE).exists() or (project / video_settings.WORKFLOW_FILE).exists():
         ratio = video_settings.get_ratio(project, required=True)

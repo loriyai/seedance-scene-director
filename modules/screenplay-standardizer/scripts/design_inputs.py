@@ -86,7 +86,7 @@ def project_inputs(data, shared, asset_ids):
         variant = item.get("appearance_variant", {})
         current_design = authored.get(aid, item.get("visual_design", {}))
         image_dependencies = design.reference_design_ids(item, current_design)
-        base = image_dependencies[0] if image_dependencies else variant.get("base_asset_id")
+        base = image_dependencies[0] if image_dependencies else design.reference_base(item)
         targets = {aid} | ({base} if base else set())
         anchor = assignments.get(aid, current_design.get("identity_anchor_id"))
         facts = copy.deepcopy(design.asset_facts(data, category, item))

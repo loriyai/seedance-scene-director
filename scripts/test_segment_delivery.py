@@ -124,7 +124,7 @@ class SegmentDelivery(unittest.TestCase):
         state = d.load(self.project)
         receipt = state['receipts'][0]
         result = self.output.read_text(encoding='utf-8')
-        self.assertEqual(result.splitlines()[-1], '本次共4个分镜单元，总时长 0分 16秒')
+        self.assertEqual(result.splitlines()[-1], '本次共4个分镜单元，共 4 镜，总时长 0分16秒')
         self.assertNotIn('本次共', d.render_unit(state, receipt['units'][0]))
         ratio_file.write_text('16:9\n', encoding='utf-8')
         self.assertNotEqual(before, context.context_hash(d.load(self.project), self.project))

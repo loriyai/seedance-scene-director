@@ -1,7 +1,7 @@
-"""Explicit, source-backed masked appearances of an existing character.
+"""Reviewed appearance states and source-time transitions of one character.
 
-The source cast remains unchanged. A visual asset is not a second person, and
-the presence of a mask word never creates an appearance automatically.
+The source cast retains one person slot. Authors identify actual completed
+changes; scripts validate evidence, identities and image dependencies.
 """
 import copy
 import hashlib
@@ -10,6 +10,77 @@ import re
 
 
 POLICY = "source-masked-v1"
+STATE_POLICY = "source-appearance-states-v2"
+APPEARANCE_POLICY = "identity-appearance-v2"
+POLICIES = (POLICY, STATE_POLICY)
+WEARABLE_KINDS = {"headgear", "face_covering", "accessory"}
+STATE_KINDS = WEARABLE_KINDS | {"clothing", "styling", "age", "persistent_state", "unresolved"}
+
+
+def is_wearable(item):
+    return item.get("appearance_variant", {}).get("kind") in WEARABLE_KINDS
+
+
+def reference_base(item):
+    meta = item.get("appearance_variant", {})
+    return meta.get("reference_asset_id", meta.get("base_asset_id"))
+
+
+def appearance_roots(data):
+    """Earliest actual source appearance per reviewed body; no visual inference."""
+    from cast_contract import split_cast_entry
+    chars = {item['id']: item for item in data.get('characters', [])}
+    ordered = []
+    for scene in data.get('scenes', []):
+        tracks = {t['base_asset_id']: t for t in scene_appearance_tracks(scene)}
+        for aid in scene.get('character_ids', []):
+            track = tracks.get(aid)
+            ordered.append(track['initial_asset_id'] if track else aid)
+            if track:
+                ordered.extend(event['to_asset_id'] for event in track['transitions'])
+    ordered.extend(chars)
+    families, result = {}, {}
+    for aid in dict.fromkeys(ordered):
+        item = chars[aid]
+        base = chars.get(item.get('appearance_variant', {}).get('base_asset_id'), item)
+        entry = base.get('source_entry', base['name'])
+        if '-群像-' in entry or base.get('character_kind') == 'speaking_ensemble':
+            continue
+        appearance = base.get('appearance', {})
+        key = (('body', appearance['identity'], appearance['incarnation'])
+               if appearance else ('name', split_cast_entry(entry)[0]))
+        # A state derived from a source slot keeps that body's initial foundation.
+        root = families.setdefault(key, aid)
+        result[aid] = root
+    return result
+
+
+def validate_state_review(item, data, paragraphs):
+    meta = item['appearance_variant']
+    if meta['kind'] != 'persistent_state':
+        require('state_review' not in meta, item['id'] + '仅持续外观状态填写state_review')
+        return
+    review = meta.get('state_review', {})
+    require(isinstance(review, dict) and review.get('selection_basis') in ('special_reusable', 'core_continuity')
+            and line(review.get('consistency_reason')), item['id'] + '持续状态须审阅复用或核心连续性依据')
+    core = review['selection_basis'] == 'core_continuity'
+    require(not core or line(review.get('story_role')), item['id'] + '核心持续状态须说明具体剧情作用')
+    uses = review.get('visible_uses')
+    require(isinstance(uses, list) and len(uses) >= (1 if core else 2), item['id'] + '持续状态可见使用证据不足')
+    scenes = {scene['id']: scene for scene in data['scenes']}
+    seen, intervals = set(), []
+    for use in uses:
+        require(isinstance(use, dict) and use.get('scene_id') in scenes and line(use.get('event_id')),
+                item['id'] + '持续状态使用须有合法场次与事件')
+        key = (use['scene_id'], use['event_id'])
+        require(key not in seen, item['id'] + '持续状态使用事件重复')
+        seen.add(key)
+        scene = scenes[use['scene_id']]
+        require(item['id'] in scene_character_ids(scene), item['id'] + '持续状态使用未关联本场形象')
+        a, b = evidence_position(dict(use, basis=review['consistency_reason']), paragraphs, scene, item['id'])
+        require(not any(a < y and x < b for x, y in intervals), item['id'] + '独立使用证据不能重叠')
+        intervals.append((a, b))
+
 
 
 def require(condition, message):
@@ -74,8 +145,9 @@ def validate_character_variants(data, paragraphs):
     has_tracks = any("character_appearances" in scene for scene in data.get("scenes", []))
     if "character_variant_policy" not in data and not variants and not has_tracks:
         return
-    require(data.get("character_variant_policy") == POLICY and data.get("schema_version") == 3,
-            "须显式启用schema 3与source-masked-v1，旧台账不自动升级")
+    require(data.get("character_variant_policy") in POLICIES and data.get("schema_version") == 3,
+            "须显式启用schema 3与受支持的形象状态政策，旧台账不自动升级")
+    modern = data["character_variant_policy"] == STATE_POLICY
     actual_digest = hashlib.sha256(json.dumps(paragraphs, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
     require(data.get("source_digest") == actual_digest, "台账与审阅原文版本不匹配")
     chars = {item["id"]: item for item in data["characters"]}
@@ -85,14 +157,15 @@ def validate_character_variants(data, paragraphs):
     for item in variants:
         meta = item["appearance_variant"]
         require(isinstance(meta, dict), item["id"] + " appearance_variant须为对象")
-        require(set(meta) <= {"base_asset_id", "label", "kind", "design_basis", "source_digest", "prop_asset_id"},
+        require(set(meta) <= ({"base_asset_id", "label", "kind", "design_basis", "source_digest", "prop_asset_id"}
+                             | ({"reference_asset_id", "state_review"} if modern else set())),
                 item["id"] + " appearance_variant含未知字段")
         base = chars.get(meta.get("base_asset_id"))
         require(base is not None and base["id"] != item["id"] and "appearance_variant" not in base
                 and "-群像-" not in base.get("source_entry", base["name"]),
                 item["id"] + "须直接关联既有个体基础形象，不能递归继承或指向群像")
-        require(meta.get("kind") in ("headgear", "face_covering") and line(meta.get("label"))
-                and line(meta.get("design_basis")), item["id"] + "须明确佩戴类型、造型名与参考必要性")
+        require(meta.get("kind") in (STATE_KINDS if modern else ("headgear", "face_covering")) and line(meta.get("label"))
+                and line(meta.get("design_basis")), item["id"] + "须明确形象类型、造型名与参考依据")
         key = (base["id"], meta["label"])
         require(key not in labels, item["id"] + "同一基础人物的相同佩戴标签须复用已有资产")
         labels.add(key)
@@ -102,6 +175,19 @@ def validate_character_variants(data, paragraphs):
         require("appearance" not in item, item["id"] + "不能另造世次或场次形象；身份与服装由base_asset_id继承")
         require(item.get("visual_mode", "image_asset") == "image_asset", item["id"] + "佩戴版本必须是图片资产")
         require("prop_asset_id" not in meta or meta["prop_asset_id"] in props, item["id"] + "关联佩戴道具不存在")
+    if modern:
+        roots = appearance_roots(data)
+        for item in variants:
+            parent = chars.get(reference_base(item))
+            require(parent is not None and parent['id'] != item['id'], item['id'] + '图片引用缺失或自引用')
+            require(roots.get(parent['id']) == roots.get(item['id']),
+                    item['id'] + '图片引用须属于同一实际人物身体')
+            visited, current = {item['id']}, parent
+            while current.get('appearance_variant'):
+                require(current['id'] not in visited, item['id'] + '图片依赖存在循环')
+                visited.add(current['id'])
+                current = chars.get(reference_base(current))
+                require(current is not None, item['id'] + '图片依赖不存在')
     used = set()
     for scene in data["scenes"]:
         tracks = scene_appearance_tracks(scene)
@@ -139,23 +225,30 @@ def validate_character_variants(data, paragraphs):
                 prop = chars[aid].get("appearance_variant", {}).get("prop_asset_id")
                 require(not prop or prop in scene["prop_ids"], scene["id"] + "佩戴版本引用的道具未关联本场")
     require(variant_ids <= used, "存在未登记任何本场初始状态或切换事件的佩戴版本")
+    if modern:
+        for item in variants:
+            validate_state_review(item, data, paragraphs)
 
 
 def apply_variant_review(data, payload, paragraphs):
     """Register a reviewed complete snapshot; allocate only genuinely new IDs."""
-    require(isinstance(payload, dict) and payload.get("policy") == POLICY
+    require(isinstance(payload, dict) and payload.get("policy") in POLICIES
             and payload.get("reviewed") is True and payload.get("source_digest") == data.get("source_digest"),
-            "审阅JSON须声明当前原文摘要、source-masked-v1与reviewed=true")
+            "审阅JSON须声明当前原文摘要、受支持的形象状态政策与reviewed=true")
     require(isinstance(payload.get("variants"), list) and isinstance(payload.get("scene_appearances"), list),
             "审阅须包含完整variants及scene_appearances数组")
     result = copy.deepcopy(data)
-    result["character_variant_policy"] = POLICY
+    result["character_variant_policy"] = payload["policy"]
+    modern = payload["policy"] == STATE_POLICY
+    if modern:
+        result["character_appearance_policy"] = APPEARANCE_POLICY
     chars = {item["id"]: item for item in result["characters"]}
     occupied = set(chars) | set(result.get("retired_ids", [])) | {item["id"] for item in result.get("inactive_assets", {}).get("characters", [])}
     old_ids = {item["id"] for item in result["characters"] if "appearance_variant" in item}
     submitted = set()
     for review in payload["variants"]:
-        require(isinstance(review, dict) and set(review) <= {"id", "base_asset_id", "name", "label", "kind", "design_basis", "prop_asset_id"},
+        require(isinstance(review, dict) and set(review) <= ({"id", "base_asset_id", "name", "label", "kind", "design_basis", "prop_asset_id"}
+                                                           | ({"reference_asset_id", "state_review"} if modern else set())),
                 "variants条目字段错误")
         base = chars.get(review.get("base_asset_id"))
         require(base is not None and "appearance_variant" not in base, "基础人物ID不存在或自身为佩戴版本")
@@ -214,7 +307,7 @@ def _event_span(state, scene_id, event):
 def validate_storyboard(state, unit):
     """Check source-time appearance changes after ordinary continuity validation."""
     data = state["ledger"]
-    if data.get("character_variant_policy") != POLICY:
+    if data.get("character_variant_policy") not in POLICIES:
         return
     variants = {item["id"]: item["appearance_variant"]["base_asset_id"] for item in data["characters"] if "appearance_variant" in item}
     tracked_bases = set(variants.values())

@@ -13,7 +13,7 @@ CATEGORIES = ("scenes", *ASSETS)
 DERIVED = {"image_prompt", "image_format", "image_design_digest"}
 DESIGN_DERIVED = {"source_fact_digest", "source_context_digest"}
 BOOKKEEPING = {"asset_decision_receipts", "asset_decision_history", "asset_archive", "retired_ids", "inactive_assets", "pending_reviews"}
-GLOBAL_POLICIES = {"schema_version", "asset_policy", "group_policy", "character_variant_policy", "image_design_version", "visual_style", "temporal_layers"}
+GLOBAL_POLICIES = {"schema_version", "asset_policy", "group_policy", "character_variant_policy", "character_appearance_policy", "image_design_version", "visual_style", "temporal_layers"}
 
 
 def _require(condition, message):
@@ -71,6 +71,7 @@ def _dependencies(data, authored=None):
         if category == "characters":
             variant = item.get("appearance_variant", {})
             edge(variant.get("base_asset_id"), aid, "base_character_or_clothing_dependency")
+            edge(variant.get("reference_asset_id"), aid, "current_appearance_reference_dependency")
             edge(variant.get("prop_asset_id"), aid, "shared_covering_PROP_dependency")
             appearance = item.get("appearance")
             if isinstance(appearance, dict) and appearance.get("identity") and appearance.get("incarnation"):

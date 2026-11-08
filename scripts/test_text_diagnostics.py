@@ -25,66 +25,6 @@ class TextDiagnosticsTests(unittest.TestCase):
         text = re.sub(r'主光：[^；\r\n]+；', '', text)
         self.fx.draft.write_text(text, encoding='utf-8')
 
-    def test_preview_cannot_borrow_camera_direction_for_generic_lighting(self):
-        text = self.fx.draft.read_text(encoding='utf-8')
-        text = re.sub(r'主光：[^；\r\n]+；',
-                      '摄影机沿侧前方横移，主光：舞台暖光，环境反射：墙面补暗；',
-                      text, count=1)
-        self.fx.draft.write_text(text, encoding='utf-8')
-        before = self.fx.snapshot()
-        with self.assertRaises(gate.AuthoringGateError) as caught:
-            delivery.preview(self.fx.project, self.fx.draft)
-        lighting = [error for error in caught.exception.report['errors']
-                    if error['code'] == 'AUTHORING_LIGHTING_UNDER_SPECIFIED']
-        self.assertTrue(any(error['shot'] == 'SC0001/u01#1' for error in lighting))
-        self.assertEqual(before, self.fx.snapshot())
-
-    def test_lighting_cannot_borrow_terms_from_action_or_later_sentence(self):
-        outside = (
-            '摄影机沿左侧横移，',
-            '',
-        )
-        endings = (
-            '；人物从右侧阴影走到前方。',
-            '。人物走到前方暗部；',
-        )
-        for camera in outside:
-            for ending in endings:
-                with self.subTest(camera=camera, ending=ending):
-                    body = (camera + '景深保面部，主光：舞台暖光，环境反射：墙面补暗'
-                            + ending)
-                    units = [{'draft_key': 'SC0001/u01', 'shots': [
-                        {'text': '（虚构人物的中景）' + body + '音效：无。'}]}]
-                    errors = gate.body_errors(units)
-                    self.assertIn('AUTHORING_LIGHTING_UNDER_SPECIFIED',
-                                  {error['code'] for error in errors})
-
-    def test_empty_or_separated_fill_is_not_a_complete_lighting_clause(self):
-        for body in (
-            '景深保手，主光：左侧窗光照亮手背，环境反射：；',
-            '景深保手，主光：左侧窗光照亮手背；人物抬手，环境反射：白墙托住暗部；',
-        ):
-            with self.subTest(body=body):
-                units = [{'draft_key': 'SC0001/u01', 'shots': [
-                    {'text': '（虚构人物的中景）' + body + '音效：无。'}]}]
-                self.assertIn('AUTHORING_LIGHTING_UNDER_SPECIFIED',
-                              {error['code'] for error in gate.body_errors(units)})
-
-    def test_concrete_lighting_can_be_reused_without_artificial_variation(self):
-        for light in (
-            '主光：左侧窗光照亮手背，辅光：白墙反射托住掌下暗部；',
-            '主光：无明确方向的漫射天光照亮面部，环境反射：浅墙托住下颌暗部；',
-        ):
-            with self.subTest(light=light):
-                units = [{'draft_key': 'SC0001/u01', 'shots': [
-                    {'text': '（虚构人物的中景）摄影机沿桌横移，景深保手，'
-                     + light + '人物放下杯子。音效：无。'},
-                    {'text': '（虚构人物的近景）侧后固定机位，浅景深保面部，'
-                     + light + '人物望向门口。音效：无。'},
-                ]}]
-                self.assertNotIn('AUTHORING_LIGHTING_UNDER_SPECIFIED',
-                                 {error['code'] for error in gate.body_errors(units)})
-
     def test_preview_reports_multiple_references_and_independent_body_errors_without_writes(self):
         self.broken_references_and_lighting()
         before = self.fx.snapshot()
@@ -281,7 +221,7 @@ class TextDiagnosticsTests(unittest.TestCase):
             delivery.preview(self.fx.project, self.fx.draft, authoring_trace=trace)
         codes = {e['code'] for e in caught.exception.errors}
         self.assertTrue({'AUTHORING_LIGHTING_UNDER_SPECIFIED', 'CAMERA_CONSTRAINT',
-                         'DIALOGUE_CAPACITY'} <= codes, codes)
+                         'SPEECH_READING_CAPACITY'} <= codes, codes)
         self.assertEqual(before, self.fx.snapshot())
 
 

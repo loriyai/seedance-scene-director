@@ -65,7 +65,7 @@ class SceneTextPerformanceTests(unittest.TestCase):
             actual = delivery.render_units(state, units, authoring_gate=info['authoring_gate'])
         self.assertEqual(context.call_count, 1)
         expected = [d.render_unit(state, unit, authoring_gate=info['authoring_gate']) for unit in units]
-        expected.append('本次共4个分镜单元，总时长 0分 16秒')
+        expected.append('本次共4个分镜单元，共 4 镜，总时长 0分16秒')
         self.assertEqual(actual.encode('utf-8'), ('\n\n'.join(expected) + '\n').encode('utf-8'))
         self.assertEqual((state, units), before)
 

@@ -240,92 +240,11 @@ def save(project, state):
     d.write_json(state_path(project), state)
 
 
-def process_start_identity(pid):
-    """Return a process birth identity, or None when it cannot be verified."""
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-        return None
-    if os.name == "nt":
-        import ctypes
-        from ctypes import wintypes
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel.OpenProcess.restype = wintypes.HANDLE
-        kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
-        kernel.GetProcessTimes.restype = wintypes.BOOL
-        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-        handle = kernel.OpenProcess(0x1000, False, pid)
-        if not handle:
-            return None
-        try:
-            created, exited, system, user = (wintypes.FILETIME() for _ in range(4))
-            if not kernel.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited),
-                                          ctypes.byref(system), ctypes.byref(user)):
-                return None
-            return "windows:" + str((created.dwHighDateTime << 32) | created.dwLowDateTime)
-        finally:
-            kernel.CloseHandle(handle)
-    if sys.platform.startswith("linux"):
-        try:
-            stat = Path(f"/proc/{pid}/stat").read_text()
-            start_ticks = stat[stat.rfind(")") + 2:].split()[19]
-            boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-            return f"linux:{boot}:{start_ticks}"
-        except (OSError, IndexError):
-            return None
-    return None
-
-
-def _remove_owned_operation_lock(path, expected):
-    """Do not remove a lock whose saved ownership has changed."""
-    try:
-        if path.read_text(encoding="utf-8") != expected:
-            return False
-        path.unlink()
-        return True
-    except FileNotFoundError:
-        return False
-
-
-def recover_operation_lock(path, process_alive):
-    """Recover a dead owner; unknown identity and live legacy PIDs stay locked."""
-    path = Path(path)
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return False
-    text = raw.strip()
-    if text.isdigit() and int(text) > 0:
-        pid, recorded_start = int(text), None
-    else:
-        try:
-            owner = json.loads(text)
-        except (ValueError, TypeError):
-            owner = None
-        valid = (isinstance(owner, dict) and owner.get("policy") == "canvas-operation-lock-v1"
-                 and isinstance(owner.get("pid"), int) and not isinstance(owner["pid"], bool)
-                 and owner["pid"] > 0 and isinstance(owner.get("owner_token"), str)
-                 and bool(owner["owner_token"].strip())
-                 and (owner.get("process_start") is None or
-                      isinstance(owner["process_start"], str) and bool(owner["process_start"].strip())))
-        if not valid:
-            fail("LOCK_OWNER_INVALID", "操作锁归属格式无法确认；已保留锁，需核对原进程与日志。")
-        pid, recorded_start = owner["pid"], owner.get("process_start")
-    stale = not process_alive(pid)
-    if not stale and recorded_start is not None:
-        current_start = process_start_identity(pid)
-        stale = current_start is not None and current_start != recorded_start
-    return _remove_owned_operation_lock(path, raw) if stale else False
-
-
 @contextlib.contextmanager
 def project_lock(project):
     directory = Path(project) / "canvas"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "operation.lock"
-    pid = os.getpid()
-    owner = json.dumps({"policy": "canvas-operation-lock-v1", "pid": pid,
-                        "process_start": process_start_identity(pid),
-                        "owner_token": uuid.uuid4().hex}, sort_keys=True)
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
@@ -333,7 +252,7 @@ def project_lock(project):
     canvas_lock = None
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(owner)
+            handle.write(str(os.getpid()))
         binding = read_state(project).get("binding")
         if binding:
             canvas_lock = Path(tempfile.gettempdir()) / ("seedance-canvas-" + digest([binding["account_id"], binding["canvas_id"]]) + ".lock")
@@ -343,12 +262,12 @@ def project_lock(project):
                 canvas_lock = None
                 fail("BUSY", "该画布已有CLI批量操作正在进行，请稍后续接。")
             with os.fdopen(shared_fd, "w", encoding="utf-8") as handle:
-                handle.write(owner)
+                handle.write(str(os.getpid()))
         yield
     finally:
         if canvas_lock:
-            _remove_owned_operation_lock(canvas_lock, owner)
-        _remove_owned_operation_lock(path, owner)
+            canvas_lock.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
 
 
 def normalize_team_id(value):
@@ -719,6 +638,12 @@ def target_satisfied(doc, target):
         return reference_edges(doc, node_id) == target["value"]
     if action == "asset_snapshot":
         return fingerprint(doc, node_id) == target["value"]
+    if action == "bound_asset_identity":
+        from canvas_asset_reference_policy import reference_media_satisfied
+        return (target.get('canvas_id') == doc.get('rootCanvasId')
+                and target.get('kind') in ('role', 'scene', 'image') and node_id in nodes(doc)
+                and kind_of(nodes(doc)[node_id]) == target['kind']
+                and all(reference_media_satisfied(doc, node_id, consumer) for consumer in target.get('consumers', [])))
     if action == "prompt":
         return prompt_of(doc, node_id) == target["value"] and prompt_references_satisfied(doc, node_id, target["value"])
     if action == "prompt_text":
@@ -1383,7 +1308,7 @@ def reconcile_black_video(project, cli, state, doc, decisions=None, preview=Fals
     return doc, result
 
 
-def reference_map(session, state, doc, asset_ids=None, blocked_assets=(), inspect_media=True):
+def reference_map(session, state, doc, asset_ids=None, blocked_assets=(), inspect_media=True, asset_reference_policy=None):
     node_map = nodes(doc) if doc else {}
     names = d.reference_catalog(session, asset_ids)
     prompt_only = {item["id"] for item in session["ledger"]["characters"] if item.get("visual_mode") == "prompt_only"}
@@ -1397,12 +1322,18 @@ def reference_map(session, state, doc, asset_ids=None, blocked_assets=(), inspec
         if key in blocked_assets:
             pending.append({"key": key, "name": name, "reason": "asset_conflict", "node_id": node_id})
             continue
+        if asset_reference_policy is not None:
+            from canvas_asset_reference_policy import source_issue
+            issue = source_issue(asset_reference_policy, key, state, doc)
+            if issue:
+                pending.append({'key': key, 'name': name, **issue})
+                continue
         actual_kind = kind_of(node_map[node_id]) if node_id in node_map else None
         expected_kind = kinds.get(key)
         if node_id in node_map and (actual_kind != expected_kind or mapping.get("kind", expected_kind) != expected_kind):
             pending.append({"key": key, "name": name, "reason": "node_type_changed", "node_id": node_id,
                             "expected_kind": expected_kind, "actual_kind": actual_kind})
-        elif node_id in node_map and name_of(doc, node_id) != name:
+        elif asset_reference_policy is None and node_id in node_map and name_of(doc, node_id) != name:
             pending.append({"key": key, "name": name, "reason": "node_name_changed", "node_id": node_id,
                             "actual_name": name_of(doc, node_id)})
         elif node_id in node_map:
@@ -1426,12 +1357,13 @@ def reference_renderer(references, all_names=None):
     return convert
 
 
-def desired_videos(session, state, doc, units, bind_references=False, failures=None, blocked_assets=(), inspect_media=True):
+def desired_videos(session, state, doc, units, bind_references=False, failures=None, blocked_assets=(), inspect_media=True, asset_reference_policy=None):
     d.require(session["ledger"].get("schema_version") == 3, "旧项目须先审核资产去重升级方案，再同步视频及引用")
     flags = {u["id"]: bind_references or state["mappings"].get(u["id"], {}).get("references_requested",
              state["mappings"].get(u["id"], {}).get("references_bound", False)) for u in units}
     needed = set().union(*(unit_asset_ids(session, unit) for unit in units)) if units else set()
-    refs, pending = reference_map(session, state, doc, needed, blocked_assets, inspect_media) if any(flags.values()) else ({}, [])
+    policy_args = {'asset_reference_policy': asset_reference_policy} if asset_reference_policy is not None else {}
+    refs, pending = reference_map(session, state, doc, needed, blocked_assets, inspect_media, **policy_args) if any(flags.values()) else ({}, [])
     # Older lookup adapters included one project-wide BLACK issue. The unit-level
     # resolver below owns that special reference now, so do not report it twice.
     pending = [row for row in pending if row.get("key") != "BLACK"]
@@ -1480,7 +1412,12 @@ def unit_asset_ids(session, unit):
     if unit.get("output_format") == "scene-text-v1":
         prompt_only = {item["id"] for item in session["ledger"]["characters"]
                        if item.get("visual_mode") == "prompt_only"}
-        return set(unit["asset_ids"]) - prompt_only
+        from source_background_slots import normalize
+        prompt_only.update(row['asset_id'] for row in normalize(unit.get('source_background_slots', [])))
+        from source_participant_slots import normalize as normalize_participants
+        prompt_only.update(row['asset_id'] for row in normalize_participants(unit.get('source_participant_slots', [])))
+        from source_text_voices import voice_only_ids
+        return set(unit["asset_ids"]) - prompt_only - voice_only_ids(session, unit)
     mentioned = set(unit["character_ids"] + d.scene_asset_ids(session, unit["scene_ids"]) + unit["prop_ids"])
     fields = [unit["global"]]
     for shot in unit["shots"]:
@@ -1522,14 +1459,24 @@ def consume_image_references(session, state, completed, pending):
             remaining.pop(key, None)
 
 
-def asset_reconciliation_plan(session, state, doc, decisions=None):
+def asset_reconciliation_plan(session, state, doc, decisions=None, asset_reference_policy=None):
     """Resolve the ledger against one inventory, preserving unrelated/manual nodes."""
     by_name = {}
     for node_id, node in nodes(doc).items():
         by_name.setdefault(name_of(doc, node_id), []).append((node_id, kind_of(node)))
     plan, conflicts = [], []
+    from canvas_asset_reference_policy import declaration, source_issue
+    if declaration(decisions) is not None:
+        d.require(asset_reference_policy is not None, '按ID引用策略须由原生入口验证授权并冻结映射')
     for item in desired_assets(session):
         key, name, kind = item["key"], item["name"], item["kind"]
+        if asset_reference_policy is not None:
+            issue = source_issue(asset_reference_policy, key, state, doc)
+            if issue:
+                conflicts.append({'key': key, 'name': name, **issue})
+            else:
+                plan.append(dict(item, node_id=asset_reference_policy['nodes'][key]['node_id'], resolution='mapped'))
+            continue
         choice = (decisions or {}).get(key, {})
         if choice.get("skip") is True:
             conflicts.append({"key": key, "name": name, "reason": "asset_skipped"})
@@ -1577,14 +1524,20 @@ def asset_reconciliation_plan(session, state, doc, decisions=None):
     return plan, conflicts
 
 
-def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, preview=False, context=None, batch_mode=False):
-    plan, conflicts = asset_reconciliation_plan(session, state, doc, decisions)
+def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, preview=False, context=None, batch_mode=False, asset_reference_policy=None):
+    policy_args = {'asset_reference_policy': asset_reference_policy} if asset_reference_policy is not None else {}
+    plan, conflicts = asset_reconciliation_plan(session, state, doc, decisions, **policy_args)
     missing = [{"key": item["key"], "name": item["name"], "kind": item["kind"],
                 "previous_node_id": state["mappings"].get(item["key"], {}).get("node_id")}
                for item in plan if item["resolution"] == "create"]
     summary = {"created": [], "adopted": [], "reused": [], "conflicts": conflicts,
                "missing_asset_count": len(missing), "missing_assets": missing,
                "plan": [{key: item[key] for key in ("key", "name", "kind", "node_id", "resolution")} for item in plan]}
+    if asset_reference_policy is not None:
+        # This choice owns no asset field writes, initialization, image-input
+        # refresh or replacement. Missing/wrong nodes block instead.
+        summary.update(policy=asset_reference_policy['policy'], reused=[item['key'] for item in plan], blocked=bool(conflicts))
+        return doc, summary
     rebuild_limit = MAX_AUTO_REBUILD_ASSETS if batch_mode else 3
     if len(missing) > rebuild_limit:
         summary["blocked"] = True
@@ -1682,6 +1635,11 @@ def accept_synced_item(project, state, doc, item, pending, context, references_o
         text_verified = prompt_of(doc, node_id) == item["prompt"]
         d.require(text_verified, "提示词文字回读尚未通过，不能标记同步完成")
         references_verified = video_references_satisfied(doc, node_id, item)
+        policy = context.get('asset_reference_policy')
+        if policy is not None:
+            from canvas_asset_reference_policy import reference_media_satisfied
+            sources = {r['node_id'] for r in policy['nodes'].values()} & set(node_asset_ids(item['prompt']))
+            references_verified = references_verified and all(reference_media_satisfied(doc, source, node_id) for source in sources)
         unit_pending = [row for row in pending if row["key"] in item["reference_keys"] and (not row.get("unit_ids") or key in row["unit_ids"])]
         unresolved = any(row.get("reason") not in ("missing_image", "missing_video") for row in unit_pending)
         references_verified = references_verified and not unresolved
@@ -1717,13 +1675,13 @@ def accept_synced_item(project, state, doc, item, pending, context, references_o
 
 
 def sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview=False, bind_references=False,
-         existing_only=False, references_only=False, session_override=None, progress=None, batch_mode=True):
+         existing_only=False, references_only=False, session_override=None, progress=None, batch_mode=True, asset_reference_policy=None):
     """Always leave a batch report, including on a stopped/uncertain CLI write."""
     context = {"failures": [], "progress": progress,
                "batch_mode": batch_mode and callable(getattr(cli, "compile_batch", None))}
     try:
         result = _sync(project, cli, kind, request_id, ids, decisions, preview, bind_references,
-                       existing_only, references_only, context, session_override)
+                       existing_only, references_only, context, session_override, asset_reference_policy)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         if kind == "videos" and not preview and context.get("session") and context.get("state") and context.get("doc"):
             try:
@@ -1768,8 +1726,14 @@ def reference_report(project, context):
 
 
 def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview=False, bind_references=False,
-          existing_only=False, references_only=False, context=None, session_override=None):
+          existing_only=False, references_only=False, context=None, session_override=None, asset_reference_policy=None):
     session = copy.deepcopy(session_override) if session_override is not None else d.load(Path(project))
+    import canvas_asset_reference_policy as reference_policy
+    policy = None
+    if reference_policy.declaration(decisions) is not None or asset_reference_policy is not None:
+        local_state = read_state(project)
+        policy = (reference_policy.verify(project, session, local_state, decisions, kind, asset_reference_policy)
+                  if asset_reference_policy is not None else reference_policy.freeze(project, session, local_state, decisions, kind))
     d.require(session["ledger"].get("schema_version") == 3, "旧项目须先审核资产去重升级方案；当前同步不会连接画布或续接旧写入")
     state, doc = connected(project, cli)
     if preview:
@@ -1777,6 +1741,9 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
     context = context if context is not None else {"failures": []}
     context.update(session=session, state=state, doc=doc,
                    inspect_media=kind != "videos" or references_only or context.get("batch_mode", False))
+    policy_args = {'asset_reference_policy': policy} if policy is not None else {}
+    if policy is not None:
+        context['asset_reference_policy'] = policy
     reconcile(project, cli, state, doc, preview=preview, decisions=decisions)
     if kind == "assets" and context.get("batch_mode") and not preview:
         from canvas_job_backend import sync_assets
@@ -1790,7 +1757,7 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
         context["units"] = units
         if not existing_only and not references_only:
             doc, asset_summary = reconcile_asset_nodes(project, cli, session, state, doc, decisions, preview, context,
-                                                       batch_mode=context.get("batch_mode", False))
+                                                       batch_mode=context.get("batch_mode", False), **policy_args)
             context["doc"] = doc
             context["failures"].extend(asset_summary["conflicts"])
             if asset_summary.get("blocked"):
@@ -1810,7 +1777,7 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
         bind_references = bind_references or references_only or any(m.get("image") for m in state["mappings"].values())
         blocked_assets = {item["key"] for item in asset_summary["conflicts"]} if asset_summary else set()
         desired, pending = desired_videos(session, state, doc, units, bind_references, context["failures"], blocked_assets,
-                                          inspect_media=references_only or context.get("batch_mode", False))
+                                          inspect_media=references_only or context.get("batch_mode", False), **policy_args)
         failed_units = {row["key"] for row in context["failures"] if row.get("reason") == "prompt_encoding_failed"}
         if failed_units and not preview:
             state["pending_units"] = list(dict.fromkeys([*state["pending_units"], *sorted(failed_units)]))
@@ -1924,7 +1891,7 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
     reference_completed = set()
     if kind == "videos" and context.get("batch_mode"):
         from canvas_batch import sync_videos
-        doc, counts, reference_completed = sync_videos(project, cli, state, doc, plan, pending, context, references_only)
+        doc, counts, reference_completed = sync_videos(project, cli, state, doc, plan, pending, context, references_only, **policy_args)
         context["doc"] = doc
         consume_image_references(session, state, reference_completed, pending)
         save(project, state)
@@ -1947,6 +1914,12 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
         if edge_only_black(item) and item.get("references_bound") and item.get("black_node_id"):
             reference_sources.add(item["black_node_id"])
         for source in reference_sources:
+            if policy is not None:
+                target = reference_policy.source_target(policy, doc, source)
+                if target['action'] == 'bound_asset_identity':
+                    if not target_satisfied(fresh, target):
+                        fail('CONCURRENT_EDIT', '引用资产原节点已消失或类型改变，不能按名称替代。', key=key, node_id=source)
+                    continue
             if (source not in nodes(fresh) or source not in nodes(doc)
                     or kind_of(nodes(fresh)[source]) != kind_of(nodes(doc)[source])
                     or name_of(fresh, source) != name_of(doc, source)):

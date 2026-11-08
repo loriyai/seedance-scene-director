@@ -40,7 +40,7 @@ def diagnostics(unit):
 def appearance_reference_warnings(state, unit):
     """Review visual references without treating a voice ID as a second person."""
     ledger = state.get('ledger', {})
-    if ledger.get('character_variant_policy') != 'source-masked-v1':
+    if ledger.get('character_variant_policy') not in ('source-masked-v1', 'source-appearance-states-v2'):
         return []
     variants = {item['id']: item['appearance_variant']['base_asset_id']
                 for item in ledger.get('characters', []) if item.get('appearance_variant')}

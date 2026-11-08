@@ -41,6 +41,18 @@ def context_scope(state, span, authoring=None, *, policy=SCOPED_CONTEXT_POLICY):
               if r['scene_id'] in unit['scene_ids']], key=lambda r: (r['scene_id'], r['asset_id'])),
             'source_references': project_refs(normalize(declarations(authoring)), unit),
             'production_cast': casting.project(casting.declarations(authoring), unit)}
+    import source_background_slots as background
+    slots = background.project(background.declarations(authoring), unit)
+    if slots:
+        refs[background.FIELD] = slots
+    import source_participant_slots as participants
+    slots = participants.project(participants.declarations(authoring), unit)
+    if slots:
+        refs[participants.FIELD] = slots
+    import source_text_voices as text_voices
+    voice_rows = text_voices.project(text_voices.declarations(authoring), unit)
+    if voice_rows:
+        refs[text_voices.FIELD] = voice_rows
     return {'policy': policy, 'span': [start, end], 'references': refs}
 
 
@@ -122,6 +134,15 @@ def context_hash(state, project=None, *, scope=None):
                 'scripts/project_paths.py', 'scripts/project_continuation.py',
                 'references/storyboard-workflow.md', 'references/execution-contract.md')
     data['text_rules'] = {name: d.file_hash(d.ROOT / name) for name in required}
+    if scope and scope.get('references', {}).get('source_background_slots'):
+        name = 'scripts/source_background_slots.py'
+        data['text_rules'][name] = d.file_hash(d.ROOT / name)
+    if scope and scope.get('references', {}).get('source_participant_slots'):
+        for name in ('scripts/source_participant_slots.py', 'scripts/source_background_slots.py'):
+            data['text_rules'][name] = d.file_hash(d.ROOT / name)
+    if scope and scope.get('references', {}).get('source_text_voices'):
+        for name in ('scripts/source_text_voices.py', 'scripts/speech_timing_audit.py', 'scripts/canvas.py'):
+            data['text_rules'][name] = d.file_hash(d.ROOT / name)
     if project is not None:
         from video_settings import get_ratio
         from script_partition import load_plan
@@ -170,7 +191,7 @@ def scene_context(project, scene_id, span=None, authoring_trace=None):
         record['selected_text'] = d.portion(record, start, end)
         record['selected_span'] = [max(start, record['start']), min(end, record['end'])]
     allowed = text_core.scene_asset_ids(scene)
-    carried, source_refs, cast_rows = [], [], []
+    carried, source_refs, cast_rows, background_rows, participant_rows, text_voice_rows = [], [], [], [], [], []
     if authoring_trace is not None:
         from continuity import carry_declarations, validate_carry_props
         declared = carry_declarations(d.read_json(authoring_trace))
@@ -183,9 +204,10 @@ def scene_context(project, scene_id, span=None, authoring_trace=None):
         # Validate quotes against the actual requested slice, never the full
         # records also returned for reading context.
         scoped = text_core._slice_state(state, selected_span)
-        source_refs = validate(scoped, local_refs, [r['id'] for r in selected])
+        source_refs = validate(scoped, local_refs, [r['id'] for r in selected], source_state=state)
         for row in source_refs:
-            field = 'scene_assets' if row['asset_id'].startswith('SET') else 'props'
+            field = ('characters' if row['asset_id'].startswith('CHAR') else
+                     'scene_assets' if row['asset_id'].startswith('SET') else 'props')
             allowed[field] = list(dict.fromkeys(allowed[field] + [row['asset_id']]))
         import production_cast as casting
         local_unit = {'scene_ids': [scene_id], 'source_records': [r['id'] for r in selected]}
@@ -194,7 +216,22 @@ def scene_context(project, scene_id, span=None, authoring_trace=None):
         cast_rows = casting.validate(scoped, [local_unit], cast_rows)
         assets = text_core._context(casting.context(state, cast_rows))[3]
         allowed['characters'] = list(dict.fromkeys(allowed['characters'] + [r['asset_id'] for r in cast_rows]))
-    ids = list(dict.fromkeys(aid for values in allowed.values() for aid in values))
+        import source_background_slots as background
+        background_rows = background.project(background.declarations(trace), local_unit)
+        background_rows = background.validate(scoped, background_rows, local_unit['source_records'], source_state=state)
+        assets = text_core._context(background.context(casting.context(state, cast_rows), background_rows))[3]
+        allowed['characters'] = list(dict.fromkeys(allowed['characters'] + [r['asset_id'] for r in background_rows]))
+        import source_participant_slots as participants
+        participant_rows = participants.project(participants.declarations(trace), local_unit)
+        participant_rows = participants.validate(scoped, participant_rows, local_unit['source_records'], source_state=state)
+        overlaid = background.context(casting.context(state, cast_rows), background_rows)
+        assets = text_core._context(participants.context(overlaid, participant_rows))[3]
+        allowed['characters'] = list(dict.fromkeys(allowed['characters'] + [r['asset_id'] for r in participant_rows]))
+        import source_text_voices as text_voices
+        text_voice_rows = text_voices.project(text_voices.declarations(trace), local_unit)
+        text_voice_rows = text_voices.validate(scoped, text_voice_rows, local_unit['source_records'], source_state=state)
+    ids = list(dict.fromkeys([aid for values in allowed.values() for aid in values]
+                            + [row['speaker'] for row in text_voice_rows if row['speaker'] != 'female_announcer']))
     d.require(set(ids) <= assets.keys(), '场次台账引用了不存在的资产')
     # image_prompt repeats the visual design and is not a storyboard input.
     fields = ('id', 'name', 'source_entry', 'source_speaker', 'visual_mode',
@@ -248,6 +285,10 @@ def scene_context(project, scene_id, span=None, authoring_trace=None):
         'source_lines': {'first': first, 'last': last, 'text': '\n'.join(lines[first - 1:last])},
         'records': selected, 'allowed_asset_ids': allowed, 'assets': projected,
         'continuity_props': carried, 'source_references': source_refs, 'production_cast': cast_rows,
+        **({'source_background_slots': background_rows} if background_rows else {}),
+        **({'source_participant_slots': participant_rows} if participant_rows else {}),
+        **({'source_text_voices': text_voice_rows, 'source_text_voice_character_ids': sorted(
+             {r['speaker'] for r in text_voice_rows if r['speaker'] != 'female_announcer'})} if text_voice_rows else {}),
         'style': (project / 'video-style.txt').read_text(encoding='utf-8-sig').strip(),
         'video_header': header,
         'video_ratio': ratio,

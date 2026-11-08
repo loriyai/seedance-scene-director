@@ -64,6 +64,8 @@ def _closure(data, catalog, requested, authored):
                 require(base_id in catalog and catalog[base_id][0] == "characters", f"{aid}缺少基础人物")
                 require(not catalog[base_id][1].get("appearance_variant"), f"{aid}基础人物不能是佩戴版本")
                 add(base_id, f"{aid}:base_asset_id")
+                if variant.get('reference_asset_id'):
+                    add(variant['reference_asset_id'], f"{aid}:reference_asset_id")
                 if variant.get("prop_asset_id") is not None:
                     prop_id = variant["prop_asset_id"]
                     require(prop_id in catalog and catalog[prop_id][0] == "props", f"{aid}缺少关联PROP")
@@ -168,20 +170,9 @@ def preview_design(data, payload, style_text, asset_ids, input_hashes=None):
                  _check_existing(data, category, old, style_text, version))
         current[aid][1]["visual_design"] = value
         modes[aid] = "authored" if aid in authored else "reused_verified"
-    for aid in sorted(image_ids):
-        category, item = current[aid]
-        variant = item.get("appearance_variant")
-        if category != "characters" or not variant:
-            continue
-        base = current[variant["base_asset_id"]][1]
-        require(not design.is_group(base), f"{aid}佩戴基础不能为群体")
-        value, base_design = item["visual_design"], base["visual_design"]
-        for field in ("identity_anchor_id", "styling", "appearance_overrides", "override_source_facts"):
-            require(field not in value or value[field] == base_design.get(field), f"{aid}须继承基础形象的{field}")
-            if field in base_design:
-                value[field] = copy.deepcopy(base_design[field])
-        if base_design.get("appearance_overrides"):
-            value.setdefault("variant_differences", copy.deepcopy(base_design.get("variant_differences", [])))
+    design.inherit_variant_designs(
+        {aid: current[aid][1] for aid in image_ids if current[aid][0] == 'characters'},
+        {aid: current[aid][1]['visual_design'] for aid in image_ids})
     # Check same-body identity and anchor ownership against the full inventory.
     for aid in sorted(image_ids):
         if modes[aid] == "authored":

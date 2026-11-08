@@ -209,6 +209,13 @@ def enqueue(project, kind, request_id=None, ids=None, folder=None, decisions=Non
         session = project_session(project, session, options["transfer"], kind, selected)
     if kind in ("assets", "videos", "references"):
         options["sync_protocol"] = c.BATCH_PROTOCOL
+    import canvas_asset_reference_policy as reference_policy
+    policy = reference_policy.freeze(project, session, canvas_state, decisions, kind)
+    if policy is not None:
+        d.require(not any(row.get('status') in ('pending', 'uncertain', 'acknowledged')
+                          for row in canvas_state.get('journal', [])),
+                  '存在未确认写入，须先按原操作回读核对，不能提交新引用选择')
+        options[reference_policy.KEY] = policy
     if kind == "images":
         d.require(folder is not None, "上传任务需要明确的图片文件夹")
         options.update(folder=str(Path(folder).resolve()), images=image_inventory(folder))
@@ -258,6 +265,11 @@ def validate_job(project, job):
     session = d.load(Path(project))
     d.require(c.digest(frozen_input_scope(project, session, job)) == job["input_digest"],
               "任务来源、台账、风格或选中分镜已变化，请重新提交")
+    import canvas_asset_reference_policy as reference_policy
+    if (reference_policy.declaration(job['options'].get('decisions')) is not None
+            or reference_policy.KEY in job['options']):
+        reference_policy.verify(project, job['session'], c.read_state(project),
+            job['options'].get('decisions'), job['kind'], job['options'].get(reference_policy.KEY))
     if job["kind"] == "images":
         d.require(image_inventory(job["options"]["folder"]) == job["options"]["images"], "待上传图片已变化，请重新提交")
     return session
@@ -290,6 +302,9 @@ class JobInputGuard:
         if self.job["options"].get("transfer"):
             from canvas_transfer import watched_paths
             paths.extend(watched_paths(self.project, self.job["options"]["transfer"]))
+        policy = self.job['options'].get('asset_reference_policy')
+        if policy is not None:
+            paths.append(Path(policy['authorization']['path']))
         if self.job["kind"] == "images":
             folder = Path(self.job["options"]["folder"])
             # Watching directories detects added/renamed files without rehashing
@@ -677,9 +692,11 @@ def recover_dead_operation_locks(project):
     if binding:
         paths.append(Path(tempfile.gettempdir()) / ("seedance-canvas-" + c.digest([binding["account_id"], binding["canvas_id"]]) + ".lock"))
     for path in paths:
-        # The CLI adapter owns the lock format and process birth identity.
-        # Journal recovery still runs before any resumed remote write.
-        c.recover_operation_lock(path, alive)
+        if path.exists():
+            raw = path.read_text(encoding="utf-8")
+            d.require(raw.strip().isdigit(), "旧操作锁格式异常，需人工检查")
+            if not alive(int(raw)) and path.read_text(encoding="utf-8") == raw:
+                path.unlink()  # Only a provably dead PID; journal recovery still runs before writes.
 
 
 def run_job(project, manifest, check_control, progress):
@@ -745,8 +762,11 @@ def run_worker(project, runner=None, run_id=None):
             manifest_cache = {}
 
             def check_control(force=False):
-                if c.read_state(project).get("binding") != binding:
+                current_canvas = c.read_state(project)
+                if current_canvas.get("binding") != binding:
                     c.fail("CANVAS_BINDING_CHANGED", "后台进程所持画布锁与当前绑定不同，请重新启动后台同步。")
+                from canvas_asset_reference_policy import assert_mappings
+                assert_mappings(job['options'].get('asset_reference_policy'), current_canvas)
                 if read(directory(project) / "control.json", {}).get("paused"):
                     raise PauseRequested()
                 for path in directory(project).glob("job-*.json"):

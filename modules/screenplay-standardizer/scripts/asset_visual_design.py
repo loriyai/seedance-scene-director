@@ -9,7 +9,8 @@ import hashlib
 import json
 import re
 
-from character_variants import scene_character_ids, scene_appearance_tracks
+from character_variants import (scene_character_ids, scene_appearance_tracks, is_wearable,
+                                reference_base, appearance_roots, APPEARANCE_POLICY)
 import design_scope
 
 
@@ -84,7 +85,7 @@ def reference_design_ids(item, design=None):
         for value in values:
             nonempty(value, f"{item['id']} image_reference.{key}")
     variant = item.get("appearance_variant", {})
-    if variant and base_id != variant.get("base_asset_id"):
+    if variant and base_id != reference_base(item):
         raise ValueError(f"{item['id']}图片基础引用必须与已审佩戴基础一致")
     props = reference.get("prop_asset_ids", [])
     if (not isinstance(props, list) or any(not isinstance(pid, str) or not re.fullmatch(r"PROP\d{4,}", pid) for pid in props)
@@ -121,16 +122,16 @@ def image_reference_asset_ids(item):
 def prepare_image_reference(item, design, version):
     """Materialize only newly authored wearable references, never old renders."""
     variant = item.get("appearance_variant")
-    if not variant or version != DESIGN_VERSION:
+    if not variant or not is_wearable(item) or version != DESIGN_VERSION:
         return
     reference = copy.deepcopy(design.get("image_reference", {}))
-    if reference and reference.get("base_asset_id") != variant.get("base_asset_id"):
+    if reference and reference.get("base_asset_id") != reference_base(item):
         raise ValueError(f"{item['id']}图片基础引用必须与已审佩戴基础一致")
     covering = design.get("covering")
     # The existing wearable fields remain the sole owner of fit/coverage.
     changes = ([covering.get("fit"), covering.get("coverage")] if isinstance(covering, dict)
                else [covering])
-    reference.update(base_asset_id=variant.get("base_asset_id"), changes=changes)
+    reference.update(base_asset_id=reference_base(item), changes=changes)
     reference.setdefault("preserve", ["基础图中未变化的身份、体型和衣装"])
     design["image_reference"] = reference
 
@@ -413,8 +414,8 @@ def asset_facts(data, category, item):
     facts = item.get("visual_facts", [])
     if category == "characters" and item.get("appearance_variant"):
         base = next((character for character in data["characters"]
-                     if character["id"] == item["appearance_variant"].get("base_asset_id")), None)
-        if base:
+                     if character["id"] == reference_base(item)), None)
+        if base and is_wearable(item):
             facts = base.get("visual_facts", []) + facts
         prop = linked_covering_prop(data, item)
         if prop:
@@ -487,6 +488,8 @@ def source_context_digest(data, category, item):
               "source_name": item.get("source_name"), "appearance": item.get("appearance"),
               "visible_uses": item.get("visible_uses"), "variant": item.get("variant"),
               "parent_id": item.get("parent_id"), "location_id": item.get("location_id")}
+    if data.get('character_appearance_policy'):
+        record['character_appearance_policy'] = data['character_appearance_policy']
     if item.get("scene_clothing"):
         record["scene_clothing"] = item["scene_clothing"]
     if item.get("scene_source_speakers"):
@@ -730,6 +733,13 @@ def validate_design_record(category, item, design, anchors, version=DESIGN_VERSI
         if category != "characters" or version != DESIGN_VERSION or is_group(item):
             raise ValueError(f"{label}图片派生仅用于v2独立角色")
         reference_design_ids(item, design)
+    if "change_kind" in design:
+        from character_variants import STATE_KINDS
+        if category != 'characters' or design['change_kind'] not in STATE_KINDS:
+            raise ValueError(f"{label}change_kind须为合法角色形象变化类型")
+        meta_kind = item.get('appearance_variant', {}).get('kind')
+        if meta_kind and meta_kind != design['change_kind']:
+            raise ValueError(f"{label}change_kind与已审状态类型冲突")
     nonempty(design.get("basis"), f"{label}设计依据")
     if design.get("reviewed_source_facts") is not True:
         raise ValueError(f"{label}设计作者须审阅原文明示约束并声明 reviewed_source_facts=true")
@@ -750,7 +760,7 @@ def validate_design_record(category, item, design, anchors, version=DESIGN_VERSI
     if category == "characters":
         if design["identity_anchor_id"] not in anchors:
             raise ValueError(f"{label}缺少共享人物身份锚点")
-        if item.get("appearance_variant") or "covering" in design:
+        if is_wearable(item) or "covering" in design:
             if version != DESIGN_VERSION:
                 raise ValueError(f"{label}遮面造型须显式采用{DESIGN_VERSION}，不能落入旧版露面模板")
             covering = design.get("covering")
@@ -776,7 +786,7 @@ def validate_design_record(category, item, design, anchors, version=DESIGN_VERSI
         if not isinstance(changes, dict):
             raise ValueError(f"{label}override_source_facts须为字段到原文事实text的对象")
         for field in ("face", "body"):
-            if (field in overrides and not item.get("appearance_variant")
+            if (field in overrides and not is_wearable(item)
                     and changes.get(field) not in [fact["text"] for fact in item.get("visual_facts", [])]):
                 raise ValueError(f"{label}覆盖{field}须指定已验证原文事实作为变化依据，不因换装改脸或改体型")
 
@@ -819,6 +829,30 @@ def validate_scene_clothing(data):
     """Explicit source clothing names share a body and an authored image root."""
     from cast_contract import split_cast_entry
     catalog = {item["id"]: item for item in visual_assets(data, "characters") if not is_group(item)}
+    if data.get('character_appearance_policy') == APPEARANCE_POLICY:
+        roots = appearance_roots(data)
+        for aid, root_id in roots.items():
+            if aid not in catalog or root_id not in catalog:
+                continue
+            item, root = catalog[aid], catalog[root_id]
+            value, root_design = item.get('visual_design', {}), root.get('visual_design', {})
+            if value.get('identity_anchor_id') != root_design.get('identity_anchor_id'):
+                raise ValueError(aid + '同名同身体的编号或描述形象须保持同一人物身份锚点')
+            ids = reference_design_ids(item)
+            if aid == root_id:
+                if ids:
+                    raise ValueError(aid + '首次实际出现的形象须为本身体基础图片')
+            elif not ids:
+                raise ValueError(aid + '后续形象须引用本身体首次形象，不能独立重画人物')
+            elif not is_wearable(item) and item.get('appearance_variant', {}).get('kind') != 'persistent_state' and ids[0] != root_id:
+                raise ValueError(aid + '普通造型须直接引用本身体首次形象')
+            kind = item.get('appearance_variant', {}).get('kind', value.get('change_kind'))
+            if kind not in ('age', 'persistent_state') and not is_wearable(item):
+                own = value.get('appearance_overrides', {})
+                original = root_design.get('appearance_overrides', {})
+                if any(own.get(key) != original.get(key) for key in ('age', 'body', 'face')):
+                    raise ValueError(aid + '编号、服装及妆发版本不得改变面部身份、年龄或身体比例')
+        return
     unresolved_roots = {}
     for item in catalog.values():
         if not item.get("scene_clothing"):
@@ -848,19 +882,52 @@ def validate_scene_clothing(data):
             raise ValueError("换装基础图片关系待审；须明确现有图片引用，不自动合并同名身体：" + str(roots))
 
 
+def inherit_variant_designs(characters, designs):
+    """Resolve current appearance dependencies before compile in every entry point."""
+    prepared, visiting = set(), set()
+    def inherit(aid):
+        if aid in prepared:
+            return
+        if aid in visiting:
+            raise ValueError(aid + '形象参考存在循环')
+        visiting.add(aid)
+        item = characters[aid]
+        if item.get('appearance_variant'):
+            base = characters.get(reference_base(item))
+            if not base or base['id'] not in designs or is_group(base):
+                raise ValueError(aid + '形象须指向现用独立人物参考')
+            inherit(base['id'])
+            current, base_design = designs[aid], designs[base['id']]
+            fields = (('identity_anchor_id', 'styling', 'appearance_overrides', 'override_source_facts')
+                      if is_wearable(item) else ('identity_anchor_id',))
+            for field in fields:
+                if field in current and current[field] != base_design.get(field):
+                    raise ValueError(f"{aid}形象须继承基础形象的{field}；不同服装须指向对应基础服装形象")
+                if field in base_design:
+                    current[field] = copy.deepcopy(base_design[field])
+            if is_wearable(item) and base_design.get('appearance_overrides'):
+                current.setdefault('variant_differences', copy.deepcopy(base_design.get('variant_differences', [])))
+        visiting.remove(aid)
+        prepared.add(aid)
+    for aid in characters:
+        if aid in designs:
+            inherit(aid)
+
+
 def validate_variant_inheritance(data):
     characters = {item["id"]: item for item in data["characters"]}
     for item in visual_assets(data, "characters"):
         variant = item.get("appearance_variant")
         if not variant:
             continue
-        base = characters.get(variant.get("base_asset_id"))
-        if not base or base.get("appearance_variant") or is_group(base):
-            raise ValueError(f"{item['id']}遮面造型须指向现用独立人物基础服装形象")
-        for field in ("identity_anchor_id", "styling", "appearance_overrides", "override_source_facts"):
+        base = characters.get(reference_base(item))
+        if not base or is_group(base):
+            raise ValueError(f"{item['id']}形象须指向现用同身份人物参考")
+        fields = (("identity_anchor_id", "styling", "appearance_overrides", "override_source_facts")
+                  if is_wearable(item) else ("identity_anchor_id",))
+        for field in fields:
             if item["visual_design"].get(field) != base["visual_design"].get(field):
-                raise ValueError(f"{item['id']}遮面造型须继承基础形象的{field}；不同服装须指向对应基础服装形象")
-
+                raise ValueError(f"{item['id']}形象须继承基础形象的{field}；不同服装须指向对应基础服装形象")
 
 def compile_group_prompt(common, design):
     wardrobe = design["group_wardrobe"]
@@ -892,7 +959,7 @@ def compile_reference_prompt(data, item, design, style):
     common += "本版仅改变：" + "；".join(reference["changes"]) + "。保留：" + "；".join(reference["preserve"]) + "。"
     form = {"model": "gpt-image-2", "aspect_ratio": "16:9", "background": "pure_white",
             "reference_policy": IMAGE_REFERENCE_POLICY, "reference_asset_ids": ids}
-    if design.get("covering"):
+    if design.get("covering") and item.get('appearance_variant', {}).get('kind') != 'accessory':
         layout = MASKED_CHARACTER_LAYOUT
         form.update(layout="left_1/3_covered_head_right_2/3_front_side90_back_full_body",
                     covering_state="worn_in_every_view")
@@ -905,6 +972,10 @@ def compile_reference_prompt(data, item, design, style):
     else:
         layout = CHARACTER_LAYOUT
         form["layout"] = "left_1/3_large_front_face_right_2/3_front_side90_back_full_body"
+    if item.get('appearance_variant', {}).get('kind') == 'accessory':
+        form['wearable_state'] = 'worn_in_every_view'
+        if item['appearance_variant'].get('prop_asset_id'):
+            form['covering_prop_asset_id'] = item['appearance_variant']['prop_asset_id']
     prompt = common + layout + "各视图只呈现本版完成状态，保持未改变部分与基础图片一致。使用符合主体结构的自然静态姿态、柔和均匀棚拍光；不绘变化过程、前后对照、额外角色、说明文字、标签、水印或签名。"
     return prompt, form
 
@@ -1150,21 +1221,7 @@ def _apply_design_compiled(data, payload, style_text, *, patch=False, paragraphs
     if set(designs) != expected:
         raise ValueError(f"design须覆盖全部现用图片CHAR/SET/PROP，prompt_only群像不填设计；缺少{sorted(expected - set(designs))}，多余{sorted(set(designs) - expected)}")
     characters = {item["id"]: item for item in result["characters"]}
-    for item in visual_assets(result, "characters"):
-        variant = item.get("appearance_variant")
-        if not variant:
-            continue
-        base = characters.get(variant.get("base_asset_id"))
-        if not base or base.get("appearance_variant") or base["id"] not in designs or is_group(base):
-            raise ValueError(f"{item['id']}遮面造型须指向现用独立人物基础服装形象")
-        current, base_design = designs[item["id"]], designs[base["id"]]
-        for field in ("identity_anchor_id", "styling", "appearance_overrides", "override_source_facts"):
-            if field in current and current[field] != base_design.get(field):
-                raise ValueError(f"{item['id']}遮面造型须继承基础形象的{field}；不同服装须指向对应基础服装形象")
-            if field in base_design:
-                current[field] = copy.deepcopy(base_design[field])
-        if base_design.get("appearance_overrides"):
-            current.setdefault("variant_differences", copy.deepcopy(base_design.get("variant_differences", [])))
+    inherit_variant_designs(characters, designs)
     for item in result["characters"]:
         if item.get("visual_mode") == "prompt_only":
             for field in ("visual_design", "image_prompt", "image_format", "image_design_digest"):
