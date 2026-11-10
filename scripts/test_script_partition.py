@@ -1,5 +1,7 @@
 """Synthetic-only regressions for source-exact work assignment."""
 import copy
+from contextlib import redirect_stdout
+import io
 import itertools
 import json
 from pathlib import Path
@@ -7,6 +9,7 @@ import random
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import script_partition as partition
 
@@ -95,6 +98,118 @@ class PartitionTests(unittest.TestCase):
         self.assertEqual(partition.resolve_segment(self.project, state, [1, 7])['label'], 'A')
         self.assertIsNone(partition.resolve_segment(self.project, state, [7, 9]))
         self.assertEqual(partition.resolve_segment(self.project, state, 'B分段')['span'], [8, 16])
+        text = (self.project / partition.RANGE_TEXT_FILE).read_text(encoding='utf-8')
+        self.assertEqual(text, partition.render_plan(plan))
+        for expected in ('总字数20个字', 'A分段：共10个字', 'B分段：共10个字',
+                         '原文位置范围：[1, 0] → [3, 0]', '原文字符偏移范围：[0, 12)',
+                         '标准正文范围：[0, 8)', '开始：阿明站起。', '结束：阿明站起。',
+                         '目标切点1：目标累计10.0字，实际累计10字，偏移0.0字。',
+                         review_data['boundaries'][0]['reason']):
+            self.assertIn(expected, text)
+
+    def test_saved_plan_retry_restores_missing_text_without_new_identity(self):
+        state = self.fixture([['阿明站起。'], ['阿明坐下。']])
+        proposal = partition.build_plan(state, 1)
+        plan = partition.save_plan(self.project, state, proposal)
+        original_json = (self.project / partition.PLAN_FILE).read_bytes()
+        target = self.project / partition.RANGE_TEXT_FILE
+        target.unlink()
+        state['units'] = [{'id': 'existing'}]
+        recovered = partition.save_plan(self.project, state, proposal)
+        self.assertEqual(recovered, plan)
+        self.assertEqual((self.project / partition.PLAN_FILE).read_bytes(), original_json)
+        self.assertEqual(target.read_text(encoding='utf-8'), partition.render_plan(plan))
+
+    def test_unrelated_text_is_protected_before_initial_save_or_replan(self):
+        state = self.fixture([['阿明站起。'], ['阿明坐下。']])
+        proposal = partition.build_plan(state, 1)
+        target = self.project / partition.RANGE_TEXT_FILE
+        target.write_text('已存在的人工范围，不可覆盖。', encoding='utf-8')
+        original = target.read_bytes()
+        with self.assertRaisesRegex(ValueError, '不能静默覆盖'):
+            partition.save_plan(self.project, state, proposal)
+        self.assertEqual(target.read_bytes(), original)
+        self.assertFalse((self.project / partition.PLAN_FILE).exists())
+        target.unlink()
+        partition.save_plan(self.project, state, proposal)
+        saved_json = (self.project / partition.PLAN_FILE).read_bytes()
+        target.write_bytes(original)
+        review_data = self.local_review(state, 2, [self.boundary(state, 4, 1, 'before', 2)])
+        for candidate in (proposal, partition.build_plan(state, 2, review=review_data)):
+            with self.assertRaisesRegex(ValueError, '不能静默覆盖'):
+                partition.save_plan(self.project, state, candidate)
+            self.assertEqual(target.read_bytes(), original)
+            self.assertEqual((self.project / partition.PLAN_FILE).read_bytes(), saved_json)
+
+    def test_replan_replaces_only_text_matching_previous_plan(self):
+        state = self.fixture([['阿明站起。'], ['阿明坐下。']])
+        old = partition.save_plan(self.project, state, partition.build_plan(state, 1))
+        review_data = self.local_review(state, 2, [self.boundary(state, 4, 1, 'before', 2)])
+        new = partition.save_plan(self.project, state, partition.build_plan(state, 2, review=review_data))
+        self.assertNotEqual(old['plan_id'], new['plan_id'])
+        self.assertEqual(new['version'], old['version'] + 1)
+        self.assertEqual(partition.load_plan(self.project, state), new)
+        self.assertEqual((self.project / partition.RANGE_TEXT_FILE).read_text(encoding='utf-8'),
+                         partition.render_plan(new))
+
+    def test_range_text_cannot_overwrite_a_bound_input(self):
+        state = self.fixture([['阿明站起。']])
+        target = self.project / partition.RANGE_TEXT_FILE
+        original = Path(state['files']['script']['path']).read_bytes()
+        target.write_bytes(original)
+        state['files']['script']['path'] = str(target)
+        proposal = partition.build_plan(state, 1)
+        with self.assertRaisesRegex(ValueError, '不能覆盖来源'):
+            partition.save_plan(self.project, state, proposal)
+        self.assertEqual(target.read_bytes(), original)
+        self.assertFalse((self.project / partition.PLAN_FILE).exists())
+
+    def test_text_or_json_write_failure_can_retry_initial_save_and_replan(self):
+        for has_old in (False, True):
+            for operation in ('director.atomic_text', 'script_partition.atomic_json'):
+                with self.subTest(has_old=has_old, operation=operation), tempfile.TemporaryDirectory() as temp:
+                    with mock.patch.object(self, 'project', Path(temp)):
+                        state = self.fixture([['阿明站起。'], ['阿明坐下。']])
+                        if has_old:
+                            old = partition.save_plan(self.project, state, partition.build_plan(state, 1))
+                            original_json = (self.project / partition.PLAN_FILE).read_bytes()
+                        review_data = self.local_review(state, 2, [self.boundary(state, 4, 1, 'before', 2)])
+                        proposal = partition.build_plan(state, 2, review=review_data)
+                        with mock.patch(operation, side_effect=OSError('synthetic write failure')):
+                            with self.assertRaisesRegex(OSError, 'synthetic write failure'):
+                                partition.save_plan(self.project, state, proposal)
+                        if has_old:
+                            self.assertEqual((self.project / partition.PLAN_FILE).read_bytes(), original_json)
+                        else:
+                            self.assertFalse((self.project / partition.PLAN_FILE).exists())
+                        plan = partition.save_plan(self.project, state, proposal)
+                        self.assertEqual(partition.load_plan(self.project, state), plan)
+                        self.assertEqual(plan['version'], old['version'] + 1 if has_old else 1)
+                        self.assertEqual((self.project / partition.RANGE_TEXT_FILE).read_text(encoding='utf-8'),
+                                         partition.render_plan(plan))
+
+    def test_cli_returns_actual_text_path_and_show_does_not_repair_missing_text(self):
+        state = self.fixture([['阿明站起。']])
+        state['phase'] = 'range'
+
+        def invoke(*arguments):
+            output = io.StringIO()
+            with mock.patch('director.load', return_value=state), redirect_stdout(output), \
+                    mock.patch.object(sys, 'argv', ['script_partition.py', *arguments, '--project', str(self.project)]):
+                partition.main()
+            return json.loads(output.getvalue())
+
+        result = invoke('plan', '--participants', '1')
+        target = self.project / partition.RANGE_TEXT_FILE
+        self.assertEqual(result['range_text_file'], str(target.resolve()))
+        self.assertEqual(target.read_text(encoding='utf-8'), result['text'])
+        self.assertEqual(invoke('show')['range_text_file'], str(target.resolve()))
+        target.unlink()
+        self.assertIsNone(invoke('show')['range_text_file'])
+        self.assertFalse(target.exists())
+        target.write_text('外部修改。', encoding='utf-8')
+        self.assertIsNone(invoke('show')['range_text_file'])
+        self.assertEqual(target.read_text(encoding='utf-8'), '外部修改。')
 
     def test_count_plan_selects_global_candidate_combination(self):
         state = self.fixture([['甲' * 5 + '。', '乙' * 5 + '。', '丙' * 5 + '。', '丁' * 5 + '。', '戊' * 5 + '。']])

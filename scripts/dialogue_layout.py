@@ -1,19 +1,14 @@
 """Explicit speech layout; never divide words by shot-duration proportions."""
 import re
 
+from speech_timing_policy import (SPEEDS, PAUSE_RANGES, DEFAULT_RATE,
+                                 SEMANTIC_PAUSE_ESTIMATE, PUNCTUATION,
+                                 pause_seconds)
+
 POLICY = 'semantic-v2'
 LEGACY_POLICY = 'semantic-v1'
 VOICE_POLICY = 'event-inheritance-v1'
 SPEECH_RENDER_POLICY = 'explicit-cues-v1'
-# One numerical source for the legacy text-estimate consumers. These are
-# diagnostic ranges, not playback controls or mandatory speaking instructions.
-SPEEDS = {'常速': (4.8, 5.4), '快节奏': (4.8, 6.0), '情绪慢速': (4.0, 4.8)}
-PAUSE_RANGES = {'comma': (.1, .2), 'sentence': (.1, .25)}
-DEFAULT_RATE = sum(SPEEDS['常速']) / 2
-# Ellipses, dashes, colons and semicolons need contextual interpretation. This
-# fallback only weights an estimate; an explicitly registered pause replaces it.
-SEMANTIC_PAUSE_ESTIMATE = .26
-PUNCTUATION = '，、,。？！?!；;…—～~：:'
 TAILS = set('了呢吧啊呀哦嘛么啦呗哟喽的')
 DELIVERY_FIELDS = (('volume', '音量'), ('ending', '尾音'),
                    ('texture', '发声质感'), ('articulation', '咬字'))
@@ -147,18 +142,6 @@ def voice_warnings(unit):
                              'kind': '跨镜声音变化待复核',
                              'detail': '同一句的局部表现不同；复核是否有原文转折，不能因切镜重置语气。'})
     return warnings
-
-def pause_seconds(text):
-    """Estimate each punctuation cluster once, never replace an explicit pause."""
-    total = 0.0
-    for cluster in re.findall(r'[，、,。？！?!；;…—～~：:]+', text):
-        if any(c in '。？！?!' for c in cluster):
-            total += sum(PAUSE_RANGES['sentence']) / 2
-        elif any(c in '；;…—～~：:' for c in cluster):
-            total += SEMANTIC_PAUSE_ESTIMATE
-        else:
-            total += sum(PAUSE_RANGES['comma']) / 2
-    return round(total, 3)
 
 def estimate(text, units, rate=DEFAULT_RATE):
     require(type(units) is int and units > 0 and rate > 0, '发音单位和语速须有效')

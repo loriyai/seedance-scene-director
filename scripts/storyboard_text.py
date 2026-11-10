@@ -8,6 +8,7 @@ from decimal import Decimal
 from collections import Counter
 import json
 import re
+import storyboard_lighting as lighting
 
 
 OUTPUT_FORMAT = "scene-text-v1"
@@ -23,7 +24,7 @@ FRAMINGS = ("大远景", "大全景", "远景", "全景", "中景", "中近景",
 PROJECTION_FIELDS = (
     "output_format", "draft_key", "author_key", "main_scene", "source_records", "span",
     "duration", "character_ids", "scene_ids", "prop_ids", "asset_ids", "set_ids",
-    "time", "weather", "global", "shots", "source_text",
+    "time", "weather", "global", "lighting", "lighting_policy", "shots", "source_text",
 )
 
 
@@ -114,6 +115,8 @@ def character_reference_issues(state, units):
         # Longer known ledger labels shield their substrings (王 vs 霸王).
         token_re = re.compile('|'.join(re.escape(name) for name in tokens if len(name) > 1)) if any(len(n) > 1 for n in tokens) else None
         fields = [('global', None, unit.get('global', ''))]
+        if lighting.TEXT_FIELD in unit:
+            fields.append((lighting.TEXT_FIELD, None, unit[lighting.TEXT_FIELD]))
         for index, shot in enumerate(unit.get('shots', []), 1):
             match = SHOT.fullmatch(shot.get('text', ''))
             if match:
@@ -272,6 +275,12 @@ def _parse_units(text, state, *, _context_data=None, _diagnostics=None):
             unit["global"] = line[5:]
             _require(unit["global"].strip(), f"{context}：人物站位不可为空")
             stage = 3
+        elif stage == 3 and line.startswith(lighting.PREFIX):
+            _require(lighting.TEXT_FIELD not in unit, f"{context}：每单元只允许一行光照")
+            value = line[len(lighting.PREFIX):].strip()
+            _require(value, f"{context}：光照行不可为空")
+            unit[lighting.TEXT_FIELD] = value
+            unit[lighting.POLICY_FIELD] = lighting.POLICY
         elif stage >= 3 and line.startswith("·"):
             match = SHOT.fullmatch(line)
             _require(match is not None, f"{context}：镜头行格式错误；须有时码、镜号、景别括号、转场、正文和音效末句")
@@ -366,7 +375,8 @@ class TextValidationError(ValueError):
         super().__init__('；'.join(row['message'] for row in errors))
 
 
-def _check(units, state, *, allow_partial_tail=False, _diagnostics=(), _voice_source_state=None):
+def _check(units, state, *, allow_partial_tail=False, _diagnostics=(), _voice_source_state=None,
+           _current_lighting=False, _historical=False):
     import source_background_slots as background
     background.require_usage(units, background.from_units(units))
     import source_participant_slots as participants
@@ -379,6 +389,7 @@ def _check(units, state, *, allow_partial_tail=False, _diagnostics=(), _voice_so
     records, record_map, scenes, assets = _context(state)
     keys, previous_last, ordered_dialogue, actual_order = set(), None, [], []
     chunks, units_by_record, errors = {}, {}, list(_diagnostics)
+    errors.extend(lighting.errors(units, state, current=_current_lighting, historical=_historical))
     overlap_pairs = set()
     for unit in units:
         key = unit["draft_key"]
@@ -421,6 +432,7 @@ def _check(units, state, *, allow_partial_tail=False, _diagnostics=(), _voice_so
                            'message': f"{key}：人物/场景名单存在未知资产"})
         allowed = set(unit["character_ids"]) | set(unit["set_ids"]) | allowed_props
         used = _refs(unit["global"], key + "人物站位")
+        used += _refs(unit.get(lighting.TEXT_FIELD, ''), key + "光照")
         used += _refs(unit["time"] + unit["weather"], key + "时间天气")
         cursor, local_dialogue = 0, []
         for shot in unit["shots"]:
@@ -573,7 +585,7 @@ def _slice_state(state, source_span):
     return dict(state, records=clipped)
 
 
-def parse(text, state, source_span=None, *, continuity_props=None, source_references=None, production_cast=None, source_background_slots=None, source_participant_slots=None, source_text_voices=None):
+def parse(text, state, source_span=None, *, continuity_props=None, source_references=None, production_cast=None, source_background_slots=None, source_participant_slots=None, source_text_voices=None, _current_lighting=False):
     """Return checked metadata derived solely from author text and bound state."""
     import production_cast as casting
     import source_background_slots as background
@@ -590,14 +602,15 @@ def parse(text, state, source_span=None, *, continuity_props=None, source_refere
     participants.apply(context, units, source_participant_slots or [], source_state=state)
     import source_text_voices as text_voices
     text_voices.apply(context, units, source_text_voices or [], source_state=state)
-    _check(units, context, _diagnostics=diagnostics, _voice_source_state=state)
+    _check(units, context, _diagnostics=diagnostics, _voice_source_state=state,
+           _current_lighting=_current_lighting)
     if source_span is not None:
         _require([units[0]["span"][0], units[-1]["span"][1]] == list(source_span),
                  "作者文本须完整覆盖指定source_span，不能遗漏范围首尾记录")
     return units
 
 
-def parse_incremental(text, state, source_span=None, *, continuity_props=None, source_references=None, production_cast=None, source_background_slots=None, source_participant_slots=None, source_text_voices=None):
+def parse_incremental(text, state, source_span=None, *, continuity_props=None, source_references=None, production_cast=None, source_background_slots=None, source_participant_slots=None, source_text_voices=None, _current_lighting=False):
     """Inspect only an authored scene prefix, without completing any content.
 
     A final spoken fragment may stop at an exact source prefix and the last
@@ -647,7 +660,8 @@ def parse_incremental(text, state, source_span=None, *, continuity_props=None, s
         # the written prefix, without appending it or changing the source.
         prefix = dict(prefix, records=[dict(record, text=fragment) if record['id'] == last['id']
                                        else record for record in prefix['records']])
-    _check(units, prefix, allow_partial_tail=True, _diagnostics=diagnostics, _voice_source_state=state)
+    _check(units, prefix, allow_partial_tail=True, _diagnostics=diagnostics, _voice_source_state=state,
+           _current_lighting=_current_lighting)
     return units
 
 
@@ -690,7 +704,7 @@ def validate(state, units):
             if unit.get(text_voices.FIELD):
                 import copy
                 current[text_voices.FIELD] = copy.deepcopy(unit[text_voices.FIELD])
-        _check(fresh, context, _voice_source_state=state)
+        _check(fresh, context, _voice_source_state=state, _historical=True)
     else:
         fresh = parse(text, state, source_span=span, continuity_props=unit_carry_props(units),
                       source_references=from_units(units), production_cast=casting.from_units(units),
@@ -718,7 +732,8 @@ def _parse_for_delivery(text, state, source_span=None, *, continuity_props=None,
     """Use only the result just parsed here; no caller-supplied cache is trusted."""
     units = parse(text, state, source_span=source_span, continuity_props=continuity_props,
                   source_references=source_references, production_cast=production_cast,
-                  source_background_slots=source_background_slots, source_participant_slots=source_participant_slots, source_text_voices=source_text_voices)
+                  source_background_slots=source_background_slots, source_participant_slots=source_participant_slots,
+                  source_text_voices=source_text_voices, _current_lighting=True)
     return units, _summary(state, units)
 
 
@@ -1115,6 +1130,8 @@ def _render_unit(state, unit, context_data, reference_text=None, *, authoring_ga
              "场景：" + "；".join(asset(sid) for sid in authored["set_ids"])
              + f'；时间：{replace(authored["time"])}；天气：{replace(authored["weather"])}；',
              "人物站位：" + replace(authored["global"])]
+    if lighting.unit_enabled(authored):
+        lines.append(lighting.PREFIX + replace(authored[lighting.TEXT_FIELD]))
     for shot in authored["shots"]:
         # Inject the exact source fragments immediately before the final SFX.
         visual, sound = shot["text"].rsplit("音效：", 1)

@@ -63,7 +63,7 @@ def _raise_parsed_diagnostics(error, state, replace_ids=None, *, check_camera=Tr
     from speech_timing_audit import text_dialogue_capacity
     errors = list(error.errors)
     if state.get('storyboard_authoring_policy') == storyboard_authoring_gate.POLICY:
-        errors.extend(storyboard_authoring_gate.body_errors(error.units))
+        errors.extend(storyboard_authoring_gate.body_errors(error.units, current_lighting=True))
         if isinstance(source_trace, dict) and source_trace.get('version') == 4:
             errors.extend(storyboard_authoring_gate.source_mapping_errors(state, error.units, source_trace))
     camera = {'errors': []}
@@ -94,7 +94,8 @@ def check_incremental(project, draft, span=None, authoring_trace=None):
             production_cast=storyboard_authoring_gate.candidate_production_cast(draft, authoring_trace),
             source_background_slots=storyboard_authoring_gate.candidate_source_background_slots(draft, authoring_trace),
             source_participant_slots=storyboard_authoring_gate.candidate_source_participant_slots(draft, authoring_trace),
-            source_text_voices=storyboard_authoring_gate.candidate_source_text_voices(draft, authoring_trace))
+            source_text_voices=storyboard_authoring_gate.candidate_source_text_voices(draft, authoring_trace),
+            _current_lighting=True)
     except text_core.TextValidationError as exc:
         _raise_parsed_diagnostics(exc, state)
     camera = text_core.camera_constraints(units, *text_core.camera_context(state, units))
@@ -145,7 +146,7 @@ def bind_trace(project, draft, decisions, output=None, span=None):
                                continuity_props=carry_declarations(authored), source_references=declarations(authored), production_cast=casting.declarations(authored),
                                source_background_slots=background.declarations(authored),
                                source_participant_slots=participants.declarations(authored),
-                               source_text_voices=text_voices.declarations(authored))
+                               source_text_voices=text_voices.declarations(authored), _current_lighting=True)
     except text_core.TextValidationError as exc:
         if not isinstance(authored, dict) or authored.get('version') != 4:
             exc.errors.extend(storyboard_authoring_gate.source_mapping_errors(state, exc.units, authored))
@@ -756,6 +757,7 @@ def commit(project, draft, request_id, review, output, span=None,
                 working['batch_scope'] = str(scope)
             working['ranges'].append(row)
         receipt = {'policy': POLICY, 'request_id': request_id, 'request_hash': request_hash,
+                   'speech_timing_policy': copy.deepcopy(info['dialogue_capacity']['policy']),
                    'mode': mode, 'output': str(target), 'units': copy.deepcopy(units),
                    'display_format': d.RECEIPT_DISPLAY_FORMAT, 'export_format': EXPORT_FORMAT,
                    'video_ratios': list(dict.fromkeys(unit.get('video_ratio') for unit in units

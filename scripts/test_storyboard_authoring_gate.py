@@ -104,6 +104,24 @@ class StoryboardAuthoringGateTest(unittest.TestCase):
         self.assertEqual(report['shot_keys'], ['SC0001/u01#1'])
         self.assertEqual(report['warnings'], [])
 
+    def test_legacy_trace_candidate_uses_current_speech_capacity(self):
+        shot = self.units[0]['shots'][0]
+        shot['dialogue_parts'] = [{'record': 'L000001', 'text': '甲' * 16,
+                                  'voice': '说', 'character_id': 'CHAR0001'}]
+        path = self.write_trace()
+        trace = json.loads(path.read_text(encoding='utf-8'))
+        row = trace['units'][0]['shots'][0]
+        row['voice_signature'] = gate._voice_signature(shot)
+        row['timing_basis'].update(speech_seconds=2.5, parallel=True)
+        path.write_text(json.dumps(trace, ensure_ascii=False), encoding='utf-8')
+        report = gate.validate(self.project, self.state, self.draft, self.units, self.context, path)
+        self.assertEqual(report['status'], 'passed', report['errors'])
+        self.assertEqual(report['version'], gate.LEGACY_VERSION)
+        row['timing_basis']['speech_seconds'] = 2.4
+        path.write_text(json.dumps(trace, ensure_ascii=False), encoding='utf-8')
+        report = gate.validate(self.project, self.state, self.draft, self.units, self.context, path)
+        self.assertIn('AUTHORING_TRACE_SPEECH_FAST', {item['code'] for item in report['errors']})
+
     def test_ordinary_prose_is_not_a_meta_instruction(self):
         original = self.units[0]['shots'][0]['text']
         for prose in ('看不得孩子挨饿', '顾不得衣袖沾水', '舍不得放下杯子',

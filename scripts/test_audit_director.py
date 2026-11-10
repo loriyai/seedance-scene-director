@@ -320,7 +320,7 @@ class AuditDirectorChecks(unittest.TestCase):
             d.render_receipt(self.state, receipt, self.project)
         self.assertFalse((self.project / 'canvas' / 'state.json').exists())
 
-    def speech_unit(self, end=2.0, pause=.2, measured=False):
+    def speech_unit(self, end=1.85, pause=.2, measured=False):
         record = self.state['records'][0]
         record.update(kind='dialogue', speaker='陈默', voice='说')
         unit = self.unit([0, 9])
@@ -338,10 +338,10 @@ class AuditDirectorChecks(unittest.TestCase):
         with patch.object(dl, 'estimate', wraps=dl.estimate) as estimate:
             self.assertEqual([w['kind'] for w in d.validate_unit(self.state, unit, [0, 9])],
                              [])
-        self.assertEqual([call.args[2] for call in estimate.call_args_list], [5.4, 4.8])
+        self.assertEqual([call.args[2] for call in estimate.call_args_list], [5.8, 5.2])
 
     def test_extra_emotional_pause_is_not_counted_twice(self):
-        unit = self.speech_unit(end=2.9, pause=1.1)
+        unit = self.speech_unit(end=2.75, pause=1.1)
         self.assertEqual([w['kind'] for w in d.validate_unit(self.state, unit, [0, 9])],
                          [])
 
@@ -360,7 +360,7 @@ class AuditDirectorChecks(unittest.TestCase):
         timing = warnings[0]['text_estimate']
         self.assertEqual(timing['source_pause_seconds'], .175)
         self.assertEqual(timing['registered_pause_seconds'], .2)
-        self.assertEqual(timing['min_seconds'], 1.867)
+        self.assertEqual(timing['min_seconds'], round(9 / 5.8 + .2, 3))
 
     def test_recording_path_does_not_use_text_estimate(self):
         unit = self.speech_unit(measured=True)

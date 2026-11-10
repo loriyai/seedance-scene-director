@@ -26,7 +26,7 @@ def unit(texts, start=0, end=1, key='SC0001/u01'):
 
 class TextDialogueCapacityTests(unittest.TestCase):
     def test_exact_integer_threshold_is_checked_without_approval(self):
-        result = text_dialogue_capacity([unit(['甲乙丙丁戊己'])])
+        result = text_dialogue_capacity([unit(['甲' * 32], end=5)])
         self.assertEqual(result['status'], 'checked')
         self.assertEqual(result['semantic_review'], 'not_performed')
         self.assertEqual(result['checked_dialogue_shots'], 1)
@@ -38,29 +38,39 @@ class TextDialogueCapacityTests(unittest.TestCase):
         error = result['warnings'][0]
         self.assertEqual((error['code'], error['unit'], error['shot']),
                          ('DIALOGUE_CAPACITY', 'SC0001/u01', 1))
-        self.assertAlmostEqual(error['minimum'], 7 / 6)
-        self.assertAlmostEqual(error['deficit'], 1 / 6)
+        self.assertAlmostEqual(error['minimum'], 7 / 6.4)
+        self.assertAlmostEqual(error['deficit'], 7 / 6.4 - 1)
         self.assertEqual(error['duration'], 1)
 
-    def test_comma_pause_and_sentence_end_follow_exact_formula(self):
+    def test_punctuation_is_a_soft_cluster_reference_not_a_capacity_charge(self):
         text = '甲，乙、丙,丁。戊！己？!?'  # 6 letters, 3 commas, 5 sentence endings.
-        result = text_dialogue_capacity([unit([text], end=Decimal('2.3'))])
+        result = text_dialogue_capacity([unit([text], end=Decimal('1'))])
         self.assertEqual(result['status'], 'checked')
-        blocked = text_dialogue_capacity([unit([text], end=Decimal('2.29'))])
-        error = blocked['warnings'][0]
-        self.assertEqual(error['dialogue_characters'], 6)
-        self.assertEqual(error['comma_or_pause_count'], 3)
-        self.assertEqual(error['sentence_end_count'], 5)
-        self.assertAlmostEqual(error['minimum'], 2.3)
-        self.assertAlmostEqual(error['deficit'], .01)
+        fact = result['speech_window_diagnostics']['shots'][0]['fragments'][0]
+        self.assertEqual(fact['phonetic_minimum'], .9375)
+        self.assertEqual(fact['known_required_seconds'], .9375)
+        self.assertIsNone(fact['authored_pause_seconds'])
+        self.assertEqual(fact['pause_status'], 'unspecified')
+        reference = result['utterance_diagnostics']['records'][0]['punctuation_reference']
+        self.assertFalse(reference['blocking'])
+        self.assertEqual(len(reference['clusters']), 6)
+        self.assertAlmostEqual(reference['reference_seconds'], .975)
 
     def test_decimal_comparison_has_no_float_epsilon_exemption(self):
         result = text_dialogue_capacity([unit(['甲乙丙丁戊己，。'],
-                                             end=Decimal('1.299999999999999999999'))])
+                                             end=Decimal('0.937499999999999999999'))])
         self.assertEqual(result['status'], 'blocked')
         self.assertGreater(result['warnings'][0]['deficit'], 0)
         self.assertEqual(text_dialogue_capacity([
-            unit(['甲乙丙丁戊己，。'], end=Decimal('1.3'))])['status'], 'checked')
+            unit(['甲乙丙丁戊己，。'], end=Decimal('0.9375'))])['status'], 'checked')
+
+    def test_fractional_capacity_boundary_does_not_allow_faster_speech(self):
+        accepted = text_dialogue_capacity([unit(['甲' * 32], end=Decimal('5'))])
+        rejected = text_dialogue_capacity([unit(['甲' * 32], end=Decimal('4.999'))])
+        self.assertEqual(accepted['policy'], 'scene-text-dialogue-capacity-v4')
+        self.assertEqual(accepted['status'], 'checked')
+        self.assertEqual(rejected['status'], 'blocked')
+        self.assertIn('SPEECH_READING_CAPACITY', {e['code'] for e in rejected['errors']})
 
     def test_every_fragment_in_one_shot_is_aggregated(self):
         result = text_dialogue_capacity([unit(['甲乙丙', '丁戊己庚'])])

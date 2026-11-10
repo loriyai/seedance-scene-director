@@ -4,16 +4,12 @@ import math
 from decimal import Decimal, InvalidOperation
 import unicodedata
 
-from dialogue_layout import pause_seconds, SPEEDS, PAUSE_RANGES
+from speech_timing_policy import (pause_seconds, SPEEDS, PAUSE_RANGES, READING_TOKEN,
+                                 character_count, reading_units, capacity_seconds,
+                                 punctuation_reference, punctuation_weights)
 
 
-TEXT_DIALOGUE_CAPACITY_POLICY = 'scene-text-dialogue-capacity-v2'
-
-# Readings are authored, source-local annotations, never inferred pronunciation.
-READING_TOKEN = re.compile(
-    r"[+\-]?(?:[0-9０-９]{1,3}(?:[,，][0-9０-９]{3})+(?:[.．][0-9０-９]+)?"
-    r"|[A-Za-z0-9Ａ-Ｚａ-ｚ０-９]+(?:[.．:/\-'’&＆][A-Za-z0-9Ａ-Ｚａ-ｚ０-９]+)*)(?:\+\+|[%％])?"
-)
+TEXT_DIALOGUE_CAPACITY_POLICY = 'scene-text-dialogue-capacity-v4'
 
 
 def _require(value, message):
@@ -23,8 +19,20 @@ def _require(value, message):
 
 def validate_basis(part, basis):
     """Check exact annotation targets, not the semantic truth of a reading."""
-    _require(isinstance(basis, dict) and basis and set(basis) <= {'readings', 'overlap'},
-             '声音依据只允许非空readings或overlap，不另建声音计划')
+    _require(isinstance(basis, dict) and basis
+             and set(basis) <= {'readings', 'overlap', 'pause_seconds'},
+             '声音依据只允许readings、overlap或pause_seconds，不另建声音计划')
+    if 'pause_seconds' in basis:
+        pause = basis['pause_seconds']
+        _require(type(pause) in (int, float) and Decimal(str(pause)).is_finite() and pause >= 0,
+                 'pause_seconds须为有限非负数，表示本片段窗口内部的实际静默总量')
+        try:
+            start, end = (Decimal(str(part.get(field))) for field in ('start', 'end'))
+        except InvalidOperation:
+            start = end = Decimal('NaN')
+        if start.is_finite() and end.is_finite() and end > start:
+            _require(Decimal(str(pause)) <= end - start,
+                     'pause_seconds不得超过本片段窗口，不包含片段前后或片段之间的间隔')
     tokens = {}
     for match in READING_TOKEN.finditer(part['text']):
         tokens.setdefault(match.group(), []).append(match)
@@ -102,37 +110,16 @@ def _reading_load(part):
     basis = part.get('speech_basis', {})
     if basis:
         validate_basis(part, basis)
-    declarations = {(row['text'], row['occurrence']): row['units']
-                    for row in basis.get('readings', [])}
-    occurrences, missing, units, commas, endings = {}, [], 0, 0, 0
-    cursor = 0
-    for match in READING_TOKEN.finditer(part['text']):
-        token = match.group()
-        occurrences[token] = occurrences.get(token, 0) + 1
-        key = (token, occurrences[token])
-        count, pauses, stops, _ = _text_load(part['text'][cursor:match.start()])
-        units += count
-        commas += pauses
-        endings += stops
-        if key not in declarations:
-            missing.append({'text': token, 'occurrence': key[1]})
-        else:
-            units += len(declarations[key])
-        cursor = match.end()
-    count, pauses, stops, _ = _text_load(part['text'][cursor:])
-    units += count
-    commas += pauses
-    endings += stops
-    return units, Decimal(units) / 6 + Decimal(commas) / 10 + Decimal(endings) / 5, missing
+    units, missing = reading_units(part['text'], basis.get('readings', []))
+    return units, capacity_seconds(units), missing
 
 
 def _text_load(text):
-    characters = sum(unicodedata.category(char)[0] in ('L', 'N') for char in text)
+    """Raw count screening; punctuation counts never add time to its floor."""
+    characters = character_count(text)
     commas = sum(char in '，、,' for char in text)
     endings = sum(char in '。！？!?' for char in text)
-    minimum = (Decimal(characters) / Decimal(6)
-               + Decimal(commas) / Decimal(10)
-               + Decimal(endings) / Decimal(5))
+    minimum = capacity_seconds(characters)
     return characters, commas, endings, minimum
 
 
@@ -166,6 +153,8 @@ def _speech_window_facts(key, number, parts, start, end):
         characters, commas, endings, minimum = _text_load(part['text'])
         duration = t1 - t0
         phonetic_units, phonetic_minimum, missing = _reading_load(part)
+        authored_pause = part.get('speech_basis', {}).get('pause_seconds')
+        known_required = capacity_seconds(phonetic_units, authored_pause or 0)
         fragments.append({
             'part': index, 'record': part.get('record'),
             'start': float(t0), 'end': float(t1), 'duration': float(duration),
@@ -176,6 +165,9 @@ def _speech_window_facts(key, number, parts, start, end):
             'deficit': float(max(Decimal(0), minimum - duration)),
             'phonetic_units': None if missing else phonetic_units,
             'phonetic_minimum': None if missing else float(phonetic_minimum),
+            'authored_pause_seconds': authored_pause,
+            'pause_status': 'authored' if authored_pause is not None else 'unspecified',
+            'known_required_seconds': None if missing else float(known_required),
             'missing_readings': missing,
         })
     row.update(timing_status='available', fragments=fragments,
@@ -191,10 +183,10 @@ def _speech_window_facts(key, number, parts, start, end):
 def text_dialogue_capacity(units):
     """Screen raw text and check declared readings in actual speech windows.
 
-    The original character formula is a nonblocking screening diagnostic.
+    Raw character count is a nonblocking screening diagnostic.
     Source-supported overlap is screened per participant. Actual reading
-    capacity is checked per fragment without editing source text or approving
-    natural pacing.
+    capacity uses reading units and authored internal pauses, never inferred
+    punctuation silence. Natural pacing still requires actual review.
     """
     errors = []
     warnings = []
@@ -243,7 +235,7 @@ def text_dialogue_capacity(units):
                         'deficit': float(minimum - duration),
                         'dialogue_characters': characters, 'comma_or_pause_count': commas,
                         'sentence_end_count': endings, 'stream': stream,
-                        'kind': '整镜字符公式提示容量疑点；仅供快速排查，不作为验收或单独阻断依据。',
+                        'kind': '整镜原字符数仅作容量筛查，不含标点停顿；实际读法与已声明停顿另行检查。',
                     })
             if facts['timing_status'] != 'available':
                 errors.append({'code': 'SPEECH_WINDOW_INVALID', 'unit': key, 'shot': number,
@@ -258,47 +250,78 @@ def text_dialogue_capacity(units):
                 if fact['below_mechanical_minimum']:
                     warnings.append({**common, 'code': 'SPEECH_WINDOW_CAPACITY',
                                    'minimum': fact['mechanical_minimum'], 'duration': fact['duration'],
-                                   'kind': '片段字符公式提示容量疑点，须结合实际读法核对；不单独阻断。'})
+                                   'kind': '片段原字符数仅作容量筛查，不含标点停顿；不单独阻断。'})
                 _, phonetic_minimum, missing = _reading_load(part)
-                if not missing and Decimal(str(part['end'])) - Decimal(str(part['start'])) < phonetic_minimum:
+                authored_pause = part.get('speech_basis', {}).get('pause_seconds')
+                known_required = phonetic_minimum + Decimal(str(authored_pause or 0))
+                if not missing and Decimal(str(part['end'])) - Decimal(str(part['start'])) < known_required:
                     errors.append({**common, 'code': 'SPEECH_READING_CAPACITY',
-                                   'minimum': float(phonetic_minimum), 'duration': fact['duration'],
-                                   'kind': '实际发声窗口放不下已声明读法及机械停顿下限。'})
+                                   'minimum': float(known_required), 'duration': fact['duration'],
+                                   'phonetic_minimum': float(phonetic_minimum),
+                                   'authored_pause_seconds': authored_pause,
+                                   'kind': '实际声音窗口放不下读法负荷及作者已声明的片段内部停顿。'})
                 utterances.setdefault(part.get('record'), []).append({
                     **common, 'start': float(offset + Decimal(str(part['start']))),
                     'end': float(offset + Decimal(str(part['end']))), 'text': part['text'],
+                    '_start': offset + Decimal(str(part['start'])),
+                    '_end': offset + Decimal(str(part['end'])),
                     'phonetic_units': fact['phonetic_units'], 'missing_readings': missing,
                     'phonetic_minimum': None if missing else phonetic_minimum,
+                    'authored_pause_seconds': authored_pause,
+                    'known_required_seconds': None if missing else known_required,
                 })
         offset += Decimal(str(unit.get('duration', max((s['end'] for s in unit.get('shots', [])), default=0))))
     utterance_facts = []
     for record, parts in utterances.items():
         raw = ''.join(p['text'] for p in parts)
         _, _, _, minimum = _text_load(raw)
-        available = sum((Decimal(str(p['end'])) - Decimal(str(p['start'])) for p in parts), Decimal(0))
+        available = sum((p['_end'] - p['_start'] for p in parts), Decimal(0))
         readings_complete = all(p['phonetic_units'] is not None for p in parts)
         reading_minimum = (sum((p['phonetic_minimum'] for p in parts), Decimal(0))
                            if readings_complete else None)
-        public_parts = [{**p, 'phonetic_minimum': float(p['phonetic_minimum'])
-                         if p['phonetic_minimum'] is not None else None} for p in parts]
+        known_required = (sum((p['known_required_seconds'] for p in parts), Decimal(0))
+                          if readings_complete else None)
+        declared_pause = sum((Decimal(str(p['authored_pause_seconds'] or 0)) for p in parts), Decimal(0))
+        public_parts = [{key: float(value) if isinstance(value, Decimal) else value
+                         for key, value in part.items() if not key.startswith('_')} for part in parts]
+        # Scan the unchanged utterance once, then locate each cluster in every
+        # touched fragment. A cut cannot create a new punctuation pause.
+        punctuation = punctuation_reference(raw)
+        text_offset = 0
+        spans = []
+        for part in parts:
+            spans.append((text_offset, text_offset + len(part['text']), part))
+            text_offset += len(part['text'])
+        for cluster in punctuation['clusters']:
+            cluster['parts'] = [
+                {key: part[key] for key in ('unit', 'shot', 'part')}
+                for left, right, part in spans
+                if left < cluster['end'] and cluster['start'] < right]
         utterance_facts.append({'record': record, 'parts': public_parts, 'text': raw,
             'speech_seconds': float(available), 'mechanical_minimum': float(minimum),
             'phonetic_minimum': float(reading_minimum) if readings_complete else None,
-            'between_parts': [round(parts[i]['start'] - parts[i - 1]['end'], 6) for i in range(1, len(parts))]})
-        if readings_complete and available < reading_minimum:
+            'authored_pause_seconds': float(declared_pause),
+            'pause_status': 'authored' if all(p['authored_pause_seconds'] is not None for p in parts)
+                            else 'partial' if any(p['authored_pause_seconds'] is not None for p in parts)
+                            else 'unspecified',
+            'known_required_seconds': float(known_required) if readings_complete else None,
+            'punctuation_reference': punctuation,
+            'between_parts': [float(parts[i]['_start'] - parts[i - 1]['_end']) for i in range(1, len(parts))]})
+        if readings_complete and available < known_required:
             errors.append({'code': 'UTTERANCE_CAPACITY', 'unit': parts[0]['unit'], 'shot': parts[0]['shot'],
                            'record': record, 'kind': '本选区同次发言的实际声音窗口合计不足，跨镜间隔不计为发声。'})
     return {'policy': TEXT_DIALOGUE_CAPACITY_POLICY,
             'status': 'blocked' if errors else 'checked',
             'errors': errors, 'warnings': warnings, 'checked_dialogue_shots': checked,
             'mechanical_screening': {'blocking': False, 'acceptance_standard': False,
-                'limits': '原字符公式仅快速定位容量疑点；未命中不代表镜长或语气合格。'},
+                'basis': 'raw_characters_without_punctuation_pauses',
+                'limits': '字符数仅快速定位容量疑点；不推断读法或停顿，未命中不代表自然语气合格。'},
             'skipped_no_dialogue_shots': skipped,
             'speech_window_diagnostics': {
                 'blocking': True, 'time_basis': 'authored_unit_relative_seconds',
                 'shots': window_facts,
-                'limits': '仅列作者声音时窗与原话机械负荷；不是实际录音测量或语速批准。'
-                          '确定容量不足阻断，宽窗及前后间隔不自动判为拖慢；必要气口与声画关系须实际审阅。',
+                'limits': '仅核读法底线及已声明的片段内部停顿；未声明停顿不等于实际无停顿。'
+                          '标点仅提供软参考，片段间隔不充作发音时间；自然气口与声画关系须实际审阅。',
             },
             'utterance_diagnostics': {'time_basis': 'selected_units_concatenated_seconds',
                 'records': utterance_facts, 'scope': '仅合看本候选实际原话片段；不推断范围外发言或实际录音'},
@@ -319,7 +342,7 @@ def audit(unit):
             warnings.append({'unit': unit.get('id', '当前单元'), 'record': rid, 'kind': kind, **details})
         gaps = [0.0] + [round(parts[i]['start'] - parts[i-1]['end'], 3) for i in range(1, len(parts))]
         internal_budget = max(0.0, event['pause'] - sum(gaps))
-        weights = [pause_seconds(p['text']) for p in parts]
+        weights = punctuation_weights([p['text'] for p in parts])
         explicit_pause = ['pause' in p for p in parts]
         if any(explicit_pause) and not all(explicit_pause):
             warn('片段停顿登记不完整', review='各片段pause全部填写或全部省略，避免混用两种停顿分配。')

@@ -30,6 +30,35 @@ class ReadingContractTests(unittest.TestCase):
             draft = '\n'.join(lines) + '\n'
         return state, draft
 
+    def with_pause(self, words, pause, window='0-3'):
+        state, draft = self.candidate(words, window=window)
+        lines = draft.splitlines()
+        index = next(i for i, line in enumerate(lines) if line.startswith('声音['))
+        lines.insert(index + 1, annotation({'pause_seconds': pause}))
+        return state, '\n'.join(lines) + '\n'
+
+    def test_explicit_internal_pause_roundtrips_without_rendering_metadata(self):
+        state, draft = self.with_pause('甲乙丙丁戊己。', .1, '0-1.1')
+        before = copy.deepcopy(state), draft
+        units = core.parse(draft, state)
+        report = text_dialogue_capacity(units)
+        self.assertEqual(report['status'], 'checked')
+        self.assertEqual(units[0]['shots'][0]['dialogue_parts'][0]['speech_basis'],
+                         {'pause_seconds': .1})
+        core.validate(state, units)
+        rendered = core.render_unit(state, renderable(units[0]))
+        self.assertIn('：“甲乙丙丁戊己。”', rendered)
+        self.assertNotIn('声音依据', rendered)
+        self.assertNotIn('pause_seconds', rendered)
+        self.assertEqual((state, draft), before)
+
+    def test_invalid_pause_values_are_rejected_at_the_text_boundary(self):
+        for pause in (None, False, -.1, '0.1', float('nan'), float('inf'), 1.01):
+            with self.subTest(pause=pause):
+                state, draft = self.with_pause('甲', pause, '0-1')
+                with self.assertRaisesRegex(ValueError, 'pause_seconds'):
+                    core.parse(draft, state)
+
     def test_mixed_readings_keep_dialogue_and_render_without_internal_annotations(self):
         words = '看API，收10000元。'
         state, draft = self.candidate(words, [reading('API', ['诶', '批', '爱']), reading('10000', ['一', '万'])])
@@ -90,7 +119,7 @@ class ReadingContractTests(unittest.TestCase):
                 report = text_dialogue_capacity(units)
                 self.assertEqual(report['errors'], [])
                 fact = report['speech_window_diagnostics']['shots'][0]['fragments'][0]
-                self.assertAlmostEqual(fact['phonetic_minimum'], len(syllables) / 6)
+                self.assertAlmostEqual(fact['phonetic_minimum'], len(syllables) / 6.4)
                 self.assertEqual(report['utterance_diagnostics']['records'][0]['phonetic_minimum'],
                                  fact['phonetic_minimum'])
                 self.assertIn('：“' + word + '”', core.render_unit(state, renderable(units[0])))
@@ -127,7 +156,8 @@ class ReadingContractTests(unittest.TestCase):
         self.assertEqual(utterance['text'], '别动，等我回来。')
         self.assertEqual(utterance['speech_seconds'], 1.5)
         self.assertEqual(utterance['between_parts'], [2.5])
-        self.assertEqual(utterance['mechanical_minimum'], 1.3)
+        self.assertEqual(utterance['mechanical_minimum'], .9375)
+        self.assertEqual(utterance['punctuation_reference']['reference_seconds'], .325)
 
 
 class OverlapContractTests(unittest.TestCase):
@@ -169,7 +199,7 @@ class OverlapContractTests(unittest.TestCase):
         shot['dialogue_parts'][1]['start'] = 2
         shot['dialogue_parts'][1]['end'] = 4
         shot['dialogue_parts'][1].pop('speech_basis')
-        shot['end'] = 3
+        shot['end'] = 2.8
         report = text_dialogue_capacity(units)
         self.assertIn('DIALOGUE_CAPACITY', {e['code'] for e in report['warnings']})
 
@@ -210,6 +240,54 @@ class OverlapContractTests(unittest.TestCase):
 
 
 class SpeechDeliveryTests(unittest.TestCase):
+    def test_capacity_policy_is_frozen_and_old_receipts_are_not_rechecked(self):
+        from test_storyboard_text_delivery import TextDeliveryIntegration
+        import speech_timing_audit as timing_audit
+        fx = TextDeliveryIntegration()
+        fx.setUp()
+        self.addCleanup(fx.doCleanups)
+        fx.commit_fixture(request_id='speech-policy')
+        original_state = d.load(fx.project)
+        self.assertEqual(original_state['receipts'][-1]['speech_timing_policy'],
+                         'scene-text-dialogue-capacity-v4')
+        expected = fx.output.read_text(encoding='utf-8')
+        for policy in ('scene-text-dialogue-capacity-v4', 'scene-text-dialogue-capacity-v3',
+                       'scene-text-dialogue-capacity-v2', None):
+            with self.subTest(policy=policy):
+                state = copy.deepcopy(original_state)
+                receipt = state['receipts'][-1]
+                if policy is None:
+                    receipt.pop('speech_timing_policy')
+                else:
+                    receipt['speech_timing_policy'] = policy
+                d.write_json(fx.project / 'session.json', state)
+                before = fx.snapshot()
+                with patch.object(timing_audit, 'text_dialogue_capacity',
+                                  side_effect=AssertionError('History must not use the current capacity gate')):
+                    result = delivery.commit(fx.project, fx.draft, 'speech-policy', fx.review, fx.output)
+                    self.assertEqual(result['status'], 'already_committed')
+                    rendered = delivery.render_units(state, receipt['units'], historical_receipt=receipt)
+                self.assertEqual(rendered, expected)
+                self.assertEqual(fx.snapshot(), before)
+
+    def test_authored_pause_overload_blocks_complete_and_incremental_delivery(self):
+        from test_storyboard_text_delivery import TextDeliveryIntegration
+        fx = TextDeliveryIntegration()
+        fx.setUp()
+        self.addCleanup(fx.doCleanups)
+        for incremental in (False, True):
+            text = fx.authored_text(fx.state['records'][:2]) if incremental else fx.authored_text()
+            voice = next(line for line in text.splitlines() if line.startswith('声音['))
+            text = text.replace(voice, voice + '\n' + annotation({'pause_seconds': 2.5}), 1)
+            draft = fx.write_draft('pause-prefix.txt' if incremental else 'pause-full.txt', text)
+            before = fx.snapshot()
+            with self.assertRaisesRegex(ValueError, 'SPEECH_READING_CAPACITY'):
+                if incremental:
+                    delivery.check_incremental(fx.project, draft)
+                else:
+                    delivery.preview(fx.project, draft)
+            self.assertEqual(fx.snapshot(), before)
+
     def test_narrow_window_blocks_preview_and_incremental_without_writing_success(self):
         from test_storyboard_text_delivery import TextDeliveryIntegration
         fx = TextDeliveryIntegration()

@@ -336,6 +336,7 @@ def bind(args):
              "header_hash": video_header.digest(header) if header is not None else None,
              "header_policy": video_header.POLICY if header is not None else None,
              "storyboard_authoring_policy": "shot-by-shot-v1",
+             "storyboard_lighting_policy": "unit-lighting-v1",
              "ranges": [], "units": [], "next_numbers": {}, "receipts": []}
     if (project / video_settings.RATIO_FILE).exists() or (project / video_settings.WORKFLOW_FILE).exists():
         ratio = video_settings.get_ratio(project, required=True)
@@ -1148,9 +1149,14 @@ def receipt_summary(receipt):
     total = sum(unit["duration"] for unit in receipt["units"])
     minutes, seconds = divmod(total, 60)
     count = len(receipt["units"])
+    shot_count = sum(len(unit["shots"]) for unit in receipt["units"])
+    average = round(total / shot_count, 2) if shot_count else None
+    average_text = f"{average:.2f}秒" if average is not None else "不适用"
     action = "修改" if receipt.get("mode") == "replace" else "生成"
-    return {"unit_count": count, "total_seconds": total, "minutes": minutes, "seconds": seconds,
-            "summary": f"本次{action}分镜共{count}个，总时长{minutes}分{seconds}秒。"}
+    return {"unit_count": count, "shot_count": shot_count, "total_seconds": total,
+            "average_shot_seconds": average, "minutes": minutes, "seconds": seconds,
+            "summary": (f"本次交付范围：{action}{count}个分镜单元，共{shot_count}镜，"
+                        f"总时长{minutes}分{seconds}秒，平均单镜时长{average_text}。")}
 
 
 def sync_canvas_replacements(project, receipt):

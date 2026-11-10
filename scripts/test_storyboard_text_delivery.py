@@ -27,6 +27,31 @@ import storyboard_text_delivery as delivery
 import storyboard_metrics as metrics
 
 
+class ReceiptSummaryTests(unittest.TestCase):
+    def test_counts_actual_shots_and_uses_total_duration_without_mutating_receipt(self):
+        receipt = {"mode": "replace", "units": [
+            {"duration": 7, "shots": [{"duration": 3}, {"duration": 4}]},
+            {"duration": 3, "shots": [{"duration": 3}]},
+        ]}
+        before = copy.deepcopy(receipt)
+        result = d.receipt_summary(receipt)
+        self.assertEqual(result["unit_count"], 2)
+        self.assertEqual(result["shot_count"], 3)
+        self.assertEqual(result["total_seconds"], 10)
+        self.assertEqual(result["average_shot_seconds"], 3.33)
+        self.assertEqual(result["summary"],
+                         "本次交付范围：修改2个分镜单元，共3镜，总时长0分10秒，平均单镜时长3.33秒。")
+        self.assertEqual(receipt, before)
+
+    def test_empty_receipt_has_no_average(self):
+        result = d.receipt_summary({"units": []})
+        self.assertEqual(result["unit_count"], 0)
+        self.assertEqual(result["shot_count"], 0)
+        self.assertEqual(result["total_seconds"], 0)
+        self.assertIsNone(result["average_shot_seconds"])
+        self.assertIn("平均单镜时长不适用", result["summary"])
+
+
 class TextDeliveryIntegration(unittest.TestCase):
     def setUp(self):
         base = os.environ.get('SEEDANCE_AUDIT_TEST_DIR')
@@ -129,6 +154,7 @@ class TextDeliveryIntegration(unittest.TestCase):
                 '人物：@{CHAR0001}；',
                 f'场景：@{{{set_id}}}；时间：白天；天气：未明示；',
                 '人物站位：@{CHAR0001}在画面左侧。',
+                '光照：室内漫射日光均匀照亮人物，面部与桌面保留柔和明暗层次。',
                 f'·00秒-04秒[镜头1-{label}]：（@{{CHAR0001}}的中景；转场：硬切）'
                 f'相机向右横移，人物与门框保持清晰；{action}音效：衣料轻响。'])
             if record['kind'] == 'dialogue':
@@ -167,6 +193,29 @@ class TextDeliveryIntegration(unittest.TestCase):
                                 timeout=30)
         self.assertEqual(result.returncode, 0 if success else 1, result.stdout + result.stderr)
         return json.loads(result.stdout if result.stdout.strip() else result.stderr)
+
+    def test_commit_summary_counts_actual_shots_without_adding_export_or_receipt_fields(self):
+        blocks = self.authored_text().split('\n\n')
+        blocks[0] = blocks[0].replace('·00秒-04秒', '·00秒-02秒') + (
+            '\n·02秒-04秒[镜头2-统计]：（@{CHAR0001}的近景；转场：硬切）'
+            '相机向右横移，手指离开@{PROP0001}，杯子稳稳落在桌面。音效：衣料轻响。')
+        draft = self.write_draft('mixed-shots.txt', '\n\n'.join(blocks))
+        result = self.commit_fixture(draft)
+        self.assertEqual(result['unit_count'], 4)
+        self.assertEqual(result['shot_count'], 5)
+        self.assertEqual(result['total_seconds'], 16)
+        self.assertEqual(result['average_shot_seconds'], 3.2)
+        self.assertIn('平均单镜时长3.20秒', result['summary'])
+        state = d.load(self.project)
+        receipt = state['receipts'][0]
+        self.assertEqual(sum(len(unit['shots']) for unit in receipt['units']), 5)
+        for field in ('unit_count', 'shot_count', 'average_shot_seconds', 'summary'):
+            self.assertNotIn(field, receipt)
+        rendered = self.output.read_text(encoding='utf-8')
+        self.assertEqual(rendered.splitlines()[-1], '本次共4个分镜单元，共 5 镜，总时长 0分16秒')
+        self.assertNotIn('平均单镜时长', rendered)
+        self.assertTrue(all('平均单镜时长' not in d.render_unit(state, unit)
+                            for unit in receipt['units']))
 
     def test_portrait_profile_is_frozen_without_changing_text_template(self):
         (self.project / 'video-ratio.txt').write_text('9:16\n', encoding='utf-8')
@@ -339,6 +388,7 @@ class TextDeliveryIntegration(unittest.TestCase):
             '人物：@{CHAR0001}；',
             '场景：@{SET0001}，@{SET0002}；时间：白天；天气：未明示；',
             '人物站位：@{CHAR0001}从@{SET0001}走到@{SET0002}。',
+            '光照：@{SET0001}室内漫射日光照亮桌面，@{SET0002}的漫射日光保持柔和明暗。',
             '·00秒-04秒[镜头1-房间]：（@{CHAR0001}的中景；转场：硬切）'
             '固定机位；@{CHAR0001}把@{PROP0001}放在桌上。音效：杯底轻响。',
             f'声音[{records[1]["id"]},0.2-2.8]：@{{CHAR0001}}说：“{records[1]["text"]}”',
@@ -415,6 +465,7 @@ class TextDeliveryIntegration(unittest.TestCase):
             '人物：@{CHAR0001}；',
             '场景：@{SET0001}，@{SET0002}；时间：白天；天气：未明示；',
             '人物站位：@{CHAR0001}从@{SET0001}走到@{SET0002}。',
+            '光照：@{SET0001}室内漫射日光照亮桌面，@{SET0002}的漫射日光保持柔和明暗。',
             '·00秒-04秒[镜头1-房间]：（@{CHAR0001}的中景；转场：硬切）'
             '侧面固定机位；@{CHAR0001}把@{PROP0001}放在桌上。音效：杯底轻响。',
             f'声音[{records[1]["id"]},0.2-2.8]：@{{CHAR0001}}说：“{records[1]["text"]}”',

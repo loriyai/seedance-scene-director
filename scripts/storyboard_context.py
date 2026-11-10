@@ -118,6 +118,8 @@ def context_hash(state, project=None, *, scope=None):
             ('files', 'records', 'ledger', 'style_hash', 'header_hash', 'header_policy', 'units', 'entry')}
     data['files'] = semantic_files(state)
     data['context_policy'] = LEGACY_CONTEXT_POLICY if scope is None else SCOPED_CONTEXT_POLICY
+    from storyboard_lighting import POLICY as lighting_policy
+    data['candidate_lighting_policy'] = lighting_policy
     if scope is not None:
         d.require(scope.get('policy') == SCOPED_CONTEXT_POLICY, '局部上下文协议错误')
         data.pop('units', None)
@@ -126,6 +128,7 @@ def context_hash(state, project=None, *, scope=None):
     required = ('references/storyboard-rules.md', 'references/storyboard-text-format.md',
                 'scripts/storyboard_text.py', 'scripts/storyboard_text_delivery.py',
                 'scripts/storyboard_authoring_gate.py', 'scripts/storyboard_context.py',
+                'scripts/storyboard_lighting.py', 'scripts/speech_timing_policy.py', 'scripts/speech_timing_audit.py',
                 'scripts/continuity.py', 'scripts/source_references.py', 'scripts/production_cast.py',
                 'modules/screenplay-standardizer/scripts/character_variants.py',
                 'scripts/segment_naming.py', 'scripts/script_partition.py',
@@ -281,6 +284,7 @@ def scene_context(project, scene_id, span=None, authoring_trace=None):
                 'segment': row['segment'], 'actual_text': resolve(project, row['actual']).read_text(encoding='utf-8-sig')})
     return {
         'policy': 'scene-text-v1', 'scene': copy.deepcopy(scene),
+        'lighting_policy': 'unit-lighting-v1',
         'span': selected_span, 'full_scene_span': full_span,
         'source_lines': {'first': first, 'last': last, 'text': '\n'.join(lines[first - 1:last])},
         'records': selected, 'allowed_asset_ids': allowed, 'assets': projected,

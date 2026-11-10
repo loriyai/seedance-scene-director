@@ -192,7 +192,8 @@ def voice_only_ids(state, unit):
         return set()
     from storyboard_text import _refs
     visual = set()
-    fields = [unit['global'], unit['time'], unit['weather']] + [shot['text'] for shot in unit['shots']]
+    from storyboard_lighting import visual_prose
+    fields = visual_prose(unit)
     for value in fields:
         visual.update(_refs(value, unit['draft_key']))
     original_voices = set()
@@ -209,6 +210,7 @@ def require_visual_scope(unit, voice_only):
     from storyboard_text import _refs
     # Stable references are always required for visible bodies. Naming the
     # sender elsewhere does not silently acquire a visual right.
-    fields = [unit['global'], unit['time'], unit['weather']] + [shot['text'] for shot in unit['shots']]
+    from storyboard_lighting import visual_prose
+    fields = visual_prose(unit)
     require(not any(set(_refs(value, unit['draft_key'])) & voice_only for value in fields),
             '声音专用发送者不得借声明进入画面或图片引用')
