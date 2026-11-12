@@ -13,7 +13,6 @@ import tempfile
 import uuid
 
 PLAN_FILE = 'script-partition.json'
-RANGE_TEXT_FILE = 'script-partition.txt'
 POLICY = 'partition-v1'
 COUNT_POLICY = 'source-non-whitespace-including-punctuation-v1'
 BOUNDARY_POLICY = 'safe-partition-boundaries-v1'
@@ -463,27 +462,13 @@ def load_plan(project, state):
 
 
 def save_plan(project, state, proposal):
-    import director
-    target = director.validate_output_path(state, project, Path(project) / RANGE_TEXT_FILE)
     old = load_plan(project, state)
     if old and old.get('proposal_hash') == proposal.get('proposal_hash'):
-        plan = old
-    else:
-        require(not state.get('units'), '已有分镜后不能原位重拆并重置分段身份；请保留当前计划或另建项目')
-        plan = copy.deepcopy(proposal)
-        plan.update(plan_id=str(uuid.uuid4()), version=old['version'] + 1 if old else 1)
-    rendered = render_plan(plan)
-    if target.exists():
-        # A prior write may have finished the TXT but failed before saving JSON.
-        # The text excludes random identities, so the exact same proposal can retry.
-        accepted = {rendered}
-        if old:
-            accepted.add(render_plan(old))
-        require(target.is_file() and target.read_text(encoding='utf-8-sig') in accepted,
-                '分段范围TXT已存在且与已保存计划或本次方案不一致；不能静默覆盖')
-    director.atomic_text(target, rendered)
-    if plan is not old:
-        atomic_json(Path(project) / PLAN_FILE, _seal(plan))
+        return old
+    require(not state.get('units'), '已有分镜后不能原位重拆并重置分段身份；请保留当前计划或另建项目')
+    plan = copy.deepcopy(proposal)
+    plan.update(plan_id=str(uuid.uuid4()), version=old['version'] + 1 if old else 1)
+    atomic_json(Path(project) / PLAN_FILE, _seal(plan))
     return plan
 
 
@@ -505,20 +490,10 @@ def resolve_segment(project, state, label_or_span):
 
 
 def render_plan(plan):
-    lines = [f"分段范围：共{plan['participants']}段，总字数{plan['total_count']}个字",
-             '字数口径：原文非空白字符，包含标点。',
-             '原文位置：[1基段号, 0基段内字符位置]；所有范围均含起点、不含终点。', '']
+    lines = []
     for segment in plan['segments']:
         lines.extend([f"{segment['label']}分段：共{segment['word_count']}个字",
-                      f"原文位置范围：{segment['source_range'][0]} → {segment['source_range'][1]}",
-                      f"原文字符偏移范围：[{segment['source_offsets'][0]}, {segment['source_offsets'][1]})",
-                      f"标准正文范围：[{segment['span'][0]}, {segment['span'][1]})",
                       '开始：' + segment['start_excerpt'], '结束：' + segment['end_excerpt'], ''])
-    for boundary in plan.get('selected_boundaries', []):
-        distance = abs(boundary['actual_count'] - boundary['target_count'])
-        lines.extend([f"目标切点{boundary['target_index']}：目标累计{boundary['target_count']}字，"
-                      f"实际累计{boundary['actual_count']}字，偏移{distance}字。",
-                      '切点理由：' + boundary['reason'], ''])
     return '\n'.join(lines).rstrip() + '\n'
 
 
@@ -545,14 +520,10 @@ def main():
                                   read_json(args.boundaries) if args.boundaries else None)
             plan = save_plan(args.project, state, proposal)
             result = {'status': plan['status'], 'plan_id': plan['plan_id'], 'proposal_hash': plan['proposal_hash'],
-                      'plan_file': str((args.project / PLAN_FILE).resolve()),
-                      'range_text_file': str((args.project / RANGE_TEXT_FILE).resolve()), 'text': render_plan(plan)}
+                      'plan_file': str((args.project / PLAN_FILE).resolve()), 'text': render_plan(plan)}
         elif args.command == 'show':
             plan = load_plan(args.project, state)
             result = {'status': plan['status'], 'text': render_plan(plan)} if plan else {'status': 'not_partitioned'}
-            target = args.project / RANGE_TEXT_FILE
-            result['range_text_file'] = (str(target.resolve()) if plan and target.is_file()
-                                         and target.read_text(encoding='utf-8-sig') == render_plan(plan) else None)
         elif args.command == 'resolve':
             segment = resolve_segment(args.project, state, args.label)
             require(segment is not None, '没有与该代号匹配的有效分段')

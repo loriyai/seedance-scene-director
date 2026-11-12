@@ -336,7 +336,6 @@ def bind(args):
              "header_hash": video_header.digest(header) if header is not None else None,
              "header_policy": video_header.POLICY if header is not None else None,
              "storyboard_authoring_policy": "shot-by-shot-v1",
-             "storyboard_lighting_policy": "unit-lighting-v1",
              "ranges": [], "units": [], "next_numbers": {}, "receipts": []}
     if (project / video_settings.RATIO_FILE).exists() or (project / video_settings.WORKFLOW_FILE).exists():
         ratio = video_settings.get_ratio(project, required=True)
@@ -765,7 +764,7 @@ def validate_unit(state, unit, request_span, *, require_continuity=False):
     cursor, closeups, used_chars, used_props = 0, 0, set(), set()
     for i, shot in enumerate(shots):
         start, end = shot["start"], shot["end"]
-        require(type(start) is int and type(end) is int and start == cursor and 1 <= end - start <= 6, "镜头时间轴不连续或单镜不在1～6秒")
+        require(type(start) is int and type(end) is int and start == cursor and 1 <= end - start <= 7, "镜头时间轴不连续或基础单镜不在1～7秒")
         framing = shot["framing"]
         require(framing in FRAMINGS, "无法识别景别")
         closeups += framing == "特写"
@@ -1134,7 +1133,9 @@ def render_receipt(state, receipt, project=None):
     require(display_format in (None, LEGACY_RECEIPT_DISPLAY_FORMAT, RECEIPT_DISPLAY_FORMAT), "未知的交付展示格式")
     if receipt.get('policy') == 'scene-text-v1' and receipt.get('export_format'):
         from storyboard_text_delivery import render_units
-        atomic_text(receipt['output'], render_units(state, receipt['units']))
+        atomic_text(receipt['output'], render_units(
+            state, receipt['units'], authoring_gate=receipt.get('authoring_gate'),
+            historical_receipt=receipt))
         return
     rendered = []
     for number, unit in enumerate(receipt["units"], 1):
@@ -1149,14 +1150,9 @@ def receipt_summary(receipt):
     total = sum(unit["duration"] for unit in receipt["units"])
     minutes, seconds = divmod(total, 60)
     count = len(receipt["units"])
-    shot_count = sum(len(unit["shots"]) for unit in receipt["units"])
-    average = round(total / shot_count, 2) if shot_count else None
-    average_text = f"{average:.2f}秒" if average is not None else "不适用"
     action = "修改" if receipt.get("mode") == "replace" else "生成"
-    return {"unit_count": count, "shot_count": shot_count, "total_seconds": total,
-            "average_shot_seconds": average, "minutes": minutes, "seconds": seconds,
-            "summary": (f"本次交付范围：{action}{count}个分镜单元，共{shot_count}镜，"
-                        f"总时长{minutes}分{seconds}秒，平均单镜时长{average_text}。")}
+    return {"unit_count": count, "total_seconds": total, "minutes": minutes, "seconds": seconds,
+            "summary": f"本次{action}分镜共{count}个，总时长{minutes}分{seconds}秒。"}
 
 
 def sync_canvas_replacements(project, receipt):

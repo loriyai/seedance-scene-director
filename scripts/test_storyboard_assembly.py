@@ -53,6 +53,19 @@ class StrictAssemblyTests(unittest.TestCase):
         self.assertEqual(again["units"][0]["shots"][0]["review_id"], "镜头甲")
         self.assertEqual(len({s["review_id"] for s in again["units"][0]["shots"]}), 4)
 
+    def test_seven_second_base_shot_assembles_and_eight_is_rejected(self):
+        self.unit["shots"] = [self.unit["shots"][0]]
+        self.unit["shots"][0].update(start=0, end=7)
+        self.unit["duration"] = 7
+        assembled = self.assemble()
+        self.assertEqual(assembled["shots"][0]["end"], 7)
+        self.assertEqual(assembled["duration"], 7)
+        self.assertEqual(director.validate_unit(self.state, assembled, [0, 9]), [])
+        self.unit["shots"][0]["end"] = 8
+        self.unit["duration"] = 8
+        with self.assertRaisesRegex(assembly.AssemblyError, "1至7秒"):
+            self.assemble()
+
     def test_missing_visibility_is_not_inferred_from_subjects(self):
         for listed in ([], ["CHAR0001"]):
             with self.subTest(subjects=listed):

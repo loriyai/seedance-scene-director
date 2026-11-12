@@ -140,12 +140,6 @@ def photo_reference_issues(unit, ordinary_characters=()):
         aid, carrier = row['asset_id'], row['carrier_asset_id']
         target, container = '@{' + aid + '}', '@{' + carrier + '}'
         visible = False
-        baseline = unit.get('lighting', '')
-        if target in baseline and aid not in ordinary_characters and not (
-                _IMAGE.search(baseline) and container in baseline):
-            issues.append({'code': 'EMBEDDED_CHARACTER_CARRIER', 'unit': unit['draft_key'],
-                           'field': 'lighting',
-                           'message': '光照中的照片局部人物须明确照片层及其PROP载体，不能转作实地人物'})
         for shot in unit.get('shots', []):
             text = shot.get('text', '')
             match = SHOT.fullmatch(text)

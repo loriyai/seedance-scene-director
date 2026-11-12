@@ -391,6 +391,50 @@ class ReviewCueCompatibilityTests(unittest.TestCase):
 
     LEGACY_FIXED = '固定镜头：核对原有动作或保持的用途、信息读清所需时长和切点；不要求补运镜。'
     LEGACY_MOVING = '运动镜头：核对起止取景、途中可见性、遮挡和落点；不只检查起始构图。'
+    V2_CHOICE = ('1至6秒摄影选择：1至4秒按观看重点、动作路径和信息揭示比较固定与运动；'
+                 '5至6秒不得全程固定，须有实际观看作用的相机位移或转向；移焦与主体动作不算。'
+                 '相邻两镜不得均固定；缺少选择须待补，不得由程序回填，也不得以无意义微移或拖慢表演规避。')
+    V2_FIXED = ('固定镜头：核对稳定观察的具体作用、信息读清所需时长和切点；'
+                '仅1至4秒可全程固定，并须满足相邻约束；5至6秒须调整有效摄影或镜长。')
+    V2_MOVING = ('运动镜头：核对方向、起止取景、途中可见性、遮挡和落点，以及当前时长内的可读性；'
+                 '同步核对构图、景深、光照和切点。词语命中仅提示复核，不证明实际相机运动。')
+
+    def historical_v2(self):
+        state, request = fixture()
+        for unit in request['units']:
+            unit['workflow_policy'] = 'scene-review-b-v2'
+            unit['shots'][0].update(start=0, end=4)
+            unit['shots'][1].update(start=4, end=10, camera='从车头横移至停止线')
+        snapshot = sr.freeze(state, request)
+        # Exact v0.61 strings, independent of the current cue producer.
+        snapshot['cue_policy'] = 'shot-review-cues-v2'
+        snapshot['rules_sha256'] = 'historical-v0.61-rules'
+        for target in snapshot['targets']:
+            target['review_cues'] = [self.V2_CHOICE,
+                                    self.V2_FIXED if target['shot_index'] == 1 else self.V2_MOVING]
+        snapshot['snapshot_sha256'] = sr.digest(sr._snapshot_payload(snapshot))
+        return state, request, snapshot
+
+    def test_v2_snapshots_remain_readable_when_new_snapshots_use_v3(self):
+        state, request, snapshot = self.historical_v2()
+        before = copy.deepcopy(snapshot)
+        self.assertEqual(sr.verify_snapshot(snapshot), before)
+        self.assertEqual(snapshot, before)
+        current = sr.freeze(state, request)
+        self.assertEqual(current['cue_policy'], 'shot-review-cues-v3')
+        self.assertNotEqual(current['targets'], snapshot['targets'])
+        self.assertEqual(sr.verify_snapshot(current), current)
+
+    def test_v2_snapshot_cues_cannot_be_rewritten_or_relabelled_as_v3(self):
+        for defect in ('cue_text', 'policy'):
+            _, _, snapshot = self.historical_v2()
+            if defect == 'cue_text':
+                snapshot['targets'][0]['review_cues'][0] = self.V2_CHOICE.replace('1至6秒', '1至7秒')
+            else:
+                snapshot['cue_policy'] = 'shot-review-cues-v3'
+            snapshot['snapshot_sha256'] = sr.digest(sr._snapshot_payload(snapshot))
+            with self.subTest(defect=defect), self.assertRaisesRegex(ValueError, '快照镜头不一致'):
+                sr.verify_snapshot(snapshot)
 
     def historical(self, workflow=None):
         state, request = fixture()

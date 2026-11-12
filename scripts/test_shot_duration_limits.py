@@ -62,17 +62,17 @@ class ShotDurationTests(unittest.TestCase):
         unit.pop('count_reason', None)
         return unit
 
-    def test_six_seconds_accepted_and_seven_rejected(self):
-        unit = self.unit([6])
+    def test_seven_seconds_accepted_and_eight_rejected(self):
+        unit = self.unit([7])
         warnings = d.validate_unit(self.fx.state, unit, [0, 9])
         self.assertNotIn(MOTION_WARNING, {w['kind'] for w in warnings})
-        with self.assertRaisesRegex(ValueError, '单镜不在1～6秒'):
-            d.validate_unit(self.fx.state, self.unit([7]), [0, 9])
+        with self.assertRaisesRegex(ValueError, '基础单镜不在1～7秒'):
+            d.validate_unit(self.fx.state, self.unit([8]), [0, 9])
 
     def test_integer_axis_and_unit_duration_remain_hard_constraints(self):
         unit = self.unit([2, 2])
         unit['shots'][0]['end'] = 2.5
-        with self.assertRaisesRegex(ValueError, '单镜不在1～6秒'):
+        with self.assertRaisesRegex(ValueError, '基础单镜不在1～7秒'):
             d.validate_unit(self.fx.state, unit, [0, 9])
         for lengths in ([3], [6] * 5 + [1]):
             with self.subTest(lengths=lengths), self.assertRaisesRegex(ValueError, '单元时长不合法'):
@@ -129,17 +129,20 @@ class ShotDurationTests(unittest.TestCase):
 
 
 class AudioCutLimitTests(unittest.TestCase):
-    def test_six_second_window_accepted_seven_rejected(self):
+    def test_seven_second_window_accepted_eight_rejected(self):
         self.assertEqual(cut_errors([(0, 6)], 6), [])
-        self.assertIn('AUDIO_CUT_WINDOW', {e['code'] for e in cut_errors([(0, 7)], 7)})
+        self.assertEqual(cut_errors([(0, 7)], 7), [])
+        self.assertIn('AUDIO_CUT_WINDOW', {e['code'] for e in cut_errors([(0, 8)], 8)})
 
     def test_fractional_windows_still_need_legal_integer_cuts(self):
         self.assertEqual(cut_errors([(.25, 5.75)], 6), [])
-        self.assertIn('AUDIO_CUT_WINDOW', {e['code'] for e in cut_errors([(.25, 6.25)], 7)})
+        self.assertEqual(cut_errors([(.25, 6.75)], 7), [])
+        self.assertIn('AUDIO_CUT_WINDOW', {e['code'] for e in cut_errors([(.25, 7.25)], 8)})
 
-    def test_joint_partition_can_use_six_but_not_seven_seconds(self):
+    def test_joint_partition_can_use_seven_but_not_eight_seconds(self):
         self.assertEqual(cut_errors([(0, 2.9), (2.9, 5.8)], 6), [])
-        errors = cut_errors([(0, 3.3), (3.3, 6.6)], 8)
+        self.assertEqual(cut_errors([(0, 3.3), (3.3, 6.6)], 8), [])
+        errors = cut_errors([(0, 3.8), (3.8, 7.6)], 9)
         self.assertNotIn('AUDIO_CUT_WINDOW', {e['code'] for e in errors})
         self.assertIn('AUDIO_CUT_PARTITION', {e['code'] for e in errors})
 

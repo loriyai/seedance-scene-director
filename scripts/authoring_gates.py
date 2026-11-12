@@ -169,20 +169,20 @@ def audio_ready(state, unit, checked):
         for index, part in enumerate(parts, 1):
             if all(_number(part.get(k)) for k in ('start', 'end')):
                 if (not 0 <= part['start'] < part['end'] <= window_end or
-                        math.ceil(part['end'] - .001) - math.floor(part['start'] + .001) > 6):
-                    errors.append(error('AUDIO_CUT_WINDOW', '片段无法完整容纳于1至6秒整数切点镜头；先调整自然分句或时间安排', record=rid, part=index))
+                        math.ceil(part['end'] - .001) - math.floor(part['start'] + .001) > 7):
+                    errors.append(error('AUDIO_CUT_WINDOW', '片段无法完整容纳于基础1至7秒整数切点镜头；先调整自然分句或时间安排', record=rid, part=index))
     if type(duration) is int and 4 <= duration <= 30:
         windows = [p for ps in all_parts.values() for p in ps
                    if all(_number(p.get(k)) for k in ('start','end'))]
         allowed = {t for t in range(duration+1) if not any(p['start']+.001 < t < p['end']-.001 for p in windows)}
-        # Speech fragments must fit a continuous partition of 1-6 second shots.
+        # Speech fragments must fit a continuous partition of 1-7 second base shots.
         # Shot count follows the story rather than a duration-based quota.
         reachable = {0}
         for t in range(1,duration+1):
-            if t in allowed and any(t - k in reachable for k in range(1, 7)):
+            if t in allowed and any(t - k in reachable for k in range(1, 8)):
                 reachable.add(t)
         if duration not in reachable:
-            errors.append(error('AUDIO_CUT_PARTITION', '所有语义片段无法共同构成1至6秒整数镜头分区；须在摄影前调整分句/切点'))
+            errors.append(error('AUDIO_CUT_PARTITION', '所有语义片段无法共同构成基础1至7秒整数镜头分区；须在摄影前调整分句/切点'))
     payload = audio_payload(state, {**unit, 'action_plan': actions})
     binding = digest(payload)
     review = unit.get('audio_preflight', {})

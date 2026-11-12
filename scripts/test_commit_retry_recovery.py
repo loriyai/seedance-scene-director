@@ -202,6 +202,9 @@ class CommitRetryRecoveryTests(unittest.TestCase):
         case.commit_fixture()
         state = d.load(case.project)
         receipt = state['receipts'][0]
+        receipt['units'] = receipt.pop('source_units')
+        receipt.pop('delivery_timing')
+        state['units'] = copy.deepcopy(receipt['units'])
         state.pop('header_hash')
         state.pop('header_policy')
         for unit in state['units'] + receipt['units']:

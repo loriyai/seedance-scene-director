@@ -182,10 +182,10 @@ class AudioGateTests(unittest.TestCase):
     def test_divergence_and_impossible_integer_partition(self):
         state,u=speech_fixture();u['shots']=[{'start':0,'end':4,'dialogue_parts':[dict(u['audio_plan'][0]['parts'][0],record='L1',end=1.1)]}]
         self.assertIn('AUDIO_PLAN_DIVERGED',{e['code'] for e in pf.check_audio_plan(u)['errors']})
-        state,u=speech_fixture();u['duration']=8
+        state,u=speech_fixture();u['duration']=9
         text='甲乙丙丁戊己庚辛壬癸子丑寅卯，辰巳午未申酉戌亥天地玄黄宇宙。'
-        u['audio'][0].update(text=text,units=28,end=6.6,pause=0)
-        parts=[{'text':text[:15],'start':0,'end':3.3,'pause':0},{'text':text[15:],'start':3.3,'end':6.6,'pause':0}]
+        u['audio'][0].update(text=text,units=28,end=7.6,pause=0)
+        parts=[{'text':text[:15],'start':0,'end':3.8,'pause':0},{'text':text[15:],'start':3.8,'end':7.6,'pause':0}]
         u['audio_plan'][0]['parts']=parts
         state['records'][0].update(text=text,end=28);u['span']=[0,28]
         result=ag.audio_ready(state,u,pf.check_audio_plan(u))

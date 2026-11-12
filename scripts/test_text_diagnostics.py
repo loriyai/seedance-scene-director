@@ -23,7 +23,6 @@ class TextDiagnosticsTests(unittest.TestCase):
         text = self.fx.draft.read_text(encoding='utf-8')
         text = text.replace('@{CHAR0001}把', '陈默把').replace('@{CHAR0001}走到', '陈默走到')
         text = re.sub(r'主光：[^；\r\n]+；', '', text)
-        text = re.sub(r'^光照：[^\r\n]*\r?\n', '', text, flags=re.M)
         self.fx.draft.write_text(text, encoding='utf-8')
 
     def test_preview_reports_multiple_references_and_independent_body_errors_without_writes(self):
@@ -201,7 +200,6 @@ class TextDiagnosticsTests(unittest.TestCase):
         text = self.fx.draft.read_text(encoding='utf-8')
         text = re.sub(r'(；转场：硬切）)[^；]+；', r'\1摄影机固定在桌侧观察；', text)
         text = re.sub(r'主光：[^；\r\n]+；', '', text)
-        text = re.sub(r'^光照：[^\r\n]*\r?\n', '', text, flags=re.M)
         text = re.sub(r'声音\[([^,\]]+),[^\]]+\]', r'声音[\1,0.2-0.3]', text)
         blocks = text.strip().split('\n\n')
         shot = next(line for line in blocks[1].splitlines() if line.startswith('·'))
@@ -216,10 +214,11 @@ class TextDiagnosticsTests(unittest.TestCase):
         decisions['units'][1]['shots'].append(mapping)
         decisions_path.write_text(json.dumps(decisions, ensure_ascii=False), encoding='utf-8')
         trace = self.fx.project / 'diagnostic-trace.json'
+        delivery.bind_trace(self.fx.project, self.fx.draft,
+                            self.fx.project / 'authored-decisions.json', trace)
         before = self.fx.snapshot()
-        with self.assertRaises(core.TextValidationError) as caught:
-            delivery.bind_trace(self.fx.project, self.fx.draft,
-                                self.fx.project / 'authored-decisions.json', trace)
+        with self.assertRaises(gate.AuthoringGateError) as caught:
+            delivery.preview(self.fx.project, self.fx.draft, authoring_trace=trace)
         codes = {e['code'] for e in caught.exception.errors}
         self.assertTrue({'AUTHORING_LIGHTING_UNDER_SPECIFIED', 'CAMERA_CONSTRAINT',
                          'SPEECH_READING_CAPACITY'} <= codes, codes)

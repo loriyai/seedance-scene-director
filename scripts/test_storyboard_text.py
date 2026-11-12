@@ -314,11 +314,11 @@ class StoryboardTextTests(unittest.TestCase):
                     self.assertEqual(report['total_duration'], total)
                     self.assertEqual(report['shot_count'], len(lengths))
                     self.assertEqual(report['status'], 'checked')
-        for lengths in ([4, 4, 3, 3, 3, 3, 3, 3], [2] * 13, [4] * 6 + [3] * 2, [5] * 5):
+        for lengths in ([4, 4, 3, 3, 3, 3, 3, 3], [2] * 13, [4] * 6 + [3] * 2, [5] * 5, [7], [7, 7, 7, 7, 2]):
             with self.subTest(valid=lengths):
                 units = st.parse(self.action_draft(lengths), self.state)
                 self.assertEqual(st.validate(self.state, units)['total_duration'], sum(lengths))
-        for lengths, message in (([6] * 5 + [1], '4～30秒'), ([7, 6, 6, 6, 5], '1～6秒')):
+        for lengths, message in (([6] * 5 + [1], '4～30秒'), ([8, 6, 6, 6, 4], '1～7秒')):
             with self.subTest(invalid=lengths), self.assertRaisesRegex(ValueError, message):
                 st.parse(self.action_draft(lengths), self.state)
 

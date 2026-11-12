@@ -1,6 +1,5 @@
 """Speech estimates share one policy without becoming rendering instructions."""
 import copy
-from decimal import Decimal
 import unittest
 
 import dialogue_layout as dl
@@ -8,11 +7,10 @@ import director
 import speech_timing_audit as audit
 import storyboard_preflight as preflight
 import authoring_gates
-import speech_timing_policy as timing_policy
 
 
 class SpeechTimingPolicyChecks(unittest.TestCase):
-    def unit(self, speed='常速', units=30, net=5.5, pause=.2):
+    def unit(self, speed='常速', units=30, net=6.0, pause=.2):
         text = '甲' * units + '。'
         end = round(net + pause, 3)
         return {'audio': [{'record': 'L1', 'text': text, 'start': 0, 'end': end,
@@ -21,31 +19,22 @@ class SpeechTimingPolicyChecks(unittest.TestCase):
                                                'start': 0, 'end': end, 'pause': pause}]}]}
 
     def test_all_consumers_share_the_new_ranges(self):
-        self.assertIs(dl.SPEEDS, timing_policy.SPEEDS)
-        self.assertIs(dl.PAUSE_RANGES, timing_policy.PAUSE_RANGES)
-        self.assertIs(dl.pause_seconds, timing_policy.pause_seconds)
-        self.assertEqual(dl.SPEEDS, {'常速': (5.2, 5.8), '快节奏': (5.8, 6.4),
+        self.assertEqual(dl.SPEEDS, {'常速': (4.8, 5.4), '快节奏': (4.8, 6.0),
                                     '情绪慢速': (4.0, 4.8)})
         for module in (director, audit, preflight):
             self.assertIs(module.SPEEDS, dl.SPEEDS)
         self.assertEqual(dl.PAUSE_RANGES, {'comma': (.1, .2), 'sentence': (.1, .25)})
-        self.assertEqual(timing_policy.DEFAULT_RATE, 5.5)
-        self.assertEqual(timing_policy.CAPACITY_RATE, 6.4)
-        self.assertAlmostEqual(dl.estimate('甲。', 55), 10.175)
-
-    def test_decimal_capacity_floor_preserves_fractional_rate_exactly(self):
-        self.assertEqual(timing_policy.capacity_seconds(32), Decimal('5'))
-        self.assertEqual(timing_policy.capacity_seconds(16, .1), Decimal('2.6'))
+        self.assertAlmostEqual(dl.estimate('甲。', 51), 10.175)
 
     def test_overlapping_rate_is_valid_for_both_selected_bands(self):
         for speed in ('常速', '快节奏'):
-            unit = self.unit(speed=speed, units=29, net=5)
+            unit = self.unit(speed=speed)
             before = copy.deepcopy(unit)
             self.assertEqual(audit.audit(unit), [])
             self.assertEqual(unit, before)
-        warnings = audit.audit(self.unit(speed='情绪慢速', units=29, net=5))
+        warnings = audit.audit(self.unit(speed='情绪慢速'))
         self.assertEqual(warnings[0]['kind'], '片段估计净语速超档')
-        self.assertEqual(warnings[0]['rate'], 5.8)
+        self.assertEqual(warnings[0]['rate'], 5.0)
 
     def test_explicit_semantic_pause_replaces_punctuation_estimate_once(self):
         unit = self.unit(pause=1.7)
@@ -53,7 +42,7 @@ class SpeechTimingPolicyChecks(unittest.TestCase):
         unit['audio'][0]['end'] = unit['shots'][0]['dialogue_parts'][0]['end'] = 6.7
         warnings = audit.audit(unit)
         self.assertEqual(warnings[0]['pause'], 1.7)
-        self.assertEqual(warnings[0]['min_seconds'], round(30 / 5.8 + 1.7, 3))
+        self.assertEqual(warnings[0]['min_seconds'], round(30 / 5.4 + 1.7, 3))
         self.assertEqual(warnings[0]['rate'], 6.0)
 
     def test_mixed_punctuation_is_one_pause_and_special_marks_stay_distinct(self):
@@ -62,26 +51,6 @@ class SpeechTimingPolicyChecks(unittest.TestCase):
         self.assertEqual(dl.pause_seconds('甲……'), dl.SEMANTIC_PAUSE_ESTIMATE)
         self.assertEqual(dl.pause_seconds('甲；乙：'), 2 * dl.SEMANTIC_PAUSE_ESTIMATE)
         self.assertEqual(dl.pause_seconds('甲。乙。'), .35)
-
-    def test_complete_reading_tokens_own_internal_punctuation_for_every_consumer(self):
-        text = "1,000，3.14；don't：R&D。"
-        reference = timing_policy.punctuation_reference(text)
-        self.assertEqual([row['text'] for row in reference['clusters']], ['，', '；', '：', '。'])
-        self.assertEqual([text[row['start']:row['end']] for row in reference['clusters']],
-                         ['，', '；', '：', '。'])
-        self.assertEqual(dl.pause_seconds('1,000'), 0)
-        self.assertEqual(dl.pause_seconds(text), .845)
-        self.assertFalse(reference['blocking'])
-        self.assertTrue(reference['clusters'][1]['requires_context'])
-
-    def test_reference_clusters_do_not_duplicate_at_fragment_boundaries(self):
-        fragments = ['甲？', '！……乙，', '、丙。']
-        self.assertEqual(timing_policy.punctuation_weights(fragments), [.175, .15, .175])
-        reference = timing_policy.punctuation_reference(''.join(fragments))
-        self.assertEqual(len(reference['clusters']), 3)
-        self.assertAlmostEqual(sum(timing_policy.punctuation_weights(fragments)),
-                               reference['reference_seconds'])
-        self.assertTrue(reference['clusters'][0]['requires_context'])
 
     def test_gap_thresholds_use_boundary_kind_without_reclassifying_ellipsis(self):
         for ending, gap, expect_warning in (('，', .21, True), ('。', .26, True),

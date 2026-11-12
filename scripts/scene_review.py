@@ -102,7 +102,7 @@ def verify_snapshot(snapshot):
             and snapshot.get('context_sha256') == gate.context_digest(state)
             and snapshot.get('source_sha256') == digest(source_binding(state)), '快照绑定不一致')
     cue_policy = snapshot.get('cue_policy', shot_review.LEGACY_CUE_POLICY)
-    require(cue_policy in (shot_review.LEGACY_CUE_POLICY, shot_review.CUE_POLICY),
+    require(cue_policy in shot_review.SUPPORTED_CUE_POLICIES,
             '快照审阅提示策略不兼容')
     require(snapshot.get('targets') == shot_review.targets(state, request, cue_policy=cue_policy),
             '快照镜头不一致')

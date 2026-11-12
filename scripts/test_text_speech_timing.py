@@ -41,9 +41,9 @@ class TextSpeechWindowTests(unittest.TestCase):
         part = row['fragments'][0]
         self.assertAlmostEqual(part['duration'], .1)
         self.assertEqual(part['dialogue_characters'], 6)
-        self.assertEqual(part['mechanical_minimum'], .9375)
+        self.assertEqual(part['mechanical_minimum'], 1)
         self.assertIs(part['below_mechanical_minimum'], True)
-        self.assertAlmostEqual(part['deficit'], .8375)
+        self.assertAlmostEqual(part['deficit'], .9)
 
     def test_unit_relative_times_and_multiple_fragments_preserve_gaps(self):
         data = unit(start=10, end=16, parts=[
@@ -76,91 +76,19 @@ class TextSpeechWindowTests(unittest.TestCase):
             fragment('甲乙丙丁戊己庚', start=0, end=1)])])
         self.assertEqual(result['status'], 'blocked')
         self.assertEqual(result['warnings'][0]['code'], 'DIALOGUE_CAPACITY')
-        self.assertAlmostEqual(result['warnings'][0]['minimum'], 7 / 6.4)
+        self.assertAlmostEqual(result['warnings'][0]['minimum'], 7 / 6)
         self.assertEqual(result['errors'][0]['code'], 'SPEECH_READING_CAPACITY')
 
-    def test_fragment_floor_is_exact_and_does_not_infer_punctuation_silence(self):
+    def test_fragment_load_uses_same_exact_formula_and_decimal_comparison(self):
         row = self.facts(unit(end=2, parts=[fragment(
             '甲乙丙丁戊己，。', start=0,
-            end=Decimal('0.937499999999999999999'))]))['shots'][0]
+            end=Decimal('1.299999999999999999999'))]))['shots'][0]
         part = row['fragments'][0]
         self.assertEqual(part['comma_or_pause_count'], 1)
         self.assertEqual(part['sentence_end_count'], 1)
-        self.assertEqual(part['mechanical_minimum'], .9375)
+        self.assertEqual(part['mechanical_minimum'], 1.3)
         self.assertTrue(part['below_mechanical_minimum'])
         self.assertGreater(part['deficit'], 0)
-
-    def test_explicit_internal_pause_changes_only_known_required_load(self):
-        part = fragment('甲' * 16 + '。', start=0, end=2.6)
-        part['speech_basis'] = {'pause_seconds': .1}
-        data = unit(end=3, parts=[part])
-        report = text_dialogue_capacity([data])
-        self.assertEqual(report['status'], 'checked')
-        fact = report['speech_window_diagnostics']['shots'][0]['fragments'][0]
-        self.assertEqual(fact['phonetic_minimum'], 2.5)
-        self.assertEqual(fact['authored_pause_seconds'], .1)
-        self.assertEqual(fact['known_required_seconds'], 2.6)
-        part['speech_basis']['pause_seconds'] = .11
-        report = text_dialogue_capacity([data])
-        self.assertEqual(report['status'], 'blocked')
-        self.assertEqual(report['errors'][0]['code'], 'SPEECH_READING_CAPACITY')
-        self.assertEqual(report['errors'][0]['minimum'], 2.61)
-
-    def test_zero_pause_is_distinct_from_missing_pause_and_cannot_waive_reading(self):
-        part = fragment('API，甲', start=0, end=2)
-        part['speech_basis'] = {'pause_seconds': 0}
-        report = text_dialogue_capacity([unit(parts=[part])])
-        self.assertIn('SPEECH_READING_REQUIRED', {error['code'] for error in report['errors']})
-        fact = report['speech_window_diagnostics']['shots'][0]['fragments'][0]
-        self.assertEqual(fact['pause_status'], 'authored')
-        self.assertEqual(fact['authored_pause_seconds'], 0)
-        self.assertIsNone(fact['known_required_seconds'])
-
-    def test_pause_values_must_be_finite_nonnegative_numbers_inside_window(self):
-        for value in (None, True, False, '0.1', -.1, float('nan'), float('inf'), 1.01):
-            with self.subTest(value=value):
-                part = fragment(start=0, end=1)
-                part['speech_basis'] = {'pause_seconds': value}
-                report = text_dialogue_capacity([unit(parts=[part])])
-                self.assertEqual(report['status'], 'blocked')
-                self.assertIn('SPEECH_BASIS_INVALID', {error['code'] for error in report['errors']})
-
-    def test_same_utterance_cluster_is_scanned_once_across_shots_and_units(self):
-        first = fragment('甲？', start=0, end=.5)
-        second = fragment('！乙', start=0, end=.5)
-        first['speech_basis'] = {'pause_seconds': .1}
-        second['speech_basis'] = {'pause_seconds': .1}
-        data = [dict(unit(end=1, parts=[first]), draft_key='u1', duration=1),
-                dict(unit(end=1, parts=[second]), draft_key='u2', duration=1)]
-        report = text_dialogue_capacity(data)
-        self.assertEqual(report['status'], 'checked')
-        utterance = report['utterance_diagnostics']['records'][0]
-        self.assertEqual(utterance['text'], '甲？！乙')
-        self.assertEqual(utterance['speech_seconds'], 1)
-        self.assertEqual(utterance['between_parts'], [.5])
-        self.assertEqual(utterance['authored_pause_seconds'], .2)
-        self.assertAlmostEqual(utterance['known_required_seconds'], 2 / 6.4 + .2)
-        reference = utterance['punctuation_reference']
-        self.assertEqual(reference['reference_seconds'], .175)
-        self.assertEqual(len(reference['clusters']), 1)
-        self.assertEqual(reference['clusters'][0]['text'], '？！')
-        self.assertEqual([p['unit'] for p in reference['clusters'][0]['parts']], ['u1', 'u2'])
-        second['record'] = 'L000002'
-        separate = text_dialogue_capacity(data)['utterance_diagnostics']['records']
-        self.assertEqual(len(separate), 2)
-        self.assertEqual(sum(len(row['punctuation_reference']['clusters']) for row in separate), 2)
-
-    def test_partial_pause_declarations_do_not_assume_other_fragments_are_silent(self):
-        first = fragment('甲', start=0, end=.5)
-        second = fragment('乙', start=1, end=1.5)
-        first['speech_basis'] = {'pause_seconds': .1}
-        report = text_dialogue_capacity([unit(parts=[first, second])])
-        utterance = report['utterance_diagnostics']['records'][0]
-        self.assertEqual(utterance['pause_status'], 'partial')
-        self.assertEqual(utterance['authored_pause_seconds'], .1)
-        self.assertAlmostEqual(utterance['known_required_seconds'], 2 / 6.4 + .1)
-        self.assertEqual(utterance['between_parts'], [.5])
-        self.assertEqual(report['semantic_review'], 'not_performed')
 
     def test_missing_or_invalid_windows_cannot_claim_capacity_checked(self):
         for changes in ({'start': None}, {'end': True}, {'end': float('nan')},

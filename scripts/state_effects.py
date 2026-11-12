@@ -365,8 +365,8 @@ def _assignment(unit, planned):
     cursor = 0
     for index, shot in enumerate(shots):
         require(isinstance(shot, dict) and type(shot.get('start')) is int and type(shot.get('end')) is int
-                and shot['start'] == cursor and 1 <= shot['end'] - cursor <= 6,
-                f'shots[{index}].start/end', '须先确定连续的1至6秒整数镜窗')
+                and shot['start'] == cursor and 1 <= shot['end'] - cursor <= 7,
+                f'shots[{index}].start/end', '须先确定连续的基础1至7秒整数镜窗')
         cursor = shot['end']
     require(cursor == unit['duration'], 'duration', '镜窗须完整覆盖单元时长')
     output = [[] for _ in shots]

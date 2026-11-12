@@ -16,8 +16,6 @@ import json
 import re
 from pathlib import Path
 
-from speech_timing_policy import capacity_seconds
-
 
 POLICY = "shot-by-shot-v1"
 VERSION = 4
@@ -102,17 +100,11 @@ def _body(shot):
     return match.group(1) if match else text
 
 
-def body_errors(units, *, legacy=False, current_lighting=False):
+def body_errors(units, *, legacy=False):
     """Collect deterministic prose errors from structurally parsed units."""
     errors = []
-    import storyboard_lighting as lighting
-    errors.extend(lighting.errors(units))
     station_lines = []
     for unit in units:
-        baseline = unit.get(lighting.TEXT_FIELD, '')
-        if baseline and META_WORDS.search(baseline):
-            errors.append({'code': 'AUTHORING_META_PROMPT', 'unit': unit['draft_key'],
-                           'field': lighting.TEXT_FIELD, 'message': '光照行不能包含后台纠错或审阅说明'})
         for index, shot in enumerate(unit.get("shots", []), 1):
             key = f"{unit['draft_key']}#{index}"
             body = _body(shot)
@@ -127,7 +119,7 @@ def body_errors(units, *, legacy=False, current_lighting=False):
             if GENERIC_CAMERA.search(body):
                 errors.append({"code": "AUTHORING_GENERIC_CAMERA", "shot": key,
                                "message": "摄影路径不得使用泛化占位句"})
-            if not current_lighting and not lighting.unit_enabled(unit) and (GENERIC_LIGHT.search(body) or not CONCRETE_LIGHT.search(body) or not MAIN_FILL_LIGHT.search(body)):
+            if GENERIC_LIGHT.search(body) or not CONCRETE_LIGHT.search(body) or not MAIN_FILL_LIGHT.search(body):
                 errors.append({"code": "AUTHORING_LIGHTING_UNDER_SPECIFIED", "shot": key,
                                "message": "正文须落实具体主光、辅光或反射关系和明暗落点"})
             if not DEPTH_WORDS.search(body):
@@ -360,7 +352,7 @@ def _validate_v3(project, state, draft_bytes, units, expected_context_sha256,
         if has_dialogue:
             speech_seconds = timing.get("speech_seconds", 0)
             chars = sum(c.isalnum() for part in shot["dialogue_parts"] for c in part["text"])
-            if speech_seconds < float(capacity_seconds(chars)) - 0.05:
+            if speech_seconds < chars / 6.0 - 0.05:
                 errors.append({"code": "AUTHORING_TRACE_SPEECH_FAST", "shot": key,
                                "message": "自然说法估时低于规则允许的快速语速下限"})
             if speech_seconds > duration + 0.05:

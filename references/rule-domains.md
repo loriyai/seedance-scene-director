@@ -16,8 +16,6 @@
 | 分段轮次、段内序号及稳定分镜显示名称 | [交付版式](storyboard-rules.md#交付版式)、`scripts/segment_naming.py`与文本交付入口 |
 | 视频比例到分镜画幅配置的统一映射、版本与单元冻结 | `scripts/ratio_profiles.py`；适用创作规则见[画幅配置](storyboard-rules.md#画幅配置) |
 | 新文字分镜的创作、流程和语法 | 下述三份分镜权威资料 |
-| 自然估时、必要停顿及声画时序的创作判断 | [声音与时长](storyboard-rules.md#声音与时长)；读法容量与`pause_seconds`语法见[文本接口](storyboard-text-format.md#文本分镜接口) |
-| 单元起始光照、镜头落点与变化后的连续状态 | [空间、构图、景深与光照](storyboard-rules.md#空间构图景深与光照)；`unit-lighting-v1`语法与冻结边界见[文本格式](storyboard-text-format.md) |
 | 分镜创作与脚本的职责边界、跨代理与包装器约束 | [共同执行契约](execution-contract.md#分镜创作与工具边界) |
 | 连续逐镜核对、按需增量诊断、逐段交付及同类问题闭环 | [分镜工作流](storyboard-workflow.md#范围一次当前场次逐步完成) |
 | 按场来源/资产/版本只读投影与上下文绑定 | `scripts/storyboard_context.py`；合法引用集合复用`storyboard_text.py` |

@@ -21,10 +21,10 @@ import test_video_write_receipt as video_fixture
 class FragmentTimingChecks(unittest.TestCase):
     def unit(self):
         return {'audio': [{'record': 'L1', 'text': '我们继续，现在出发。', 'units': 8,
-                           'start': 0, 'end': 1.91, 'pause': .45, 'speed': '常速'}],
+                           'start': 0, 'end': 2.05, 'pause': .45, 'speed': '常速'}],
                 'shots': [{'dialogue_parts': [
-                    {'record': 'L1', 'text': '我们继续，', 'start': 0, 'end': .88, 'pause': .15},
-                    {'record': 'L1', 'text': '现在出发。', 'start': .98, 'end': 1.91, 'pause': .2}]}]}
+                    {'record': 'L1', 'text': '我们继续，', 'start': 0, 'end': .95, 'pause': .15},
+                    {'record': 'L1', 'text': '现在出发。', 'start': 1.05, 'end': 2.05, 'pause': .2}]}]}
 
     def test_natural_nonzero_gap_is_allowed_without_rewriting(self):
         unit = self.unit()

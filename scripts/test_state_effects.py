@@ -45,6 +45,18 @@ class ActionStateEffectsTests(unittest.TestCase):
         self.assertEqual(self.unit, before)
         self.assertEqual(director.validate_unit(self.state, compiled, [0, 9]), [])
 
+    def test_effects_compile_with_seven_second_base_shot_and_reject_eight(self):
+        self.unit['shots'] = [self.unit['shots'][0]]
+        self.unit['shots'][0].update(start=0, end=7)
+        self.unit['duration'] = 7
+        compiled = self.compile()
+        self.assertEqual(compiled['shots'][0]['end'], 7)
+        self.assertEqual(len(compiled['shots'][0]['continuity']['changes']), 1)
+        self.unit['shots'][0]['end'] = 8
+        self.unit['duration'] = 8
+        with self.assertRaisesRegex(ValueError, '1至7秒'):
+            self.compile()
+
     def test_start_and_end_at_cut_have_defined_ownership(self):
         action = self.unit['action_plan'][0]
         action.update(start=1, end=2, milestones={})

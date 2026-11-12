@@ -149,9 +149,8 @@ def apply(state, units, rows, *, source_state=None, field=FIELD):
 def require_usage(units, rows, *, field=FIELD):
     """A known slot's bare label cannot bypass its record scope or CHAR roster."""
     from storyboard_text import _character_aliases, _mask_quoted_prose
-    from storyboard_lighting import visual_prose
     for unit in units:
-        prose = _mask_quoted_prose('\n'.join(visual_prose(unit)))
+        prose = _mask_quoted_prose(unit.get('global', '') + '\n' + '\n'.join(s.get('text', '') for s in unit.get('shots', [])))
         local = {r['asset_id'] for r in unit.get(field, [])}
         for row in rows:
             aid = row['asset_id']

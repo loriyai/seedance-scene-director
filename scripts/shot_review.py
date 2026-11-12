@@ -6,8 +6,10 @@ import copy
 import re
 
 
-CUE_POLICY = 'shot-review-cues-v2'
+CUE_POLICY = 'shot-review-cues-v3'
+PREVIOUS_CUE_POLICY = 'shot-review-cues-v2'
 LEGACY_CUE_POLICY = 'shot-review-cues-v1'
+SUPPORTED_CUE_POLICIES = (LEGACY_CUE_POLICY, PREVIOUS_CUE_POLICY, CUE_POLICY)
 
 
 def diagnostics(unit):
@@ -87,12 +89,13 @@ def appearance_reference_warnings(state, unit):
 def targets(state, request, *, cue_policy=CUE_POLICY):
     """Snapshot requested shots and their source/state, without issuing verdicts."""
     from continuity import portion
-    if cue_policy not in (LEGACY_CUE_POLICY, CUE_POLICY):
+    if cue_policy not in SUPPORTED_CUE_POLICIES:
         raise ValueError('未知逐镜审阅提示策略')
     result = []
     for unit_index, unit in enumerate(request.get('units', []), 1):
-        current_cues = (cue_policy == CUE_POLICY
-                        and unit.get('workflow_policy') == 'scene-review-b-v2')
+        camera_cues = (cue_policy in (PREVIOUS_CUE_POLICY, CUE_POLICY)
+                      and unit.get('workflow_policy') == 'scene-review-b-v2')
+        shot_limit = 7 if cue_policy == CUE_POLICY else 6
         a, b = unit['span']
         source = [{'record': r['id'], 'scene': r['scene'], 'kind': r['kind'],
                    'text': portion(r, [a, b])}
@@ -101,27 +104,37 @@ def targets(state, request, *, cue_policy=CUE_POLICY):
         for shot_index, shot in enumerate(unit.get('shots', []), 1):
             cues = []
             camera = shot.get('camera', '')
-            legal_shot = (current_cues
+            legal_shot = (camera_cues
                           and type(shot.get('start')) is int
                           and type(shot.get('end')) is int
-                          and 1 <= shot['end'] - shot['start'] <= 6)
+                          and 1 <= shot['end'] - shot['start'] <= shot_limit)
             if legal_shot:
-                cues.append('1至6秒摄影选择：1至4秒按观看重点、动作路径和信息揭示比较固定与运动；'
-                            '5至6秒不得全程固定，须有实际观看作用的相机位移或转向；移焦与主体动作不算。'
-                            '相邻两镜不得均固定；缺少选择须待补，不得由程序回填，也不得以无意义微移或拖慢表演规避。')
+                if cue_policy == PREVIOUS_CUE_POLICY:
+                    # Frozen v0.61 snapshots bind this exact v2 payload.
+                    cues.append('1至6秒摄影选择：1至4秒按观看重点、动作路径和信息揭示比较固定与运动；'
+                                '5至6秒不得全程固定，须有实际观看作用的相机位移或转向；移焦与主体动作不算。'
+                                '相邻两镜不得均固定；缺少选择须待补，不得由程序回填，也不得以无意义微移或拖慢表演规避。')
+                else:
+                    cues.append('基础1至7秒摄影选择：1至4秒按观看重点、动作路径和信息揭示比较固定与运动；'
+                                '5至7秒不得全程固定，须有实际观看作用的相机位移或转向；移焦与主体动作不算。'
+                                '相邻两镜不得均固定；缺少选择须待补，不得由程序回填，也不得以无意义微移或拖慢表演规避。')
             if '固定' in camera:
                 if (cue_policy == LEGACY_CUE_POLICY
                         and unit.get('review_dependencies', {}).get('policy') in ('shot-dependencies-v2', 'shot-dependencies-v3')
                         and type(shot.get('start')) is int and type(shot.get('end')) is int
                         and 4 <= shot['end'] - shot['start'] <= 6):
                     cues.append('4至6秒镜头含固定描述：核对是否仅为实际运镜后的短暂稳定落点；整镜固定不合格，须有服务观看重点的相机位移或转向，移焦与主体动作不算。')
-                elif current_cues:
-                    cues.append('固定镜头：核对稳定观察的具体作用、信息读清所需时长和切点；'
-                                '仅1至4秒可全程固定，并须满足相邻约束；5至6秒须调整有效摄影或镜长。')
+                elif camera_cues:
+                    if cue_policy == PREVIOUS_CUE_POLICY:
+                        cues.append('固定镜头：核对稳定观察的具体作用、信息读清所需时长和切点；'
+                                    '仅1至4秒可全程固定，并须满足相邻约束；5至6秒须调整有效摄影或镜长。')
+                    else:
+                        cues.append('固定镜头：核对稳定观察的具体作用、信息读清所需时长和切点；'
+                                    '仅1至4秒可全程固定，并须满足相邻约束；5至7秒须调整有效摄影或镜长。')
                 else:
                     cues.append('固定镜头：核对原有动作或保持的用途、信息读清所需时长和切点；不要求补运镜。')
             if any(text in camera for text in ('移', '推', '拉', '跟', '升', '降', '摇', '环绕')):
-                if current_cues:
+                if camera_cues:
                     cues.append('运动镜头：核对方向、起止取景、途中可见性、遮挡和落点，以及当前时长内的可读性；'
                                 '同步核对构图、景深、光照和切点。词语命中仅提示复核，不证明实际相机运动。')
                 else:

@@ -25,7 +25,7 @@ python <skill>/scripts/canvas.py preflight --project <project> --target <画布�
 
 ## 文本分镜接口
 
-新文字分镜的绑定/范围命令、check/preview/commit/render和场级报告，唯一维护在[文本母稿格式与接口](storyboard-text-format.md#文本分镜接口)；本页不重复接口内容。
+新文字分镜的绑定/范围命令、check/preview/commit/render和场级报告，唯一维护在[文本母稿格式与接口](storyboard-text-format.md#文本分镜接口)；本页不重复接口内容。审阅后减秒由文字交付入口统一调用内部模块`scripts/storyboard_delivery_timing.py`，预检、回执及重复导出的边界见[最终时长转换](storyboard-text-format.md#审阅后最终时长转换)。
 
 ## 事件计时
 

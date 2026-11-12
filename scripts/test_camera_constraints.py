@@ -19,7 +19,7 @@ class CameraConstraintChecks(unittest.TestCase):
         return {'id': name, 'shots': result}
 
     def test_long_fixed_is_rejected_but_short_fixed_is_allowed(self):
-        for duration in range(1, 7):
+        for duration in range(1, 8):
             report = core.camera_constraints([self.unit((duration, '相机固定，演员向右平移'))])
             self.assertEqual([e['code'] for e in report['errors']], ['LONG_SHOT_FIXED'] if duration >= 5 else [])
             self.assertEqual(report['semantic_review'], 'not_performed')
@@ -58,7 +58,7 @@ class CameraConstraintChecks(unittest.TestCase):
         text = test.authored_text().replace('00秒-04秒', '00秒-05秒').replace('相机向右横移', '相机固定')
         draft = test.write_draft('bad-camera.txt', text)
         before = test.snapshot()
-        with self.assertRaisesRegex(ValueError, '5～6秒镜头不得全程固定'):
+        with self.assertRaisesRegex(ValueError, '5～7秒镜头不得全程固定'):
             delivery.preview(test.project, draft)
         self.assertEqual(test.snapshot(), before)
 
@@ -84,6 +84,16 @@ class CameraConstraintChecks(unittest.TestCase):
         with patch.object(delivery, 'require_camera_constraints'):
             test.commit_fixture(draft=old_draft)
         state = d.load(test.project)
+        receipt = state['receipts'][0]
+        receipt['units'] = receipt.pop('source_units')
+        receipt.pop('delivery_timing')
+        state['units'] = copy.deepcopy(receipt['units'])
+        receipt['request_hash'] = delivery.digest({
+            'policy': delivery.POLICY, 'draft_sha256': d.file_hash(old_draft),
+            'mode': 'append', 'replace_ids': [],
+            'span': [receipt['units'][0]['span'][0], receipt['units'][-1]['span'][1]],
+            'header_sha256': d.sha(test.header), 'video_ratios': receipt['video_ratios'],
+            'ratio_profiles': receipt['ratio_profiles']})
         for unit in state['units'] + state['receipts'][0]['units']:
             unit['header_policy'] = 'visual-only-v2'
         # This fixture represents the older receipt shape. Keeping the current
@@ -95,7 +105,7 @@ class CameraConstraintChecks(unittest.TestCase):
         result = delivery.commit(test.project, old_draft, 'fictional-first', test.review, test.output)
         self.assertEqual(result['status'], 'already_committed')
         self.assertEqual(test.output.read_bytes(), before)
-        with self.assertRaisesRegex(ValueError, '5～6秒镜头不得全程固定'):
+        with self.assertRaisesRegex(ValueError, '5～7秒镜头不得全程固定'):
             delivery.commit(test.project, old_draft, 'new-request', test.review, test.project / 'new.txt')
 
     def test_replacement_does_not_treat_an_older_batch_as_adjacent(self):

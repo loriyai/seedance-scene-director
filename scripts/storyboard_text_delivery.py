@@ -18,6 +18,7 @@ import batch_naming
 import ratio_profiles
 import storyboard_text as text_core
 import storyboard_authoring_gate
+import storyboard_delivery_timing
 from storyboard_context import (context_hash, scene_context, context_scope,
                                 candidate_context_policy, SCOPED_CONTEXT_POLICY)
 import storyboard_metrics
@@ -63,7 +64,7 @@ def _raise_parsed_diagnostics(error, state, replace_ids=None, *, check_camera=Tr
     from speech_timing_audit import text_dialogue_capacity
     errors = list(error.errors)
     if state.get('storyboard_authoring_policy') == storyboard_authoring_gate.POLICY:
-        errors.extend(storyboard_authoring_gate.body_errors(error.units, current_lighting=True))
+        errors.extend(storyboard_authoring_gate.body_errors(error.units))
         if isinstance(source_trace, dict) and source_trace.get('version') == 4:
             errors.extend(storyboard_authoring_gate.source_mapping_errors(state, error.units, source_trace))
     camera = {'errors': []}
@@ -94,8 +95,7 @@ def check_incremental(project, draft, span=None, authoring_trace=None):
             production_cast=storyboard_authoring_gate.candidate_production_cast(draft, authoring_trace),
             source_background_slots=storyboard_authoring_gate.candidate_source_background_slots(draft, authoring_trace),
             source_participant_slots=storyboard_authoring_gate.candidate_source_participant_slots(draft, authoring_trace),
-            source_text_voices=storyboard_authoring_gate.candidate_source_text_voices(draft, authoring_trace),
-            _current_lighting=True)
+            source_text_voices=storyboard_authoring_gate.candidate_source_text_voices(draft, authoring_trace))
     except text_core.TextValidationError as exc:
         _raise_parsed_diagnostics(exc, state)
     camera = text_core.camera_constraints(units, *text_core.camera_context(state, units))
@@ -146,7 +146,7 @@ def bind_trace(project, draft, decisions, output=None, span=None):
                                continuity_props=carry_declarations(authored), source_references=declarations(authored), production_cast=casting.declarations(authored),
                                source_background_slots=background.declarations(authored),
                                source_participant_slots=participants.declarations(authored),
-                               source_text_voices=text_voices.declarations(authored), _current_lighting=True)
+                               source_text_voices=text_voices.declarations(authored))
     except text_core.TextValidationError as exc:
         if not isinstance(authored, dict) or authored.get('version') != 4:
             exc.errors.extend(storyboard_authoring_gate.source_mapping_errors(state, exc.units, authored))
@@ -317,6 +317,16 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
     if diagnostics:
         raise text_core.TextValidationError(diagnostics)
     info['camera_constraints'] = camera
+    constraints = {}
+    if authoring.get('enforced'):
+        trace_raw = Path(authoring['trace_path']).read_bytes()
+        d.require(hashlib.sha256(trace_raw).hexdigest() == authoring['trace_sha256'],
+                  '作者依据在时长预检期间变化，请重新预览')
+        trace = json.loads(trace_raw.decode('utf-8-sig'))
+        constraints = {shot['shot_key']: shot['timing_constraints']
+                       for unit in trace.get('units', []) for shot in unit.get('shots', [])
+                       if shot.get('timing_constraints')}
+    _, info['delivery_timing'] = storyboard_delivery_timing.convert(units, constraints)
     info['warnings'].extend(camera['warnings'])
     info['warnings'].extend(authoring.get('warnings', []))
     binding = {'draft_sha256': hashlib.sha256(draft_bytes).hexdigest(),
@@ -401,6 +411,7 @@ def _historical_render_state(state, receipt):
                   if row.get('request_id') == request_id), None)
     d.require(saved is not None and saved == receipt,
               '历史回执未与项目中保存的回执一致；不能直接重导出')
+    storyboard_delivery_timing.verify_receipt(receipt)
     projected = copy.deepcopy(state)
     current = projected.setdefault('units', [])
     for unit in receipt.get('units', []):
@@ -460,9 +471,9 @@ def _require_current_preview(project, draft, state, info):
 
 def _require_current_carry_trace(info):
     gate = info.get('authoring_gate', {})
-    if any(gate.get(k) for k in ('continuity_props', 'source_references', 'production_cast', 'source_background_slots', 'source_participant_slots', 'source_text_voices')):
+    if gate.get('enforced'):
         d.require(d.file_hash(gate['trace_path']) == gate['trace_sha256'],
-                  '候选引用依据在执行期间变化，请重新绑定并核对审阅')
+                  '候选作者依据在执行期间变化，请重新绑定并核对审阅')
     from production_cast import require_current_authorizations
     require_current_authorizations(gate.get('production_cast', []))
     require_current_authorizations(gate.get('source_background_slots', []))
@@ -538,6 +549,7 @@ def _recover_committed(project, state, receipt, draft, output, span, replace_ids
     d.require(receipt.get('policy') == POLICY, 'request_id已用于其他内容；不能覆盖历史请求')
     units = receipt.get('units')
     d.require(isinstance(units, list) and units, '历史回执缺少完整单元')
+    source_units = storyboard_delivery_timing.verify_receipt(receipt)
     raw = Path(draft).read_bytes()
     draft_hash = hashlib.sha256(raw).hexdigest()
     final_review = receipt.get('final_review', {})
@@ -559,6 +571,8 @@ def _recover_committed(project, state, receipt, draft, output, span, replace_ids
                                                 if u.get('video_ratio') is not None)),
                'ratio_profiles': list(dict.fromkeys(u['ratio_profile'] for u in units
                                                    if u.get('ratio_profile')))}
+    if receipt.get('delivery_timing'):
+        binding['delivery_timing_policy'] = receipt['delivery_timing']['policy']
     carried = unit_carry_props(units)
     from source_references import declarations, from_units, normalize
     source_refs = from_units(units)
@@ -589,7 +603,7 @@ def _recover_committed(project, state, receipt, draft, output, span, replace_ids
     context = text_core._slice_state(state, saved_span)
     parsed = text_core._parse_units(raw.decode('utf-8-sig'), context)
     d.require(len(parsed) == len(units), '历史回执单元数与作者稿不一致')
-    for actual, frozen in zip(parsed, units):
+    for actual, frozen in zip(parsed, source_units):
         for field, value in actual.items():
             if field != 'span':  # Shared dialogue boundaries own punctuation after checking.
                 d.require(frozen.get(field) == value, f'历史回执派生字段与作者稿不一致：{field}')
@@ -669,6 +683,7 @@ def commit(project, draft, request_id, review, output, span=None,
                                  authoring_trace=authoring_trace)
     mode = 'replace' if replace_ids else 'append'
     request_binding = {'policy': POLICY, 'draft_sha256': info['draft_sha256'],
+                           'delivery_timing_policy': storyboard_delivery_timing.POLICY,
                            'mode': mode, 'replace_ids': replace_ids or [], 'span': info['span'],
                            'header_sha256': info.get('header_sha256'),
                            'video_ratios': info.get('video_ratios', []),
@@ -756,9 +771,18 @@ def commit(project, draft, request_id, review, output, span=None,
                 row['batch_label'] = batch_label
                 working['batch_scope'] = str(scope)
             working['ranges'].append(row)
+        source_units = copy.deepcopy(units)
+        constraints = {shot['shot_key']: shot['base_constraints']
+                       for unit in info['delivery_timing']['units'] for shot in unit['shots']
+                       if shot.get('base_constraints')}
+        units, delivery_timing = storyboard_delivery_timing.convert(source_units, constraints)
+        final_by_id = {unit['id']: unit for unit in units}
+        working['units'] = [final_by_id.get(unit['id'], unit) for unit in working['units']]
+        # Validate source projections and windows without reapplying base-speed gates.
+        text_core.validate(working, units)
         receipt = {'policy': POLICY, 'request_id': request_id, 'request_hash': request_hash,
-                   'speech_timing_policy': copy.deepcopy(info['dialogue_capacity']['policy']),
                    'mode': mode, 'output': str(target), 'units': copy.deepcopy(units),
+                   'source_units': source_units, 'delivery_timing': delivery_timing,
                    'display_format': d.RECEIPT_DISPLAY_FORMAT, 'export_format': EXPORT_FORMAT,
                    'video_ratios': list(dict.fromkeys(unit.get('video_ratio') for unit in units
                                                      if unit.get('video_ratio') is not None)),

@@ -242,15 +242,15 @@ def materialize_times(unit, path="unit"):
         require(isinstance(shot, dict), loc, "须为镜头对象")
         if "duration" in shot:
             duration = shot.pop("duration")
-            require(type(duration) is int and 1 <= duration <= 6, loc + ".duration", "须为作者指定的1至6秒整数")
+            require(type(duration) is int and 1 <= duration <= 7, loc + ".duration", "须为作者指定的基础1至7秒整数")
             if "start" in shot or "end" in shot:
                 require(shot.get("start") == cursor and shot.get("end") == cursor + duration,
                         loc + ".duration", "与显式start/end矛盾")
             else:
                 shot["start"], shot["end"] = cursor, cursor + duration
         require(type(shot.get("start")) is int and type(shot.get("end")) is int
-                and shot["start"] == cursor and 1 <= shot["end"] - cursor <= 6,
-                loc + ".start/end", "须显式给连续1至6秒时码，或给duration供程序累计")
+                and shot["start"] == cursor and 1 <= shot["end"] - cursor <= 7,
+                loc + ".start/end", "须显式给连续基础1至7秒时码，或给duration供程序累计")
         cursor = shot["end"]
     require(4 <= cursor <= 30, path + ".duration", "累计时长须为4至30秒；不自动补动作或压缩")
     if "duration" in unit:

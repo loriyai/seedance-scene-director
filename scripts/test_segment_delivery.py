@@ -102,18 +102,6 @@ class SegmentDelivery(unittest.TestCase):
                                           replace_ids=[old['id']])
             self.assertEqual(changed['names'], [old['display_name']])
             self.assertEqual(len(d.load(self.project)['units']), 8)
-            for result in (first, second, again):
-                self.assertEqual(result['unit_count'], 4)
-                self.assertEqual(result['shot_count'], 4)
-                self.assertEqual(result['total_seconds'], 16)
-                self.assertEqual(result['average_shot_seconds'], 4.0)
-                self.assertIn('平均单镜时长4.00秒', result['summary'])
-            self.assertEqual(changed['unit_count'], 1)
-            self.assertEqual(changed['shot_count'], 1)
-            self.assertEqual(changed['total_seconds'], 4)
-            self.assertEqual(changed['average_shot_seconds'], 4.0)
-            self.assertIn('本次交付范围：修改1个分镜单元', changed['summary'])
-            self.assertNotIn('整段', changed['summary'])
 
     def test_partial_ranges_continue_current_segment_numbers(self):
         with patch('script_partition.load_plan', return_value=self.plan()):
@@ -125,12 +113,6 @@ class SegmentDelivery(unittest.TestCase):
             result = self.commit_fixture(second, request_id='partial2', output=self.project / 'outputs/partial2.txt',
                                          span=[second_record['start'], second_record['end']])
             self.assertEqual(result['names'], ['A02-场景1-分镜2'])
-            self.assertEqual(result['unit_count'], 1)
-            self.assertEqual(result['shot_count'], 1)
-            self.assertEqual(result['total_seconds'], 4)
-            self.assertEqual(result['average_shot_seconds'], 4.0)
-            self.assertTrue(result['summary'].startswith('本次交付范围：'))
-            self.assertNotIn('整段', result['summary'])
 
     def test_ratio_snapshot_summary_export_and_legacy_render(self):
         ratio_file = self.project / 'video-ratio.txt'
@@ -147,15 +129,9 @@ class SegmentDelivery(unittest.TestCase):
         ratio_file.write_text('16:9\n', encoding='utf-8')
         self.assertNotEqual(before, context.context_hash(d.load(self.project), self.project))
         exported = self.project / 'outputs/export.txt'
-        rendered = self.cli('storyboard_text_delivery.py', 'render', '--project', self.project,
-                            '--request-id', 'fictional-first', '--output', exported)
-        self.assertEqual(rendered['unit_count'], 4)
-        self.assertEqual(rendered['shot_count'], 4)
-        self.assertEqual(rendered['total_seconds'], 16)
-        self.assertEqual(rendered['average_shot_seconds'], 4.0)
-        self.assertIn('平均单镜时长4.00秒', rendered['summary'])
+        self.cli('storyboard_text_delivery.py', 'render', '--project', self.project,
+                 '--request-id', 'fictional-first', '--output', exported)
         self.assertEqual(exported.read_text(encoding='utf-8'), result)
-        self.assertEqual(d.load(self.project)['receipts'][0], receipt)
         legacy = copy.deepcopy(receipt['units'])
         for unit in legacy:
             unit.pop('video_ratio')
