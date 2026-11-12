@@ -16,6 +16,9 @@ import json
 import re
 from pathlib import Path
 
+from storyboard_blackout import blackout_records, inline_record_ids
+from storyboard_text import SHOT, is_blackout_shot
+
 
 POLICY = "shot-by-shot-v1"
 VERSION = 4
@@ -119,10 +122,11 @@ def body_errors(units, *, legacy=False):
             if GENERIC_CAMERA.search(body):
                 errors.append({"code": "AUTHORING_GENERIC_CAMERA", "shot": key,
                                "message": "摄影路径不得使用泛化占位句"})
-            if GENERIC_LIGHT.search(body) or not CONCRETE_LIGHT.search(body) or not MAIN_FILL_LIGHT.search(body):
+            blackout = is_blackout_shot(shot)
+            if not blackout and (GENERIC_LIGHT.search(body) or not CONCRETE_LIGHT.search(body) or not MAIN_FILL_LIGHT.search(body)):
                 errors.append({"code": "AUTHORING_LIGHTING_UNDER_SPECIFIED", "shot": key,
                                "message": "正文须落实具体主光、辅光或反射关系和明暗落点"})
-            if not DEPTH_WORDS.search(body):
+            if not blackout and not DEPTH_WORDS.search(body):
                 errors.append({"code": "AUTHORING_DEPTH_MISSING", "shot": key,
                                "message": "正文须落实实际清晰与焦外关系"})
         if GENERIC_STATION.search(unit.get("global", "")):
@@ -291,6 +295,7 @@ def _validate_v3(project, state, draft_bytes, units, expected_context_sha256,
                 any(rid not in unit["source_records"] for rid in source_records)):
             errors.append({"code": "AUTHORING_TRACE_SOURCE", "shot": key,
                            "message": "每镜必须绑定当前来源记录"})
+        errors.extend(_blackout_mapping_errors(state, unit, shot, key, source_records))
         dialogue_records = {part.get("record") for part in shot.get("dialogue_parts", [])}
         if dialogue_records and not dialogue_records.intersection(source_records or []):
             errors.append({"code": "AUTHORING_TRACE_SOURCE", "shot": key,
@@ -556,6 +561,28 @@ def _trace_rows_v4(trace):
     return trace_units, trace_rows, well_formed
 
 
+def _blackout_mapping_errors(state, unit, shot, key, source):
+    text = shot.get("text", "")
+    if not shot.get("blackout_records") and "黑场[" not in text and "切黑[" not in text:
+        return []
+    envelope = SHOT.fullmatch(text)
+    if not envelope:
+        return [{"code": "AUTHORING_BLACKOUT_SOURCE", "shot": key, "message": "黑场缺少有效镜头或来源标记"}]
+    focal, transition, body = envelope.group(5, 6, 7)
+    try:
+        if focal.startswith("黑场[") or shot.get("blackout_records"):
+            declared = blackout_records(focal, body, state["records"], unit)
+            if not declared or declared != source or declared != shot.get("blackout_records"):
+                raise ValueError("整镜黑场的来源标记须与本镜实际来源映射一致")
+        if "切黑[" in transition:
+            declared = inline_record_ids(transition, state["records"], unit)
+            if not isinstance(source, list) or any(rid not in source for rid in declared):
+                raise ValueError("镜内纯黑时段的来源须包含在本镜实际来源映射中")
+    except ValueError as exc:
+        return [{"code": "AUTHORING_BLACKOUT_SOURCE", "shot": key, "message": str(exc)}]
+    return []
+
+
 def source_mapping_errors(state, units, trace):
     """Check existing v4 source declarations against freshly source-checked units.
 
@@ -589,6 +616,7 @@ def source_mapping_errors(state, units, trace):
             errors.append({"code": "AUTHORING_TRACE_SOURCE", "shot": key,
                            "message": "每镜须绑定本单元实际来源记录"})
             source = []
+        errors.extend(_blackout_mapping_errors(state, unit, shot, key, source))
         mapped_records.update(source)
         from source_text_voices import source_record
         dialogue_records = {source_record(part, unit) for part in shot.get("dialogue_parts", [])}

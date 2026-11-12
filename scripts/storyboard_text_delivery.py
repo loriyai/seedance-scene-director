@@ -18,6 +18,7 @@ import batch_naming
 import ratio_profiles
 import storyboard_text as text_core
 import storyboard_authoring_gate
+import storyboard_blackout
 import storyboard_delivery_timing
 from storyboard_context import (context_hash, scene_context, context_scope,
                                 candidate_context_policy, SCOPED_CONTEXT_POLICY)
@@ -59,10 +60,49 @@ def _delivery_errors(camera, capacity):
     return errors
 
 
+def _blackout_errors(state, units, replace_ids=None):
+    """Count the candidate's timeline, including touching shots already delivered."""
+    if not units:
+        return []
+    before, after = text_core.camera_context(state, units, replace_ids)
+    # Separately submitted source ranges can be written out of order. A
+    # shared boundary action also has distinct source offsets on either side.
+    stored = state.get('units', [])
+    records = state['records']
+    record_map = {r['id']: r for r in records} if stored and (not before or not after) else {}
+
+    def shared_action(left, right):
+        left_ids, right_ids = left.get('source_records'), right.get('source_records')
+        if not left_ids or not right_ids or left_ids[-1] != right_ids[0]:
+            return False
+        record = record_map.get(left_ids[-1], {})
+        a, b = left['span'], right['span']
+        return (record.get('kind') == 'action' and a[1] == record['end']
+                and b[0] == record['start'] and a[0] <= b[0] and a[1] <= b[1]
+                and a != b)
+
+    excluded = set(replace_ids or ())
+    if before is None:
+        before = next((unit for unit in reversed(stored) if unit.get('id') not in excluded
+                       and shared_action(unit, units[0])), None)
+    if after is None:
+        after = next((unit for unit in reversed(stored) if unit.get('id') not in excluded
+                      and (unit['span'][0] == units[-1]['span'][1]
+                           or shared_action(units[-1], unit))), None)
+    # Each saved unit runs for at least four seconds. Its facing edge alone
+    # therefore either reaches the three-second limit or contains a picture.
+    timeline = [part for part in (before, *units, after) if part is not None]
+    return storyboard_blackout.blackout_errors(timeline, records,
+                                               target_unit_ids={id(unit) for unit in units})
+
+
 def _raise_parsed_diagnostics(error, state, replace_ids=None, *, check_camera=True, source_trace=None):
     """Enrich only source-checked parser failures without rereading or writing."""
     from speech_timing_audit import text_dialogue_capacity
     errors = list(error.errors)
+    reported = {(row['code'], row.get('unit'), row.get('shot')) for row in errors}
+    errors.extend(row for row in _blackout_errors(state, error.units, replace_ids)
+                  if (row['code'], row.get('unit'), row.get('shot')) not in reported)
     if state.get('storyboard_authoring_policy') == storyboard_authoring_gate.POLICY:
         errors.extend(storyboard_authoring_gate.body_errors(error.units))
         if isinstance(source_trace, dict) and source_trace.get('version') == 4:
@@ -98,6 +138,9 @@ def check_incremental(project, draft, span=None, authoring_trace=None):
             source_text_voices=storyboard_authoring_gate.candidate_source_text_voices(draft, authoring_trace))
     except text_core.TextValidationError as exc:
         _raise_parsed_diagnostics(exc, state)
+    errors = _blackout_errors(state, units)
+    if errors:
+        raise text_core.TextValidationError(errors, units)
     camera = text_core.camera_constraints(units, *text_core.camera_context(state, units))
     require_camera_constraints(camera)
     capacity = require_dialogue_capacity(units)
@@ -298,7 +341,8 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
         for unit, identity in zip(units, identities):
             unit.update(identity)
     camera = text_core.camera_constraints(units, *text_core.camera_context(state, units, replace_ids))
-    diagnostics = _delivery_errors({'errors': []}, info['dialogue_capacity'])
+    diagnostics = _blackout_errors(state, units, replace_ids)
+    diagnostics.extend(_delivery_errors({'errors': []}, info['dialogue_capacity']))
     if check_camera:
         try:
             require_camera_constraints(camera)
@@ -326,7 +370,13 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
         constraints = {shot['shot_key']: shot['timing_constraints']
                        for unit in trace.get('units', []) for shot in unit.get('shots', [])
                        if shot.get('timing_constraints')}
-    _, info['delivery_timing'] = storyboard_delivery_timing.convert(units, constraints)
+    final_units, info['delivery_timing'] = storyboard_delivery_timing.convert(units, constraints)
+    # Millisecond rounding can close a visible gap at an inline transition.
+    if any(storyboard_blackout.INLINE_MARKER.search(shot['text'])
+           for unit in units for shot in unit['shots']):
+        errors = _blackout_errors(state, final_units, replace_ids)
+        if errors:
+            raise text_core.TextValidationError(errors, final_units)
     info['warnings'].extend(camera['warnings'])
     info['warnings'].extend(authoring.get('warnings', []))
     binding = {'draft_sha256': hashlib.sha256(draft_bytes).hexdigest(),
@@ -601,7 +651,8 @@ def _recover_committed(project, state, receipt, draft, output, span, replace_ids
     # Compare syntax projections to the exact original bytes. Do not rejudge
     # old creative choices or revalidate anchors against later replacements.
     context = text_core._slice_state(state, saved_span)
-    parsed = text_core._parse_units(raw.decode('utf-8-sig'), context)
+    parsed = text_core._parse_units(raw.decode('utf-8-sig'), context,
+                                   _source_records=state['records'])
     d.require(len(parsed) == len(units), '历史回执单元数与作者稿不一致')
     for actual, frozen in zip(parsed, source_units):
         for field, value in actual.items():

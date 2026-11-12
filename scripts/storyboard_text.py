@@ -9,6 +9,10 @@ from collections import Counter
 import json
 import re
 
+from storyboard_blackout import (
+    BLACKOUT_BODY, BLACKOUT_FOCAL, blackout_records, display_transition, inline_record_ids,
+)
+
 
 OUTPUT_FORMAT = "scene-text-v1"
 VOICE_DISPLAY_POLICY = "inner-voice-os-v1"
@@ -218,10 +222,20 @@ def _seconds(value):
     return int(number) if number == number.to_integral_value() else float(number)
 
 
-def _parse_units(text, state, *, _context_data=None, _diagnostics=None):
+def is_blackout_shot(shot):
+    """Only an explicitly source-bound whole shot has no visible focal subject."""
+    if not shot.get("blackout_records"):
+        return False
+    match = SHOT.fullmatch(shot.get("text", ""))
+    return bool(match and BLACKOUT_FOCAL.fullmatch(match.group(5))
+                and match.group(7).strip() == BLACKOUT_BODY)
+
+
+def _parse_units(text, state, *, _context_data=None, _diagnostics=None, _source_records=None):
     _require(isinstance(text, str) and text.strip(), "分镜TXT为空")
     _require("\x00" not in text, "分镜TXT含NUL字符")
     records, record_map, scenes, _ = _context_data if _context_data is not None else _context(state)
+    blackout_source = None
     units, unit, lines = [], None, []
     stage = 0
 
@@ -277,13 +291,34 @@ def _parse_units(text, state, *, _context_data=None, _diagnostics=None):
             _require(match is not None, f"{context}：镜头行格式错误；须有时码、镜号、景别括号、转场、正文和音效末句")
             start, end, index, label, focal, transition, body, sound = match.groups()
             _require(int(index) == len(unit["shots"]) + 1, f"{context}：镜头编号须从1连续递增")
-            framing = next((f for f in FRAMINGS if focal.endswith("的" + f)), None)
+            whole_blackout = focal == "黑场" or focal.startswith("黑场[")
+            blackout = None
+            if whole_blackout or "切黑[" in transition:
+                if blackout_source is None:
+                    # A selected span can begin with the next voice-over. Read
+                    # preceding records for its cut cue, keeping in-span text clipped.
+                    blackout_source = records
+                    if _source_records is not None and _source_records is not records:
+                        first = next(i for i, rec in enumerate(_source_records) if rec["id"] == records[0]["id"])
+                        blackout_source = _source_records[:first] + records
+                try:
+                    if whole_blackout:
+                        blackout = blackout_records(focal, body, blackout_source, unit)
+                        _require(blackout, "黑场须显式绑定原剧本的切黑来源")
+                    if "切黑[" in transition:
+                        inline_record_ids(transition, blackout_source, unit)
+                except ValueError as exc:
+                    if _diagnostics is None:
+                        raise ValueError(f"{context}：{exc}") from exc
+                    _diagnostics.append({"code": "BLACKOUT_SOURCE", "unit": unit["draft_key"],
+                                         "shot": int(index), "line": line_no, "message": f"{context}：{exc}"})
+            framing = "黑场" if whole_blackout else next((f for f in FRAMINGS if focal.endswith("的" + f)), None)
             # Complete SHOT groups and a continuous index locate these fields
             # without guessing. Delivery can collect their independent errors;
             # rendering and standalone parsing retain strict rejection.
             checks = (
                 (framing is not None, 'SHOT_FRAMING', '景别须绑定主体并采用规定景别名称'),
-                (bool(_refs(focal, context)), 'SHOT_FOCAL_REFERENCE', '景别主体须使用稳定资产引用'),
+                (whole_blackout or bool(_refs(focal, context)), 'SHOT_FOCAL_REFERENCE', '景别主体须使用稳定资产引用'),
                 (all(s.strip() for s in (label, focal, transition, body, sound)),
                  'SHOT_EMPTY_FIELD', '镜头字段不可为空'),
                 ("：“" not in line, 'SHOT_INLINE_DIALOGUE', '台词只写在声音来源行，不可直接重复写入镜头正文'),
@@ -297,6 +332,8 @@ def _parse_units(text, state, *, _context_data=None, _diagnostics=None):
                                          'message': f"{context}：{message}"})
             unit["shots"].append({"start": int(start), "end": int(end), "text": line,
                                   "label": label, "framing": framing, "dialogue_parts": []})
+            if blackout:
+                unit["shots"][-1]["blackout_records"] = blackout
             stage = 4
         elif stage == 4 and line.startswith("声音["):
             match = VOICE.fullmatch(line)
@@ -580,7 +617,7 @@ def parse(text, state, source_span=None, *, continuity_props=None, source_refere
     import source_participant_slots as participants
     context = participants.context(background.context(casting.context(_slice_state(state, source_span), production_cast or []), source_background_slots or []), source_participant_slots or [])
     diagnostics = []
-    units = _parse_units(text, context, _diagnostics=diagnostics)
+    units = _parse_units(text, context, _diagnostics=diagnostics, _source_records=state["records"])
     from continuity import apply_carry_props
     apply_carry_props(state, units, continuity_props or [])
     from source_references import apply
@@ -610,7 +647,7 @@ def parse_incremental(text, state, source_span=None, *, continuity_props=None, s
     import source_participant_slots as participants
     context = participants.context(background.context(casting.context(_slice_state(state, source_span), production_cast or []), source_background_slots or []), source_participant_slots or [])
     diagnostics = []
-    units = _parse_units(text, context, _diagnostics=diagnostics)
+    units = _parse_units(text, context, _diagnostics=diagnostics, _source_records=state["records"])
     from continuity import apply_carry_props
     apply_carry_props(state, units, continuity_props or [])
     from source_references import apply
@@ -670,7 +707,7 @@ def validate(state, units):
         # Historical projections keep their accepted references even if an
         # earlier anchor has subsequently acquired a new production version.
         context = participants.context(background.context(casting.context(_slice_state(state, span), casting.from_units(units)), background.from_units(units)), participants.from_units(units))
-        fresh = _parse_units(text, context)
+        fresh = _parse_units(text, context, _source_records=state["records"])
         for unit, current in zip(units, fresh):
             if unit.get('continuity_props'):
                 import copy
@@ -817,7 +854,7 @@ def camera_constraints(units, before=None, after=None):
             shot = shots[index]
             if not isinstance(shot, dict):
                 continue
-            label = _camera_wording(shot)
+            label = "not_applicable_blackout" if is_blackout_shot(shot) else _camera_wording(shot)
             # The leading clause is intentionally conservative. An explicitly
             # named later camera move makes an initial fixed pose inconclusive.
             if label == "fixed":
@@ -1118,6 +1155,13 @@ def _render_unit(state, unit, context_data, reference_text=None, *, authoring_ga
     for shot in authored["shots"]:
         # Inject the exact source fragments immediately before the final SFX.
         visual, sound = shot["text"].rsplit("音效：", 1)
+        whole_blackout = is_blackout_shot(shot)
+        if whole_blackout or "切黑[" in visual:
+            envelope = SHOT.fullmatch(shot["text"])
+            focal, transition = envelope.group(5, 6)
+            visual = (visual[:envelope.start(5)] + ("黑场" if whole_blackout else focal)
+                      + visual[envelope.end(5):envelope.start(6)] + display_transition(transition)
+                      + visual[envelope.end(6):])
         line = replace(visual)
         for part in shot["dialogue_parts"]:
             if part.get("source_kind") == "non_character":

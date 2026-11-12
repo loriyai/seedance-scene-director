@@ -32,6 +32,21 @@ def _window(start, end, base_start, base_length, final_start, final_length):
     return values
 
 
+def _retime_shot_line(text, final_start, base_length, final_length):
+    line, count = SHOT_TIME.subn(
+        f'·{final_start:02d}秒-{final_start + final_length:02d}秒', text, count=1)
+    d.require(count == 1, '最终时长转换缺少结构化镜头时码')
+    if base_length != final_length and '切黑[' in line:
+        from storyboard_blackout import retime_transition
+        prefix, separator, rest = line.partition('；转场：')
+        transition, closing, suffix = rest.partition('）')
+        if separator and '切黑[' in transition:
+            transition = retime_transition(
+                transition, lambda a, b: _window(a, b, 0, base_length, 0, final_length))
+            line = prefix + separator + transition + closing + suffix
+    return line
+
+
 def convert(units, constraints=None):
     """Return final copies and an auditable mapping, never mutate a draft."""
     constraints = constraints or {}
@@ -52,9 +67,7 @@ def convert(units, constraints=None):
                       and 1 <= length <= 7, '基础单镜须为连续的1～7秒整数')
             final_length = length - 1 if length >= 4 and not exempt else length
             result.update(start=cursor, end=cursor + final_length)
-            result['text'], count = SHOT_TIME.subn(
-                f'·{cursor:02d}秒-{cursor + final_length:02d}秒', shot['text'], count=1)
-            d.require(count == 1, '最终时长转换缺少结构化镜头时码')
+            result['text'] = _retime_shot_line(shot['text'], cursor, length, final_length)
             for part in result['dialogue_parts']:
                 part['start'], part['end'] = _window(
                     part['start'], part['end'], start, length, cursor, final_length)
@@ -73,15 +86,16 @@ def convert(units, constraints=None):
             cursor += final_length
         d.require(base_cursor == base['duration'] and 4 <= cursor <= 30,
                   '最终单元时长或基础时间轴不合法')
-        # Rewrite only grammar-owned prefixes. Dialogue and prose are untouched.
+        # Rewrite only structured time fields. Dialogue and prose are untouched.
         lines = []
         shot_index = -1
         for line in base['source_text'].splitlines(keepends=True):
             if SHOT_TIME.match(line):
                 shot_index += 1
                 row = shot_mappings[shot_index]
-                line = SHOT_TIME.sub(
-                    f'·{row["final_start"]:02d}秒-{row["final_end"]:02d}秒', line, count=1)
+                line = _retime_shot_line(line, row['final_start'],
+                                         row['base_end'] - row['base_start'],
+                                         row['final_end'] - row['final_start'])
             match = VOICE_TIME.match(line)
             if match:
                 d.require(shot_index >= 0, '声音时码缺少所属镜头')
