@@ -21,7 +21,16 @@ from test_canvas_job_backend import AssetJobCLI
 
 def installed_entry():
     explicit = os.environ.get("SEEDANCE_TEST_CANVAS_ENTRY")
-    candidates = [Path(explicit)] if explicit else []
+    if explicit:
+        return Path(explicit) if Path(explicit).is_file() else None
+    candidates = []
+    command = shutil.which("pippit-tool-cli")
+    if command:
+        executable = Path(command)
+        resolved = executable.resolve()
+        if resolved.name == "run.js":
+            candidates.append(resolved)
+        candidates.append(executable.parent / "node_modules/@pippit-dev/cli/scripts/run.js")
     if os.environ.get("APPDATA"):
         candidates.append(Path(os.environ["APPDATA"]) / "npm/node_modules/@pippit-dev/cli/scripts/run.js")
     return next((p for p in candidates if p.is_file()), None)
@@ -105,7 +114,7 @@ class BatchBehavior(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.project = Path(temporary.name)
-        self.doc = {"rootCanvasId": "ROOT", "assets": {"ROOT": {"type": "canvas", "content": {
+        self.doc = {"rootCanvasId": "ROOT", "assets": {"ROOT": {"type": "canvas", "pippitAssetId": "ROOT", "content": {
             "nodes": {}, "edges": {}, "settings": {"readOnly": False}}}}}
         self.cli = BatchCLI(copy.deepcopy(self.doc))
         self.state = c.blank_state()
@@ -116,8 +125,8 @@ class BatchBehavior(unittest.TestCase):
             "scene_assets": [{"id": "SET0001", "name": "Room", "image_prompt": "complete room board"}],
             "props": [{"id": "PROP0001", "name": "Mask", "image_prompt": "complete mask board"}]}, "units": [], "receipts": []}
 
-    def assets(self, size=10):
-        return backend.sync_assets(self.project, self.cli, self.session, lambda value: None, batch_size=size, batch_mode=True)
+    def assets(self):
+        return backend.sync_assets(self.project, self.cli, self.session, lambda value: None, batch_mode=True)
 
     def video_items(self, count=2):
         state = c.read_state(self.project)
@@ -128,10 +137,10 @@ class BatchBehavior(unittest.TestCase):
                  "references_bound": True, "reference_keys": ["CHAR0001"], "black_reference_mode": "none-v1"}
                 for i in range(1, count + 1)]
 
-    def videos(self, items):
+    def videos(self, items, **options):
         state = c.read_state(self.project)
         context = {"failures": [], "doc": self.cli.doc, "progress": lambda value: None}
-        result = batch.sync_videos(self.project, self.cli, state, copy.deepcopy(self.cli.doc), items, [], context)
+        result = batch.sync_videos(self.project, self.cli, state, copy.deepcopy(self.cli.doc), items, [], context, **options)
         return result, context
 
     def test_three_asset_kinds_one_transaction_and_exact_fields(self):
@@ -224,13 +233,35 @@ class BatchBehavior(unittest.TestCase):
                              [(role, "IMAGE-MATERIAL", "CLOUD-MEDIA")])
             self.assertEqual(refs[0]["edgeId"], batch.reference_edges(self.cli.doc, nid)[0]["id"])
 
+    def test_twenty_one_assets_use_twenty_plus_one(self):
+        self.session["ledger"]["props"].extend(
+            {"id": f"PROP{i:04}", "name": f"Prop{i}", "image_prompt": f"Board {i}"} for i in range(2, 20))
+        result = self.assets()
+        self.assertEqual(result["status"], "synced")
+        self.assertEqual(self.cli.allocation_batches, [20, 1])
+        self.assertEqual(len(self.cli.batch_writes), 2)
+        self.assertEqual(self.cli.batch_reads, 4)
+
     def test_group_size_bounds_writes_and_readbacks_for_twenty_one_videos(self):
         self.assets()
         writes, reads = len(self.cli.batch_writes), self.cli.batch_reads
         (_, _, verified), _ = self.videos(self.video_items(21))
         self.assertEqual(len(verified), 21)
-        self.assertEqual(len(self.cli.batch_writes) - writes, 3)
-        self.assertEqual(self.cli.batch_reads - reads, 6)
+        self.assertEqual(self.cli.allocation_batches[-2:], [20, 1])
+        self.assertEqual(len(self.cli.batch_writes) - writes, 2)
+        self.assertEqual(self.cli.batch_reads - reads, 4)
+
+        items = self.video_items(21)
+        mappings = c.read_state(self.project)["mappings"]
+        for item in items:
+            item["node_id"] = mappings[item["key"]]["node_id"]
+        with patch.object(batch, "snapshot", wraps=batch.snapshot) as snapshots:
+            self.videos(items, references_only=True)
+            self.assertEqual([len(call.args[3]) for call in snapshots.call_args_list], [20, 1])
+        items[-1].update(key="NEW22", name="A22", node_id=None)
+        with patch.object(batch, "snapshot", wraps=batch.snapshot) as snapshots:
+            self.videos(items)
+            self.assertEqual([len(call.args[3]) for call in snapshots.call_args_list], [20, 1])
 
     def test_existing_video_preserves_model_resolution_ratio_and_extra_config(self):
         self.assets()
@@ -269,7 +300,8 @@ class BatchBehavior(unittest.TestCase):
     def test_direct_video_entry_uses_batch_plan_and_acceptance(self):
         self.assets()
         items = self.video_items()
-        self.session["units"] = [{"id": item["key"], "version": 1} for item in items]
+        self.session["units"] = [{"id": item["key"], "version": 1,
+                                  "black_reference_mode": "none-v1"} for item in items]
         writes = len(self.cli.batch_writes)
         context = {"failures": [], "progress": lambda value: None, "batch_mode": True}
         with patch.object(c, "desired_videos", return_value=(items, [])):

@@ -106,9 +106,9 @@ python <skill>/scripts/canvas_jobs.py recover-assets --project <project> --opera
 
 同一账号与画布只有一个后台writer，使用跨进程OS锁并复用原画布操作锁。不同项目绑定同一画布时第二个worker停止，不得启动多个worker并发写入同一画布。worker正在写入时不得另行使用canvas.py修改或上传；需要精确编辑或删除时先暂停队列，确认当前已发送请求的结果并保存日志后，再按原接口执行。
 
-新`assets`任务冻结`sdk-local-batch-v1`并按现有本地批量协议执行；每个分段的`videos`任务独立冻结同一协议，前台按分段顺序逐个入队。每个任务内部仍默认每批10个节点、一个writer；整批ACK不推进完成数，统一回读后逐节点验收并保存各自回执。历史冻结任务保持原协议，不因本规则自动拆分或重排。
+新`assets`任务冻结`sdk-local-batch-v1`并按现有本地批量协议执行；每个分段的`videos`任务独立冻结同一协议，前台按分段顺序逐个入队。每个任务使用一个writer。资产和分镜任务均按每批20个节点执行，新建和更新采用相同分组，最后一批处理剩余节点。只有逐节点回读通过才推进完成数，并保存各自回执。历史冻结任务保持原协议，不因本规则自动拆分或重排。
 
-不把通用apply_mutations的dryRun当业务验收，不为批量化改用浅层generation补丁写提示词。已注册描述/提示词命令在本地隔离文档中保持官方业务入口，最终差异通过公开canvas apply提交；不自建MCP或私有HTTP写入路径。未知ACK保留allocated/pending/acknowledged/uncertain等操作状态，只有回读证明目标已生效才跳过；未证明的项不能当普通失败自动重试。
+不把通用apply_mutations的dryRun当业务验收，不为批量化改用浅层generation补丁写提示词。1.0.57 通过公开 Canvas 语义命令写入。可组合的结构操作使用 apply_mutations，注册的描述和提示词命令各自独立执行和确认。未知ACK保留allocated/pending/acknowledged/uncertain等操作状态，只有回读证明目标已生效才跳过；未证明的项不能当普通失败自动重试。
 
 ## 输入校验的执行边界
 

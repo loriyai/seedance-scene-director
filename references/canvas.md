@@ -13,7 +13,7 @@ python <skill>/scripts/canvas.py bind --project <project> --target <画布链接
 python <skill>/scripts/canvas.py status --project <project>
 ```
 
-`setup`检测现有官方CLI及本Skill实际调用的命令，缺少时用包内`ensure-cli.js`安装到官方CLI缓存；不每次安装或升级。必要原生命令为status/login、canvas get/allocate/apply/upload及space list；canvas get必须支持--team-id。必要语义命令覆盖快照、权限、apply_mutations、节点创建/更新/删除（含update_asset）、引用连线的create_edge与精确删除引用边的delete_edges、提示词写入、角色/场景描述及角色主图更新。create_edge用于派生角色图片引用及历史黑幕引用；新none-v1视频仍不创建黑幕连线。角色updateAppearance须支持patch.generationPrompt与expected.generationPrompt，以及派生图片引用所需的patch.generation与expected.generation整体配置字段；不能只凭命令名存在认定支持。create_checkpoint只在权限支持时使用，保持可选；不探测本Skill不调用的模型列表/描述、生图、生视频、超分、擦字幕、积分、query-result、logout或canvas create。`auth --login`先检查status，已有登录不重复打开授权页。首次提示用户完成浏览器授权；CLI自行保存安全凭据。配置文件只保存CLI/Node路径、版本和公开账号标识，禁止保存密钥、完整status、认证环境变量或浏览器存储。CLI报401/403时先判断账号/权限；仅确认浏览器凭据过期或撤销后使用`auth --login --force`，不将force作为常规操作。
+`setup`检测现有官方CLI及本Skill实际调用的命令，缺少时用包内`ensure-cli.js`安装到官方CLI缓存；不每次安装或升级。必要原生命令为status/login、canvas get/allocate/upload及space list；canvas get必须支持--team-id。必要语义命令覆盖快照、权限、apply_mutations、节点创建/更新/删除（含update_asset）、引用连线的create_edge与精确删除引用边的delete_edges、提示词写入、角色/场景描述及角色主图更新。create_edge用于派生角色图片引用及历史黑幕引用；新none-v1视频仍不创建黑幕连线。角色updateAppearance须支持patch.generationPrompt与expected.generationPrompt，以及派生图片引用所需的patch.generation与expected.generation整体配置字段；不能只凭命令名存在认定支持。create_checkpoint只在权限支持时使用，保持可选；不探测本Skill不调用的模型列表/描述、生图、生视频、超分、擦字幕、积分、query-result、logout或canvas create。`auth --login`先检查status，已有登录不重复打开授权页。首次提示用户完成浏览器授权；CLI自行保存安全凭据。配置文件只保存CLI/Node路径、版本和公开账号标识，禁止保存密钥、完整status、认证环境变量或浏览器存储。CLI报401/403时先判断账号/权限；仅确认浏览器凭据过期或撤销后使用`auth --login --force`，不将force作为常规操作。
 
 链接按完整域名与路径共同解析，支持三种已核实的官方入口：`https://xyq.jianying.com/novel/detail/canvas?...`为个人空间候选；`https://xyq.jianying.com/project?...`与`https://www.xiaoyunque.com/project?...`均为团队空间入口，不能仅因域名含`xyq.jianying.com`就选择个人空间。严格校验域名、路径及唯一ID参数。收到完整链接时原样传给bind，由统一解析器保留projectId、canvasId及空间线索；不为绕过链接解析而抽出canvasId改走裸ID入口。入口分类用于选择候选空间，仍须只读核验画布身份与编辑权限后才保存绑定。overviewPippitAssetId须在选定空间后通过官方CLI解析实际canvas ID，不能把overview或project ID当成canvas ID。所有远端ID及TeamID保持字符串。
 
@@ -145,9 +145,9 @@ python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind images 
 
 先盘点并解决资产身份与冲突；视频准备自动补建的上限为10个，按整次盘点统计，超过10个不补建、不写视频。新旧任务分别按冻结协议处理，未记录批量协议的历史任务保留原3个上限及串行恢复方式，不改旧manifest、ID或回执。
 
-按依赖顺序预申请真实节点ID并持久保存，默认每批10个节点。这是本地分组参数，不是官方上限或实测最优值。通过已安装官方SDK的隔离文档执行业务工厂、各类型字段写入和引用解析；不启动网络同步、不改SDK源码，不自己仿造引用条目。基础资产与派生资产在同组时先在本地完成所有基础节点，再编译派生引用。官方注册命令在本地仍逐项执行完整业务校验，仅将最终SDK文档差异合并为一个事务；不把多个注册命令直接塞进远端apply_mutations，也不把其dryRun当完整业务预演。
+按依赖顺序预申请真实节点ID并持久保存。资产和分镜按每批20个节点组织，包括人物、布景、道具、新建、更新、引用及混合任务。最后一批按剩余节点数执行。分组数量由分镜导演控制。通过已安装官方SDK的隔离文档执行业务工厂、各类型字段写入和引用解析；不启动网络同步、不改SDK源码，不自己仿造引用条目。基础资产与派生资产在同组时先在本地完成所有基础节点，再编译派生引用。预演使用与远端相同的官方注册命令和素材引用规则。
 
-每批统一读取官方快照与资产版本，核对目标和引用源未变化。视频本地一次准备名称、毫秒时长、适用比例、完整提示词、实际选材及连线，已有generation从最新内容合并。通过公开 `canvas apply` 提交一个transaction内的多条patch，使用真实资产版本；不用隐藏传输参数、不绕过ACK校验、不发送HTTP私有请求。事务发送前保存 `canvas/batches/` 请求及摘要、原节点ID和逐节点预期字段，整批ACK仅表示事务已确认。
+每批统一读取官方快照与资产版本，核对目标和引用源未变化。视频本地一次准备名称、毫秒时长、适用比例、完整提示词、实际选材及连线，已有generation从最新内容合并。一份本地语义清单可同时保存多镜的节点操作、完整提示词和引用。1.0.57 通过 npm 入口 `pippit-tool-cli canvas command run apply_mutations --canvas-id <ID> --team-id <空间> --file <JSON>` 提交可组合的节点及连线操作。提示词、角色和场景描述等注册命令按依赖顺序单独执行。一个本地批次可以包含多次远端提交。发送前在 `canvas/batches/` 保存语义操作、预期版本和目标字段，按各次执行结果记录进度。若部分操作已确认而后续失败，用原节点 ID 重新读取实际状态。使用旧版公开事务接口的历史记录沿用原回读方式。
 
 写后统一回读本批，逐节点核验名称、类型、提示词、参数、完整引用条目及reference连线，每个节点仍保存独立回执。节点没有图片时仍建立真实节点引用及连线，只记录missing_image；不阻塞同步、不要求补图、不把节点ID当成云媒体ID，也不宣称图片输入已就绪。有媒体时保留官方图片/声音选材。批次未知确认或最终回读失败立即停止，沿原请求和ID只读核对，不重放整批、不重新分配ID；暂停前确定未发送的事务记cancelled，已发送但未知的仍保留pending/uncertain。只有实际字段与引用全通过才推进完成计数。安装升级不自动切换正在运行的旧worker。
 

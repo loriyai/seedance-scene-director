@@ -169,7 +169,11 @@ class CLI:
         with tempfile.TemporaryDirectory(prefix="batch-", dir=self.directory) as temporary:
             path = Path(temporary) / "input.json"
             d.write_json(path, {"mode": mode, "canvas_entry": self.config["canvas_entry"], **payload})
-            value = run_json([self.config["node_path"], Path(__file__).with_name("canvas_cli_batch.js"), path], self.project)
+            # Business commands run separately under the public CLI. Allow
+            # each command its normal transport window even for larger groups.
+            timeout = 120 * (1 + len(payload["commands"])) if mode == "semantic_write" else 120
+            value = run_json([self.config["node_path"], Path(__file__).with_name("canvas_cli_batch.js"), path],
+                             self.project, timeout=timeout)
         result = value.get("data", {})
         d.require(result.get("protocol") == BATCH_PROTOCOL, "批量适配器契约不匹配")
         return result
@@ -185,6 +189,39 @@ class CLI:
 
     def compile_batch(self, doc, commands):
         return self.batch_adapter("compile", document=doc, commands=commands)
+
+    def uses_semantic_writes(self):
+        # Global upgrades may replace the binaries at the same paths while a
+        # project's connection.json still records the previous version.
+        self.ready()
+        package = Path(self.config["canvas_entry"]).resolve().parent.parent / "package.json"
+        version = d.read_json(package).get("version", "")
+        match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:[-+].*)?", version)
+        d.require(match is not None, "无法核对小云雀 CLI 版本，请重新配置画布连接")
+        return tuple(map(int, match.groups())) >= (1, 0, 57)
+
+    def apply_semantic_batch(self, request):
+        from project_paths import assert_writable
+        assert_writable(self.project, cloud=True)
+        binding = self.binding or read_state(self.project).get("binding") or {}
+        d.require(binding.get("canvas_id") == request["canvas_id"], "写入目标与当前绑定画布不一致")
+        try:
+            result = self.batch_adapter("semantic_write", **request,
+                                        team_id=normalize_team_id(binding["team_id"]),
+                                        cli_path=self.config["cli_path"], project=str(self.project))
+        except CanvasError as exc:
+            # An adapter crash or a broken CLI response after dispatch is not
+            # evidence that the server rejected the write.
+            fail("UNCERTAIN_WRITE", safe_message(exc))
+        status, completed = result.get("status"), result.get("completed")
+        if type(completed) is not int or not 0 <= completed <= len(request["commands"]):
+            fail("UNCERTAIN_WRITE", "小云雀没有返回有效的已确认命令数")
+        if status == "acknowledged" and completed == len(request["commands"]):
+            return result
+        code = "UNCERTAIN_WRITE"
+        if completed == 0 and status in ("rejected", "conflict"):
+            code = "COMMAND_REJECTED" if status == "rejected" else "CONCURRENT_EDIT"
+        fail(code, safe_message(result.get("message", "画布语义操作未全部确认")), completed=completed)
 
     def apply_batch(self, request):
         from project_paths import assert_writable

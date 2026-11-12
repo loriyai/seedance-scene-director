@@ -10,7 +10,7 @@ const REQUIRED_COMMANDS = [
   "status", "login",
 ];
 const REQUIRED_CANVAS_NATIVE_COMMANDS = [
-  "canvas get", "canvas allocate", "canvas apply", "canvas upload", "space list",
+  "canvas get", "canvas allocate", "canvas upload", "space list",
 ];
 const REQUIRED_CANVAS_COMMANDS = [
   "get_snapshot", "get_permissions", "apply_mutations", "create_biz_node", "create_edge", "update_node_data", "update_asset", "delete_nodes", "delete_edges",

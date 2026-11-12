@@ -1,4 +1,4 @@
-"""Batched Canvas execution: official local compilation, one transaction, grouped readback.
+"""Batched Canvas execution: official local compilation, submission and grouped readback.
 
 The CLI adapter owns SDK behavior; canvas.py owns field/reference contracts;
 this module owns grouping, durable identities, transaction receipts and acceptance.
@@ -11,11 +11,16 @@ import uuid
 import canvas as c
 import director as d
 
-DEFAULT_BATCH_SIZE = 10
+DEFAULT_BATCH_SIZE = 20
 
 
 def command(name, value):
     return {"name": name, "input": copy.deepcopy(value)}
+
+
+def uses_semantic_writes(cli):
+    supported = getattr(cli, "uses_semantic_writes", None)
+    return supported is not None and supported()
 
 
 def reference_edges(doc, node_id):
@@ -71,7 +76,7 @@ def reserve(project, cli, state, items):
     return ids
 
 
-def submit(project, cli, state, baseline, compiled, targets, receipts=(), asset_reference_policy=None):
+def submit(project, cli, state, baseline, compiled, commands, targets, receipts=(), asset_reference_policy=None):
     """Save the complete request before sending. Never replay an ambiguous batch."""
     patches = compiled["patches"]
     policy = asset_reference_policy
@@ -99,21 +104,38 @@ def submit(project, cli, state, baseline, compiled, targets, receipts=(), asset_
     c.check_control(cli)
     doc, versions = baseline["document"], baseline["asset_versions"]
     operation = uuid.uuid4().hex
-    converted = []
-    for patch in patches:
-        asset_id = patch["assetId"]
+    use_semantic = uses_semantic_writes(cli)
+    affected = {patch["assetId"] for patch in patches}
+    if use_semantic:
+        affected.update(t["node_id"] for t in targets)
+        affected.add(doc["rootCanvasId"])
+    expected = {}
+    for asset_id in sorted(affected):
         version = versions.get(asset_id) if asset_id in doc["assets"] else 0
         d.require(type(version) is int and version >= 0, "目标资产缺少可核验版本，不能提交批次：" + asset_id)
-        converted.append({"asset_id": asset_id, "base_asset_version": version, "op": patch["op"],
-                          "path": patch["path"], **({"value": patch["value"]} if patch["op"] != "remove" else {})})
-    request = {"batch_id": "seedance-" + operation, "client_id": "seedance-batch-" + operation,
-               "root_pippit_asset_id": doc["rootCanvasId"],
-               "transactions": [{"transaction_id": operation, "patches": converted}]}
-    d.require(len(d.packed(request).encode("utf-8")) <= 64 * 1024 * 1024, "批量事务超过CLI输入限制，尚未发送")
+        expected[asset_id] = version
+    if use_semantic:
+        request = {"canvas_id": doc["rootCanvasId"], "expected_versions": expected, "commands": commands}
+        send = cli.apply_semantic_batch
+        # reserve() has durably bound any newly allocated IDs. Keep the prior
+        # mapping and accepted receipt when a precondition rejects all writes.
+        stored = c.read_state(project)["mappings"]
+        previous_mappings = {key: stored.get(key) for key, value in state["mappings"].items()
+                             if value.get("node_id") in touched and stored.get(key) != value}
+    else:
+        converted = [{"asset_id": p["assetId"], "base_asset_version": expected[p["assetId"]], "op": p["op"],
+                      "path": p["path"], **({"value": p["value"]} if p["op"] != "remove" else {})} for p in patches]
+        request = {"batch_id": "seedance-" + operation, "client_id": "seedance-batch-" + operation,
+                   "root_pippit_asset_id": doc["rootCanvasId"],
+                   "transactions": [{"transaction_id": operation, "patches": converted}]}
+        send = cli.apply_batch
+    d.require(len(d.packed(request).encode("utf-8")) <= 64 * 1024 * 1024, "批量请求超过CLI输入限制，尚未发送")
     path = Path(project) / "canvas" / "batches" / (operation + ".json")
-    d.write_json(path, {"protocol": c.BATCH_PROTOCOL, "request": request, "runtime_sha256": compiled["runtime_sha256"]})
+    transport = {"transport": "public-semantic-commands-v1"} if use_semantic else {}
+    d.write_json(path, {"protocol": c.BATCH_PROTOCOL, **transport, "request": request,
+                        "runtime_sha256": compiled["runtime_sha256"]})
     entry = {"id": operation, "command": "canvas_batch", "protocol": c.BATCH_PROTOCOL,
-             "input": {"request_path": str(path), "request_sha256": c.digest(request)},
+             **transport, "input": {"request_path": str(path), "request_sha256": c.digest(request)},
              "targets": copy.deepcopy(targets), "status": "pending"}
     for receipt in receipts:
         receipt["steps"].append(operation)
@@ -122,7 +144,7 @@ def submit(project, cli, state, baseline, compiled, targets, receipts=(), asset_
     state["journal"].append(entry)
     c.save(project, state)
     try:
-        cli.apply_batch(request)
+        send(request)
     except BaseException as exc:
         # Queue control exceptions are raised before transport. Unlike timeouts,
         # these are known not-sent requests and must not poison future resume.
@@ -137,11 +159,25 @@ def submit(project, cli, state, baseline, compiled, targets, receipts=(), asset_
         if not isinstance(exc, (ValueError, OSError, KeyError, TypeError)):
             # A killed process/unknown failure leaves the durable pending entry.
             raise
-        entry.update(status="rejected" if getattr(exc, "code", None) == "COMMAND_REJECTED" else "uncertain",
-                     error=c.safe_message(exc))
+        code = getattr(exc, "code", None)
+        rejected = code in ("COMMAND_REJECTED", "CONCURRENT_EDIT")
+        entry.update(status="rejected" if rejected else "uncertain", error=c.safe_message(exc))
+        if use_semantic:
+            completed = getattr(exc, "details", {}).get("completed")
+            if type(completed) is int:
+                entry["confirmed_commands"] = completed
+            if rejected:
+                for key, previous in previous_mappings.items():
+                    if previous is None:
+                        state["mappings"].pop(key, None)
+                    else:
+                        state["mappings"][key] = previous
+            for receipt in receipts:
+                receipt.update(status=entry["status"], error=entry["error"])
+                d.write_json(receipt["path"], receipt)
         c.save(project, state)
-        c.fail("COMMAND_REJECTED" if entry["status"] == "rejected" else "UNCERTAIN_WRITE",
-               "批量事务未得到确定成功确认；保留原ID和事务，不重放。" + c.safe_message(exc), operation=operation)
+        c.fail(code if rejected else "UNCERTAIN_WRITE",
+               "批量写入未全部确认；已保留节点ID和请求记录。" + c.safe_message(exc), operation=operation)
     entry["status"] = "acknowledged"
     c.save(project, state)
     return entry
@@ -212,7 +248,7 @@ def write_asset_group(project, cli, state, doc, items, positions):
         targets.extend(exact_targets(compiled["document"], node_id))
         state["mappings"].setdefault(item["key"], {}).update(node_id=node_id, kind=item["kind"],
             name=item["name"], stage="writing", batch_initialization=True)
-    entry = submit(project, cli, state, baseline, compiled, targets)
+    entry = submit(project, cli, state, baseline, compiled, commands, targets)
     actual = readback(project, cli, state, entry, targets)
     for item, node_id in zip(items, ids):
         item["node_id"] = node_id
@@ -240,7 +276,7 @@ def sync_asset_inputs(project, cli, session, state, doc, keys=None, batch_size=D
         targets.extend(t for p in plans for t in p["targets"])
         for plan in plans:
             state["mappings"][plan["key"]]["image_input"] = {**plan["image_input"], "status": "pending"}
-        entry = submit(project, cli, state, baseline, compiled, targets)
+        entry = submit(project, cli, state, baseline, compiled, commands, targets)
         doc = readback(project, cli, state, entry, targets)
         for plan in plans:
             mapping = state["mappings"][plan["key"]]
@@ -293,6 +329,7 @@ def sync_videos(project, cli, state, doc, plan, pending, context, references_onl
     positions = c.layout_positions(doc, plan)
     created = updated = reused = 0
     verified = set()
+    use_semantic = uses_semantic_writes(cli)
     for offset in range(0, len(plan), batch_size):
         group = plan[offset:offset + batch_size]
         sources = {sid for i in group for sid in c.node_asset_ids(i["prompt"])}
@@ -300,6 +337,11 @@ def sync_videos(project, cli, state, doc, plan, pending, context, references_onl
         baseline = snapshot(cli, state, doc, group, sources, **policy_args)
         doc = baseline["document"]
         ids = reserve(project, cli, state, group)
+        # Independent new videos can share one public structural transaction.
+        # Source nodes already exist; prompt commands still run in authored order.
+        group_creates = (use_semantic and sources.isdisjoint(ids)
+                         and all(not i.get("node_id") and c.no_black(i) for i in group))
+        creates = []
         commands, receipts, targets = [], [], []
         for item, node_id in zip(group, ids):
             context["active"] = {"key": item["key"], "node_id": node_id, "kind": "video", "name": item["name"]}
@@ -307,15 +349,31 @@ def sync_videos(project, cli, state, doc, plan, pending, context, references_onl
             before = c.content(doc, node_id)
             names = {f: item["name"] for f in ("name", "caption", "title")}
             if is_new:
-                commands.append(command("create_biz_node", {"nodeKind": "video", "id": node_id,
-                    "initialData": {**names, "generation": copy.deepcopy(item.get("settings", {}))},
-                    "topLeft": positions[item["key"]]}))
+                create = command("create_biz_node", {"nodeKind": "video", "id": node_id,
+                                 "initialData": {**names, "generation": copy.deepcopy(item.get("settings", {}))},
+                                 "topLeft": positions[item["key"]]})
+                if group_creates:
+                    creates.append(create)
+                else:
+                    commands.append(create)
                 created += 1
             else:
                 reused += 1
                 if not references_only:
-                    generation = {**copy.deepcopy(before.get("generation") or {}), **item["settings"]}
-                    commands.append(command("update_node_data", {"id": node_id, "patch": {**names, "generation": generation}}))
+                    current = before.get("generation") or {}
+                    patch = {key: value for key, value in names.items()
+                             if not use_semantic or before.get(key) != value}
+                    changed = {key: value for key, value in item["settings"].items()
+                               if not use_semantic or current.get(key) != value}
+                    if changed:
+                        # update_node_data replaces the generation object. The
+                        # public writer re-merges only these edits at dispatch.
+                        patch["generation"] = {**copy.deepcopy(current), **changed}
+                    if patch:
+                        update = command("update_node_data", {"id": node_id, "patch": patch})
+                        if changed and use_semantic:
+                            update["generation_overrides"] = changed
+                        commands.append(update)
             # Refresh old edge-only role references using the shared contract.
             stale = c.stale_role_reference_edges(doc, node_id, item["prompt"])
             if stale:
@@ -342,13 +400,14 @@ def sync_videos(project, cli, state, doc, plan, pending, context, references_onl
             mapping = state["mappings"].setdefault(item["key"], {})
             mapping.update(node_id=node_id, kind="video", name=item["name"], stage="writing",
                            video_receipt_id=receipt_id, video_write_receipt=receipt["path"])
+        commands = creates + commands
         compiled = cli.compile_batch(doc, commands)
         for item, receipt in zip(group, receipts):
             node_id = receipt["node_id"]
             receipt["reference_targets"] = exact_targets(compiled["document"], node_id)
             targets.extend(receipt["reference_targets"])
             d.write_json(receipt["path"], receipt)
-        entry = submit(project, cli, state, baseline, compiled, targets, receipts, **policy_args)
+        entry = submit(project, cli, state, baseline, compiled, commands, targets, receipts, **policy_args)
         try:
             actual = readback(project, cli, state, entry, targets)
         except (ValueError, OSError, KeyError, TypeError) as exc:

@@ -7,6 +7,7 @@ import time
 import uuid
 
 import canvas as c
+from canvas_batch import DEFAULT_BATCH_SIZE
 import director as d
 
 ASSET_READY_ATTEMPTS = 3
@@ -248,7 +249,7 @@ def acknowledge(project, cli, state, command, value, targets, baseline=None):
     c.save(project, state)
 
 
-def sync_assets(project, cli, session, progress, decisions=None, batch_size=10, batch_mode=False, connected=None):
+def sync_assets(project, cli, session, progress, decisions=None, batch_size=DEFAULT_BATCH_SIZE, batch_mode=False, connected=None):
     d.require(1 <= batch_size <= 50, "分组核对数量须为1至50；这不是服务端并发限制")
     decisions = decisions or {}
     items = asset_items(session)

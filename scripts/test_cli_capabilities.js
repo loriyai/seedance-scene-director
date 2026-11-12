@@ -74,7 +74,7 @@ runCase("complete canvas command catalog", () => {
   const normal = fixture(requiredSemantic);
   assert.strictEqual(normal.ensureCLI({ canvas: true }).cli_path, cliPath);
   const probes = normal.calls.filter((call) => call.args.includes("--help")).map((call) => call.args.slice(0, -1).join(" "));
-  assert.deepStrictEqual(probes, ["status", "login", "canvas get", "canvas allocate", "canvas apply", "canvas upload", "space list"]);
+  assert.deepStrictEqual(probes, ["status", "login", "canvas get", "canvas allocate", "canvas upload", "space list"]);
   assert(!normal.calls.some((call) => call.args.includes("install")));
 });
 
