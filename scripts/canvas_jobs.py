@@ -138,6 +138,8 @@ def job_state(project, job):
     if "total" not in value:
         value["total"] = job_total(job)
     value.setdefault("stage", value["status"])
+    value.setdefault("cumulative_node_ids", copy.deepcopy(value.get("node_ids", {})))
+    value.setdefault("cumulative_completed", value.get("completed", 0))
     return value
 
 
@@ -260,7 +262,8 @@ def validate_job(project, job):
     d.require(c.digest(payload) == job["manifest_digest"], "任务JSON被修改，请重新提交任务")
     d.require(job.get("asset_contract") == c.ASSET_CONTRACT,
               "任务冻结的画布字段契约与当前版本不同；保留原任务和暂停状态，请核对后重新提交，不执行旧任务。")
-    d.require(job["options"].get("sync_protocol") in (None, c.BATCH_PROTOCOL), "任务冻结的批量协议不受当前版本支持")
+    d.require(job["options"].get("sync_protocol") in (None, c.BATCH_PROTOCOL),
+              "旧任务冻结的批量协议不适用于CLI 1.0.57；保留原节点及未决回执，按当前输入重新入队，恢复时先核对原写入。")
     d.require(c.read_state(project).get("binding") == job["binding"], "画布绑定已变化，停止旧任务")
     session = d.load(Path(project))
     d.require(c.digest(frozen_input_scope(project, session, job)) == job["input_digest"],
@@ -755,6 +758,8 @@ def run_worker(project, runner=None, run_id=None):
                     guard.release()
                     return status(project)
                 state = states[job["job_id"]]
+                state["cumulative_node_ids"] = {**state.get("cumulative_node_ids", {}), **state.get("node_ids", {})}
+                state["cumulative_completed"] = max(state.get("cumulative_completed", 0), state.get("completed", 0))
                 state.update(status="running", started_at=time.time(), error=None)
                 d.write_json(state_file(project, job["job_id"]), state)
 
@@ -787,6 +792,13 @@ def run_worker(project, runner=None, run_id=None):
                 if value.get("stage") in ("verifying_node", "node_verified", "node_needs_attention"):
                     check_control.boundary()
                 state.update(value)
+                # Historical verified IDs remain evidence of earlier progress.
+                # Only this run's readback count determines current completion.
+                state["cumulative_node_ids"] = {**state.get("cumulative_node_ids", {}), **value.get("node_ids", {})}
+                state["cumulative_completed"] = max(state.get("cumulative_completed", 0),
+                                                    value.get("completed", 0), len(state["cumulative_node_ids"]))
+                if "completed" in value:
+                    state["run_completed"] = value["completed"]
                 state["status"] = "running"
                 state["updated_at"] = time.time()
                 d.write_json(state_file(project, job["job_id"]), state)
@@ -807,7 +819,8 @@ def run_worker(project, runner=None, run_id=None):
                 state["error"].update({key: value for key, value in getattr(exc, "details", {}).items()
                                       if key in ("operation", "node_id", "key", "command") and isinstance(value, str)})
             state["finished_at"] = time.time()
-            state["stage"] = state["status"]
+            state["stage"] = ("awaiting_readback" if (state.get("error") or {}).get("code") == "READBACK_PENDING"
+                              else state["status"])
             with metadata_lock(project):
                 d.write_json(state_file(project, job["job_id"]), state)
                 publish_event(project, job, state)

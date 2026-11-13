@@ -7,7 +7,7 @@ const vm = require("vm");
 
 const source = fs.readFileSync(path.join(__dirname, "ensure-cli.js"), "utf8");
 const requiredSemantic = [
-  "get_snapshot", "get_permissions", "apply_mutations", "create_biz_node", "create_edge", "update_node_data", "update_asset", "delete_nodes", "delete_edges",
+  "get_snapshot", "get_permissions", "apply_mutations", "create_node", "create_biz_node", "create_edge", "update_node_data", "update_asset", "delete_nodes", "delete_edges",
   "xyq.generation.update_prompt", "xyq.role.updateDescription",
   "xyq.scene.updateDescription", "xyq.role.updateAppearance",
 ];
@@ -22,6 +22,7 @@ function fixture(catalogNames, promptContract = true, teamFlag = true, reference
     existsSync: (value) => value === cliPath || value === entry || value.endsWith(path.join("npm", "bin", "npm-cli.js")),
     statSync: () => ({ isFile: () => true }),
     realpathSync: (value) => value,
+    readFileSync: () => JSON.stringify({version: "1.0.57"}),
     mkdirSync: () => {},
     mkdtempSync: (value) => value + "mock",
     rmSync: () => {},
@@ -33,7 +34,7 @@ function fixture(catalogNames, promptContract = true, teamFlag = true, reference
       error.status = 1;
       throw error;
     }
-    if (args.length === 1 && args[0] === "--version") return Buffer.from("1.0.38");
+    if (args.length === 1 && args[0] === "--version") return Buffer.from("1.0.57");
     if (args.includes("--help")) return Buffer.from(teamFlag ? "supported --team-id ID" : "supported");
     if (args.slice(-3).join(" ") === "canvas command list") {
       return Buffer.from(JSON.stringify({ commands: catalogNames.map((name) => ({ name })) }));
@@ -74,7 +75,7 @@ runCase("complete canvas command catalog", () => {
   const normal = fixture(requiredSemantic);
   assert.strictEqual(normal.ensureCLI({ canvas: true }).cli_path, cliPath);
   const probes = normal.calls.filter((call) => call.args.includes("--help")).map((call) => call.args.slice(0, -1).join(" "));
-  assert.deepStrictEqual(probes, ["status", "login", "canvas get", "canvas allocate", "canvas apply", "canvas upload", "space list"]);
+  assert.deepStrictEqual(probes, ["status", "login", "canvas get", "canvas allocate", "canvas upload", "space list"]);
   assert(!normal.calls.some((call) => call.args.includes("install")));
 });
 

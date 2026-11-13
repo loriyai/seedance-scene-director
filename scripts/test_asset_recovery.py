@@ -79,7 +79,7 @@ class AssetRecoveryChecks(unittest.TestCase):
 
     def test_structured_negative_is_classified_before_nonzero_exit(self):
         result = SimpleNamespace(stdout=json.dumps(REFUSAL), stderr='', returncode=1)
-        with patch.object(c.subprocess, 'run', return_value=result):
+        with patch.object(c.transport, 'execute', return_value=result):
             with self.assertRaises(c.CanvasError) as failure:
                 c.run_json(['fake'], self.project)
         self.assertEqual(failure.exception.code, 'COMMAND_REJECTED')

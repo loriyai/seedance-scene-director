@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import time
 from decimal import Decimal
 
 sys.dont_write_bytecode = True
@@ -161,7 +162,14 @@ def atomic_text(path, text):
         f.write(text)
         temporary = Path(f.name)
     try:
-        os.replace(temporary, path)
+        for attempt in range(4):
+            try:
+                os.replace(temporary, path)
+                break
+            except OSError as exc:
+                if getattr(exc, 'winerror', None) not in (5, 32, 33) or attempt == 3:
+                    raise
+                time.sleep(0.05 * 2 ** attempt)
     finally:
         temporary.unlink(missing_ok=True)
 

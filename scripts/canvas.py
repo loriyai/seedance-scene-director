@@ -16,9 +16,14 @@ import uuid
 from urllib.parse import urlparse, parse_qs, urlencode
 
 sys.dont_write_bytecode = True
+if __name__ == '__main__':
+    # Shared helpers import this module by its public name. Keep exceptions and
+    # CLI identity identical when the normal script entry point is used.
+    sys.modules['canvas'] = sys.modules[__name__]
 import director as d
 import canvas_media as media
 import ratio_profiles
+import canvas_transport as transport
 
 KINDS = {"role": "biz/role", "scene": "biz/scene", "image": "biz/image", "video": "biz/video", "audio": "biz/audio", "text": "biz/text"}
 NODE_ASSET_TAG = re.compile(r"<node-asset\b[^>]*>([^<]*)</node-asset>")
@@ -26,7 +31,7 @@ VIDEO_READBACK_ATTEMPTS = 3
 VIDEO_READBACK_DELAY = 0.5
 ASSET_IMAGE_DEFAULTS = {"resolution": "2K", "effort": "high", "ratio": "16:9"}
 ASSET_CONTRACT = "generation-prompt-v2"
-BATCH_PROTOCOL = "sdk-local-batch-v1"
+BATCH_PROTOCOL = "cli-command-batch-v2"
 MAX_AUTO_REBUILD_ASSETS = 10
 CANVAS_URL_SPACE_HINTS = {
     ("xyq.jianying.com", "/novel/detail/canvas"): "personal",
@@ -52,7 +57,9 @@ def digest(value):
 def safe_message(text):
     # CLI diagnostics can contain authentication headers from a failed request.
     text = re.sub(r'(?i)(bearer\s+)[^\s"\']+', r'\1[隐藏]', str(text))
-    return re.sub(r'(?i)((?:access[_-]?key|authorization|token|secret)["\']?\s*[:=]\s*["\']?)[^\s,"\'}]+', r'\1[隐藏]', text)[:1600]
+    text = re.sub(r'(?i)(--space-context(?:=|\s+))[^\s]+', r'\1[隐藏]', text)
+    text = re.sub(r'(?i)((?:access[_-]?key|authorization|token|secret|cookie)["\']?\s*[:=]\s*["\']?)[^\s,"\'}]+', r'\1[隐藏]', text)
+    return text if len(text) <= 1600 else text[:600] + '\n[省略命令上下文]\n' + text[-900:]
 
 
 def rejection_details(value):
@@ -60,26 +67,29 @@ def rejection_details(value):
     if not isinstance(value, dict) or value.get("ok") is not False:
         return None
     return {key: safe_message(value[key]) if isinstance(value[key], str) else value[key]
-            for key in ("ok", "code", "message", "revision")
+            for key in ("ok", "code", "message", "revision", "not_sent")
             if key in value and isinstance(value[key], (str, int, bool, type(None)))}
 
 
 def run_json(argv, cwd, timeout=120):
     try:
-        result = subprocess.run([str(x) for x in argv], cwd=str(cwd), shell=False,
-                                capture_output=True, encoding="utf-8", errors="replace", timeout=timeout,
-                                env={**os.environ, "PIPPIT_CLI_DISABLE_UPDATE_CHECK": "1"},
-                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        result = transport.execute(argv, cwd, timeout)
     except subprocess.TimeoutExpired:
         fail("CLI_TIMEOUT", "CLI超时；先读取画布核对，不直接重放写入。")
     try:
-        value = json.loads(result.stdout)
+        value = transport.final_json(result.stdout)
     except (ValueError, TypeError):
-        fail("CLI_ERROR", safe_message(result.stderr or "CLI没有返回有效JSON"))
+        message = result.stderr or 'CLI没有返回有效JSON'
+        fail(transport.error_code(message), safe_message(message))
     if isinstance(value, dict) and value.get("ok") is False:
-        fail("COMMAND_REJECTED", safe_message(d.packed(value)), rejection=rejection_details(value))
+        message = str(value.get('message') or value.get('error') or d.packed(value))
+        code = transport.error_code(message)
+        if value.get('code') in {'CONCURRENT_EDIT', 'READBACK_PENDING'} and value.get('not_sent') is True:
+            fail(value['code'], safe_message(message), not_sent=True)
+        fail('COMMAND_REJECTED' if code == 'CLI_ERROR' else code, safe_message(message), rejection=rejection_details(value))
     if result.returncode:
-        fail("CLI_ERROR", safe_message(result.stderr or d.packed(value)))
+        message = result.stderr or d.packed(value)
+        fail(transport.error_code(message), safe_message(message))
     return value
 
 
@@ -91,6 +101,7 @@ class CLI:
         config = self.directory / "connection.json"
         self.config = d.read_json(config) if config.exists() else {}
         self.binding = None
+        self._version_checked = False
 
     def use_binding(self, binding):
         if binding:
@@ -116,15 +127,24 @@ class CLI:
         return {"status": "configured", "version": self.config["version"]}
 
     def ready(self):
-        if (self.config.get("canvas_contract") != ASSET_CONTRACT or
+        if (self.config.get('version') != transport.CLI_VERSION or self.config.get("canvas_contract") != ASSET_CONTRACT or
                 not all(Path(self.config.get(k, "__missing__")).is_file() for k in ("node_path", "cli_path", "canvas_entry"))):
             self.setup()
+        if not self._version_checked:
+            result = transport.execute([self.config['cli_path'], '--version'], self.project, 10)
+            package = Path(self.config['canvas_entry']).parent.parent / 'package.json'
+            if result.returncode or result.stdout.strip() != transport.CLI_VERSION or d.read_json(package).get('version') != transport.CLI_VERSION:
+                fail('CLI_VERSION_UNSUPPORTED', '同步只支持完整的 CLI 1.0.57 安装。')
+            self._version_checked = True
 
-    def native(self, *args, timeout=120):
+    def native(self, *args, timeout=120, retry_read=True):
         self.ready()
         if args and args[0] == "canvas" and "--team-id" not in args:
             args = (*args, *self.space_args())
-        return run_json([self.config["cli_path"], *args], self.project, timeout)
+        argv = [self.config['cli_path'], *args]
+        if retry_read and tuple(args[:2]) in {('canvas', 'get'), ('space', 'list')}:
+            return transport.read_retry(lambda remaining: run_json(argv, self.project, min(timeout, remaining)), lambda: check_control(self))
+        return run_json(argv, self.project, timeout)
 
     def auth(self, login=False, force=False):
         status = self.native("status")
@@ -145,12 +165,17 @@ class CLI:
         return status
 
     def command(self, canvas_id, name, value=None):
-        if name != 'get_snapshot':
+        if name not in {'get_snapshot', 'get_permissions'}:
             from project_paths import assert_writable
             assert_writable(self.project, cloud=True)
         self.ready()
         binding = self.binding or read_state(self.project).get("binding") or {}
         d.require(binding.get("canvas_id") == canvas_id, "命令目标与当前绑定画布不一致")
+        if name in {'get_snapshot', 'get_permissions'}:
+            snapshot = self.batch_snapshot(binding, node_ids=[] if name == 'get_permissions' else None)
+            if name == 'get_permissions':
+                return {'canvasId': canvas_id, 'readOnly': False}
+            return {'document': snapshot['document']}
         with tempfile.TemporaryDirectory(prefix="command-", dir=self.directory) as temporary:
             path = Path(temporary) / "input.json"
             d.write_json(path, value or {})
@@ -158,7 +183,27 @@ class CLI:
                                name, "--canvas-id", canvas_id, *self.space_args(), "--file", path], self.project)
         if result.get("ok") is not True:
             fail("CLI_ERROR", "画布命令没有确认成功。")
+        self.last_command_result = result
         return result.get("data", {})
+
+    def command_guarded(self, canvas_id, name, value, expected_nodes, expected_edges=None):
+        from project_paths import assert_writable
+        assert_writable(self.project, cloud=True)
+        self.ready()
+        check_control(self)
+        binding = self.binding or read_state(self.project).get('binding') or {}
+        d.require(binding.get('canvas_id') == canvas_id, '写入目标与当前绑定画布不一致')
+        request = {'canvas_entry': self.config['canvas_entry'], 'cli_path': self.config['cli_path'],
+                   'canvas_id': canvas_id, 'team_id': normalize_team_id(binding['team_id']),
+                   'project': str(self.project), 'name': name, 'input': value,
+                   'expected_nodes': expected_nodes, 'expected_edges': expected_edges or []}
+        with tempfile.TemporaryDirectory(prefix='guarded-', dir=self.directory) as temporary:
+            path = Path(temporary) / 'input.json'
+            d.write_json(path, request)
+            result = run_json([self.config['node_path'], Path(__file__).with_name('canvas_public_command.js'), path], self.project)
+        d.require(result.get('ok') is True, '公开画布命令未确认成功')
+        self.last_command_result = result
+        return result.get('data', {})
 
     def allocate(self):
         return self.allocate_many(1)[0]
@@ -174,31 +219,15 @@ class CLI:
         d.require(result.get("protocol") == BATCH_PROTOCOL, "批量适配器契约不匹配")
         return result
 
-    def batch_snapshot(self, binding):
+    def batch_snapshot(self, binding, node_ids=None):
         self.use_binding(binding)
-        result = self.batch_adapter("snapshot", canvas_id=binding["canvas_id"], team_id=normalize_team_id(binding["team_id"]),
-                                    cli_path=self.config["cli_path"], project=str(self.project))
-        doc = result["document"]
-        d.require(doc.get("rootCanvasId") == binding["canvas_id"] and not doc["assets"][doc["rootCanvasId"]]["content"].get("settings", {}).get("readOnly"),
-                  "批量快照目标不匹配或画布只读")
-        return result
+        return transport.snapshot(self, binding, node_ids)
 
     def compile_batch(self, doc, commands):
         return self.batch_adapter("compile", document=doc, commands=commands)
 
     def apply_batch(self, request):
-        from project_paths import assert_writable
-        assert_writable(self.project, cloud=True)
-        # Use the public native command and its strict ACK/version validation.
-        # No hidden transport-result flag, HTTP bypass or automatic retry.
-        d.require(len(request.get("transactions", [])) == 1, "批量写入必须为单个事务")
-        with tempfile.TemporaryDirectory(prefix="apply-", dir=self.directory) as temporary:
-            path = Path(temporary) / "patch.json"
-            d.write_json(path, request)
-            args = ["canvas", "apply", "--file", str(path)]
-            if self.binding.get("project_id"):
-                args.extend(["--project-id", self.binding["project_id"]])
-            return self.native(*args)
+        fail('CLI_PROTOCOL_UNSUPPORTED', 'CLI 1.0.57 使用公开语义命令；历史事务只能按原节点只读核对。')
 
     def allocate_many(self, count):
         d.require(isinstance(count, int) and 1 <= count <= 5000, "ID申请数量须为1至5000")
@@ -383,6 +412,92 @@ def prompt_of(doc, node_id):
 
 def fingerprint(doc, node_id):
     return digest({"node": nodes(doc).get(node_id), "asset": doc["assets"].get(node_id)})
+
+
+def semantic_projection(doc, node_id, source_only=False):
+    """Normalize only SDK-defined optional empty fields for new comparisons."""
+    value = copy.deepcopy({'node': nodes(doc).get(node_id), 'asset': doc['assets'].get(node_id)})
+    if source_only and isinstance(value['node'], dict):
+        value['node'] = {key: value['node'][key] for key in ('type', 'data') if key in value['node']}
+    data = (value.get('asset') or {}).get('content', {})
+    if isinstance(data.get('data'), dict):
+        data = data['data']
+    basic = data.get('basicInfo')
+    if isinstance(basic, dict) and basic.get('appearanceName') in (None, ''):
+        basic.pop('appearanceName', None)
+    generation = data.get('generation')
+    if isinstance(generation, dict) and generation.get('references') == []:
+        generation.pop('references')
+    return value
+
+
+def semantic_fingerprint(doc, node_id, source_only=False):
+    return digest(semantic_projection(doc, node_id, source_only))
+
+
+def source_fingerprint(doc, node_id):
+    return semantic_fingerprint(doc, node_id, source_only=True)
+
+
+def semantic_references(rows, doc):
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        return rows
+    normalized = []
+    for original in rows:
+        row = copy.deepcopy(original)
+        row.pop('edgeId', None)
+        # Some SDK rows use id as the source node identity. It may only be
+        # ignored when another explicit source and media identity are present.
+        if (row.get('id') not in nodes(doc) and (row.get('sourceNodeId') or row.get('nodeAssetId'))
+                and (row.get('pippitAssetId') or row.get('assetId'))):
+            row.pop('id', None)
+        normalized.append(row)
+    return sorted(normalized, key=d.packed)
+
+
+def compare_expected(actual, expected, path=(), allow_extra=False):
+    """Compare present values without turning absent nested fields into edits."""
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return 'conflict'
+        states = []
+        for key, value in expected.items():
+            child_path = (*path, key)
+            if key not in actual:
+                optional_empty = ((child_path[-2:] == ('basicInfo', 'appearanceName') and value == '')
+                                  or (child_path[-2:] == ('generation', 'references') and value == []))
+                states.append('matched' if optional_empty else 'unknown')
+            else:
+                observed = actual[key]
+                if child_path[-2:] == ('basicInfo', 'appearanceName') and value == '' and observed is None:
+                    observed = ''
+                states.append(compare_expected(observed, value, child_path))
+        if 'unknown' in states:
+            return 'unknown'
+        if 'conflict' in states or (not allow_extra and set(actual) - set(expected)):
+            return 'conflict'
+        return 'matched'
+    if isinstance(expected, list):
+        if not isinstance(actual, list) or len(actual) != len(expected):
+            return 'conflict'
+        states = [compare_expected(left, right, path) for left, right in zip(actual, expected)]
+        return 'unknown' if 'unknown' in states else 'conflict' if 'conflict' in states else 'matched'
+    return 'matched' if type(actual) is type(expected) and actual == expected else 'conflict'
+
+
+def compare_reference_rows(actual, expected, doc):
+    actual, expected = semantic_references(actual, doc), semantic_references(expected, doc)
+    if not isinstance(actual, list) or not isinstance(expected, list) or len(actual) != len(expected):
+        return 'conflict'
+    remaining = list(actual)
+    states = []
+    for row in expected:
+        comparisons = [compare_expected(candidate, row) for candidate in remaining]
+        state = next((value for value in ('matched', 'unknown', 'conflict') if value in comparisons), 'conflict')
+        states.append(state)
+        if comparisons:
+            remaining.pop(comparisons.index(state))
+    return 'unknown' if 'unknown' in states else 'conflict' if 'conflict' in states else 'matched'
 
 
 def bind(project, cli, target, switch=False, team_id=None):
@@ -613,7 +728,7 @@ def repair_role_reference_rows(project, cli, state, doc, node_id, prompt):
                           [{"action": "reference_edges_absent", "node_id": node_id, "edge_ids": ids}])
 
 
-def target_satisfied(doc, target):
+def _target_satisfied(doc, target):
     node_id, action = target["node_id"], target["action"]
     if action == "delete":
         return node_id not in nodes(doc)
@@ -630,14 +745,27 @@ def target_satisfied(doc, target):
         return kind_of(nodes(doc)[node_id]) == target["kind"]
     if action == "duration":
         return (content(doc, node_id).get("generation") or {}).get("durationMs") == target["value"]
-    if action == "generation_settings":
+    if action in {'generation_settings', 'semantic_generation_settings'}:
         generation = content(doc, node_id).get("generation") or {}
-        return all(generation.get(key) == value for key, value in target["value"].items())
+        if action == 'semantic_generation_settings':
+            return all(semantic_references(generation.get(key, []), doc) == semantic_references(value, doc)
+                       if key == 'references' else generation.get(key) == value
+                       for key, value in target['value'].items())
+        return all((generation.get(key, []) if key == 'references' and value == [] else generation.get(key)) == value
+                   for key, value in target['value'].items())
     if action == "reference_graph":
         from canvas_batch import reference_edges
         return reference_edges(doc, node_id) == target["value"]
+    if action == 'semantic_reference_graph':
+        from canvas_batch import reference_edges
+        project = lambda edges: sorted(({key: edge.get(key) for key in ('source', 'target', 'type')}
+                                        for edge in edges), key=d.packed)
+        return project(reference_edges(doc, node_id)) == project(target['value'])
     if action == "asset_snapshot":
         return fingerprint(doc, node_id) == target["value"]
+    if action == 'semantic_asset_snapshot':
+        identify = source_fingerprint if target.get('projection') == 'source-business-v1' else semantic_fingerprint
+        return identify(doc, node_id) == target['value']
     if action == "bound_asset_identity":
         from canvas_asset_reference_policy import reference_media_satisfied
         return (target.get('canvas_id') == doc.get('rootCanvasId')
@@ -665,7 +793,11 @@ def target_satisfied(doc, target):
     if action == "rename":
         return name_of(doc, node_id) == target["value"] and content(doc, node_id).get("basicInfo", {}).get("name") == target["value"]
     if action == "field":
-        return content(doc, node_id).get("basicInfo", {}).get("appearanceName") == target["value"]
+        basic = content(doc, node_id).get('basicInfo')
+        if not isinstance(basic, dict):
+            return False
+        appearance = basic.get('appearanceName')
+        return ('' if appearance is None else appearance) == target['value']
     if action == "description":
         return content(doc, node_id).get("appearanceInfo", {}).get("description") == target["value"]
     if action == "main_image":
@@ -676,10 +808,82 @@ def target_satisfied(doc, target):
     return False
 
 
+def target_state(doc, target):
+    """Keep absent response fields separate from explicit conflicting values."""
+    node_id, action = target['node_id'], target['action']
+    root = doc.get('assets', {}).get(doc.get('rootCanvasId'), {}).get('content', {})
+    if not isinstance(root.get('nodes'), dict):
+        return 'unknown'
+    if action == 'delete':
+        return 'matched' if node_id not in root['nodes'] else 'conflict'
+    if node_id not in root['nodes'] or node_id not in doc.get('assets', {}):
+        return 'unknown'
+    asset = doc['assets'][node_id]
+    if not isinstance(asset.get('content'), dict):
+        return 'unknown'
+    data = content(doc, node_id)
+    if action == 'patch':
+        return compare_expected(data, target['patch'], allow_extra=True)
+    if action in {'generation_settings', 'semantic_generation_settings'}:
+        if 'generation' not in data:
+            return 'unknown'
+        generation = data['generation']
+        if not isinstance(generation, dict):
+            return 'conflict'
+        expected = target['value']
+        if action == 'semantic_generation_settings' and 'references' in expected:
+            if 'references' not in generation and expected['references']:
+                return 'unknown'
+            state = compare_reference_rows(generation.get('references', []), expected['references'], doc)
+            others = compare_expected(generation, {key: value for key, value in expected.items() if key != 'references'},
+                                      path=('generation',), allow_extra=True)
+            return 'unknown' if 'unknown' in (state, others) else 'conflict' if 'conflict' in (state, others) else 'matched'
+        return compare_expected(generation, expected, path=('generation',), allow_extra=True)
+    if action == 'semantic_asset_snapshot' and 'expected' in target:
+        current = semantic_projection(doc, node_id, source_only=target.get('projection') == 'source-business-v1')
+        return compare_expected(current, target['expected'])
+    paths = []
+    if action in {'prompt', 'prompt_text'}:
+        paths.append(('generation', 'prompt'))
+    elif action == 'duration':
+        paths.append(('generation', 'durationMs'))
+    elif action in {'generation_settings', 'semantic_generation_settings'}:
+        if not isinstance(data.get('generation'), dict):
+            return 'unknown'
+        paths.extend(('generation', key) for key, value in target['value'].items()
+                     if not (key == 'references' and value == []))
+    elif action == 'patch':
+        paths.extend((key,) for key in target['patch'])
+    elif action == 'field':
+        paths.append(('basicInfo',))
+        if target['value'] != '':
+            paths.append(('basicInfo', 'appearanceName'))
+    elif action == 'description':
+        paths.append(('appearanceInfo', 'description'))
+    elif action == 'rename':
+        paths.append(('basicInfo', 'name'))
+    for path in paths:
+        current = data
+        for key in path:
+            if not isinstance(current, dict) or key not in current:
+                return 'unknown'
+            current = current[key]
+    if action in {'reference_graph', 'semantic_reference_graph', 'reference_edges_absent', 'reference_edge', 'asset_reference_edge', 'prompt'} and not isinstance(root.get('edges'), dict):
+        return 'unknown'
+    try:
+        return 'matched' if _target_satisfied(doc, target) else 'conflict'
+    except (KeyError, TypeError, AttributeError):
+        return 'unknown'
+
+
+def target_satisfied(doc, target):
+    return target_state(doc, target) == 'matched'
+
+
 def reconcile(project, cli, state, doc, preview=False, decisions=None):
     changed = False
     for entry in state["journal"]:
-        if entry["status"] in ("pending", "uncertain", "acknowledged"):
+        if entry["status"] in ("pending", "uncertain", "acknowledged", "verification_pending"):
             target_ids = {target["node_id"] for target in entry["targets"]}
             replaced = next((key for key, mapping in state["mappings"].items()
                              if mapping.get("kind") == "video" and target_ids == {mapping["node_id"]}
@@ -691,6 +895,18 @@ def reconcile(project, cli, state, doc, preview=False, decisions=None):
                 entry.update(status="superseded", resolution="explicitly_recreate_deleted_video", key=replaced)
                 changed = True
                 continue
+            if isinstance(cli, CLI) and not all(target_satisfied(doc, t) for t in entry['targets']):
+                # A recovered write is queried using its original identities.
+                # No command is replayed by this recovery path.
+                for attempt in range(VIDEO_READBACK_ATTEMPTS):
+                    fresh = cli.batch_snapshot(state['binding'], node_ids=target_ids)['document']
+                    doc['assets'].update(fresh['assets'])
+                    for target_id in target_ids - set(nodes(fresh)):
+                        doc['assets'].pop(target_id, None)
+                    if all(target_satisfied(doc, t) for t in entry['targets']):
+                        break
+                    if attempt + 1 < VIDEO_READBACK_ATTEMPTS:
+                        time.sleep(2 ** attempt)
             if all(target_satisfied(doc, t) for t in entry["targets"]):
                 entry["status"] = "verified"
                 entry["after"] = {t["node_id"]: fingerprint(doc, t["node_id"]) for t in entry["targets"]}
@@ -698,7 +914,9 @@ def reconcile(project, cli, state, doc, preview=False, decisions=None):
             else:
                 if changed and not preview:
                     save(project, state)
-                fail("UNCERTAIN_WRITE", "上次写入结果仍未确认；已停止续写，请核对指定节点和CLI隔离状态。", operation=entry["id"], targets=entry["targets"])
+                states = [target_state(doc, target) for target in entry['targets']]
+                code = ('READBACK_PENDING' if 'unknown' in states else 'READBACK_CONFLICT') if isinstance(cli, CLI) else 'UNCERTAIN_WRITE'
+                fail(code, '原写入仍待核验；保留原节点、事务及已收到的确认。', operation=entry['id'], target_states=states)
     if changed and not preview:
         save(project, state)
 
@@ -1684,10 +1902,15 @@ def sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview=
                        existing_only, references_only, context, session_override, asset_reference_policy)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         if kind == "videos" and not preview and context.get("session") and context.get("state") and context.get("doc"):
-            try:
-                context["doc"] = document(cli, context["state"]["binding"])
-            except (ValueError, OSError, KeyError, TypeError):
-                pass  # Keep the last verified snapshot; never guess that a write succeeded.
+            # A transport failure has already exhausted the read budget. Report
+            # using the last observed document rather than starting another full
+            # query merely to format the error.
+            stale = getattr(exc, 'code', None) in {'READBACK_PENDING', 'READBACK_INCOMPLETE', 'CLI_TRANSIENT', 'CLI_TIMEOUT'}
+            if not stale:
+                try:
+                    context["doc"] = document(cli, context["state"]["binding"])
+                except (ValueError, OSError, KeyError, TypeError):
+                    stale = True
             details = getattr(exc, "details", {})
             active = dict(context.get("active", {}))
             if not active and details.get("operation"):
@@ -1700,7 +1923,7 @@ def sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview=
                     key, value = mapping
                     active = {"key": key, "name": value.get("name", key), "kind": value.get("kind"), "node_id": node_id}
             context["failures"].append({**active, "reason": getattr(exc, "code", "operation_failed"),
-                                        "message": safe_message(exc), **details})
+                                        "message": safe_message(exc), 'snapshot_stale': stale, **details})
             try:
                 report = reference_report(project, context)
                 if isinstance(exc, CanvasError):

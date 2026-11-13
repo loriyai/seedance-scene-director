@@ -6,14 +6,16 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 
-const PROTOCOL = "sdk-local-batch-v1";
-const MUTATIONS = new Set(["create_biz_node", "update_node_data", "update_asset", "create_edge", "delete_edges"]);
+const PROTOCOL = "cli-command-batch-v2";
+const MUTATIONS = new Set(["create_biz_node", "create_node", "update_node_data", "update_asset", "create_edge", "delete_edges"]);
 const COMMANDS = new Set(["xyq.generation.update_prompt", "xyq.role.updateDescription", "xyq.scene.updateDescription", "xyq.role.updateAppearance"]);
 const PERMISSIONS = ["canvas.read", "canvas.write", "canvas.patch", "canvas.asset.read", "canvas.asset.write"];
 const clone = value => JSON.parse(JSON.stringify(value));
 
 function official(entry) {
   const packageRoot = path.resolve(path.dirname(fs.realpathSync(entry)), "..");
+  const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"));
+  if (manifest.version !== "1.0.57") throw new Error("本地编译只支持小云雀 CLI 1.0.57");
   const runtimePath = path.join(packageRoot, "dist", "xyq-canvas-command-runtime.cjs");
   const helper = require(path.join(packageRoot, "scripts", "canvas-command.js"));
   const sdk = require(runtimePath);
@@ -63,30 +65,18 @@ async function compile(input, loaded) {
     }
     const document = clone(runtime.store.getState());
     const delta = differ.store.applyRemoteSnapshot(document);
-    return { protocol: PROTOCOL, document, patches: delta.transaction?.forwardPatches || [], runtime_sha256: runtimeSha256 };
+    return { protocol: PROTOCOL, document, commands: clone(input.commands),
+      patches: delta.transaction?.forwardPatches || [], runtime_sha256: runtimeSha256 };
   } finally {
     runtime.canvas.dispose();
     differ.canvas.dispose();
   }
 }
 
-async function snapshot(input, loaded) {
-  const { sdk, helper, runtimeSha256 } = loaded;
-  if (!input.canvas_id || typeof input.team_id !== "string") throw new Error("批量快照需要明确画布和空间");
-  const nativeClient = new helper.NativeCanvasClient({ command: input.cli_path }, { cwd: input.project, teamID: input.team_id });
-  const { assetRuntime, loader } = helper.createCanvasAssetRuntime({ nativeClient, sdk });
-  try {
-    const result = await loader.fetchSnapshot({ scopeAssetId: input.canvas_id });
-    if (result.state?.rootCanvasId !== input.canvas_id) throw new Error("批量快照画布身份不符");
-    return { protocol: PROTOCOL, document: result.state, asset_versions: result.assetVersions, runtime_sha256: runtimeSha256 };
-  } finally { assetRuntime.dispose(); }
-}
-
 async function main(input) {
   const loaded = official(input.canvas_entry);
   if (input.mode === "compile") return compile(input, loaded);
-  if (input.mode === "snapshot") return snapshot(input, loaded);
-  throw new Error("批量适配器只接受 compile 或 snapshot");
+  throw new Error("本地适配器仅编译；回读使用公开 canvas get");
 }
 
 module.exports = { PROTOCOL, compile, localRuntime, official, main };

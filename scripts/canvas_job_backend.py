@@ -7,6 +7,7 @@ import time
 import uuid
 
 import canvas as c
+from canvas_batch import DEFAULT_BATCH_SIZE
 import director as d
 
 ASSET_READY_ATTEMPTS = 3
@@ -248,7 +249,7 @@ def acknowledge(project, cli, state, command, value, targets, baseline=None):
     c.save(project, state)
 
 
-def sync_assets(project, cli, session, progress, decisions=None, batch_size=10, batch_mode=False, connected=None):
+def sync_assets(project, cli, session, progress, decisions=None, batch_size=DEFAULT_BATCH_SIZE, batch_mode=False, connected=None):
     d.require(1 <= batch_size <= 50, "分组核对数量须为1至50；这不是服务端并发限制")
     decisions = decisions or {}
     items = asset_items(session)
@@ -433,7 +434,8 @@ def run_job(project, manifest, check_control, progress):
     versions = {u["id"]: u["version"] for u in session["units"]}
     verified = {}
     # Counts below refer to nodes read back during this run, not merely old mappings.
-    progress({"completed": 0, "total": len(options["ids"]), "stage": "preparing", "node_ids": {}})
+    progress({"completed": 0, "run_completed": 0, "total": len(options["ids"]),
+              "stage": "preparing", "node_ids": {}})
     def node_progress(value):
         value = dict(value)
         key = value.pop("verified_unit", None)
@@ -442,7 +444,8 @@ def run_job(project, manifest, check_control, progress):
             if (mapping.get("stage") == "ready" and mapping.get("version") == versions[key]
                     and mapping.get("references_bound") is True):
                 verified[key] = mapping["node_id"]
-        progress({**value, "completed": len(verified), "total": len(options["ids"]), "node_ids": dict(verified)})
+        progress({**value, "completed": len(verified), "run_completed": len(verified),
+                  "total": len(options["ids"]), "node_ids": dict(verified)})
     result = c.sync(project, cli, "videos", request_id=options["request_id"], ids=options["ids"],
                     decisions=options["decisions"], existing_only=options["existing_only"],
                     references_only=options["references_only"], bind_references=True, session_override=session,

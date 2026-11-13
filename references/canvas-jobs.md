@@ -43,7 +43,7 @@ python <skill>/scripts/canvas_jobs.py video-followup --project <project> --job-i
 
 恢复必须由下一次宿主交互或用户明确的`resume`触发：先重新读取manifest、绑定、输入摘要、检查点和未确认操作，回读真实节点状态，再从最近安全边界补做未完成步骤。已确认节点不重写；未知ACK沿原ID核对，不能重新分配ID或盲目重放。恢复成功后继续监控，直到任务完成、明确失败、暂停或待处理终态；宿主没有事件回调时只保存本地事件，待主代理在交互边界报告。
 
-任务排队时即保存total，视频/引用任务按所选单元数计数。新none-v1任务不执行黑幕ID/节点/连线/素材检查；冻结的历史任务保持原模式。视频在准备、批次处理和整节点回读通过时保存stage、current_unit、真实ID及updated_at；每个完整节点通过后立即更新completed和node_ids，不等整批返回。创建ACK、名称/时长单步通过、引用未通过均不能推进完整节点计数。恢复执行会重新读取目标并核验节点，本轮completed随实际核验重建；旧回执和旧进度记录仍用于同一ID续接，计数重核不代表重建节点。后台任务终态仍由完整结果决定，不能仅凭completed==total宣称完成。
+任务排队时即保存total，视频/引用任务按所选单元数计数。新none-v1任务不执行黑幕ID/节点/连线/素材检查；冻结的历史任务保持原模式。视频在准备、批次处理和整节点回读通过时保存stage、current_unit、真实ID及updated_at；每个完整节点通过后立即更新completed和node_ids，不等整批返回。创建ACK、名称/时长单步通过、引用未通过均不能推进完整节点计数。恢复执行会重新读取目标并核验节点，本轮run_completed随实际核验重建，cumulative_completed和cumulative_node_ids保留历史已核验进度；旧回执和旧进度记录仍用于同一ID续接，计数重核不代表重建节点。后台任务终态仍由完整结果决定，不能仅凭completed==total宣称完成。
 
 图片任务的分母仅包含扫描有效、名称唯一匹配且未明确skip的上传目标；未匹配或不支持的文件不计入分母，缺失/重复/无效/冲突另列；终态仍依据原有执行结果及冲突判定，不能只看分母。新任务将目标数冻结到options.image_target_count，旧任务没有此证据时total显示null，待实际执行扫描后更新；不为补历史分母读取已经改变或消失的旧图片目录。完整图片清单摘要仍用于判断输入是否漂移。
 
@@ -106,9 +106,9 @@ python <skill>/scripts/canvas_jobs.py recover-assets --project <project> --opera
 
 同一账号与画布只有一个后台writer，使用跨进程OS锁并复用原画布操作锁。不同项目绑定同一画布时第二个worker停止，不得启动多个worker并发写入同一画布。worker正在写入时不得另行使用canvas.py修改或上传；需要精确编辑或删除时先暂停队列，确认当前已发送请求的结果并保存日志后，再按原接口执行。
 
-新`assets`任务冻结`sdk-local-batch-v1`并按现有本地批量协议执行；每个分段的`videos`任务独立冻结同一协议，前台按分段顺序逐个入队。每个任务内部仍默认每批10个节点、一个writer；整批ACK不推进完成数，统一回读后逐节点验收并保存各自回执。历史冻结任务保持原协议，不因本规则自动拆分或重排。
+新`assets`任务冻结`cli-command-batch-v2`并按现有本地批量协议执行；每个分段的`videos`任务独立冻结同一协议，前台按分段顺序逐个入队。资产每批12个、分镜每批6个，同画布一个writer；整批ACK不推进完成数，统一回读后逐节点验收并保存各自回执。历史冻结任务保持原协议，不因本规则自动拆分或重排。
 
-不把通用apply_mutations的dryRun当业务验收，不为批量化改用浅层generation补丁写提示词。已注册描述/提示词命令在本地隔离文档中保持官方业务入口，最终差异通过公开canvas apply提交；不自建MCP或私有HTTP写入路径。未知ACK保留allocated/pending/acknowledged/uncertain等操作状态，只有回读证明目标已生效才跳过；未证明的项不能当普通失败自动重试。
+通用apply_mutations的dryRun只用于其支持的预演，业务字段与引用仍通过官方SDK编译并逐项回读。新节点普通变更用1.0.57公开apply_mutations批量提交，已有节点及媒体引用使用对应原业务命令。未知ACK保留allocated/pending/acknowledged/uncertain等操作状态，只有回读证明目标已生效才跳过；未证明的项不能当普通失败自动重试。
 
 ## 输入校验的执行边界
 

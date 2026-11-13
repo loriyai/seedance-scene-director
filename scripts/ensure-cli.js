@@ -6,14 +6,16 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
+const REQUIRED_VERSION = "1.0.57";
+
 const REQUIRED_COMMANDS = [
   "status", "login",
 ];
 const REQUIRED_CANVAS_NATIVE_COMMANDS = [
-  "canvas get", "canvas allocate", "canvas apply", "canvas upload", "space list",
+  "canvas get", "canvas allocate", "canvas upload", "space list",
 ];
 const REQUIRED_CANVAS_COMMANDS = [
-  "get_snapshot", "get_permissions", "apply_mutations", "create_biz_node", "create_edge", "update_node_data", "update_asset", "delete_nodes", "delete_edges",
+  "get_snapshot", "get_permissions", "apply_mutations", "create_node", "create_biz_node", "create_edge", "update_node_data", "update_asset", "delete_nodes", "delete_edges",
   "xyq.generation.update_prompt", "xyq.role.updateDescription",
   "xyq.scene.updateDescription", "xyq.role.updateAppearance",
 ];
@@ -59,7 +61,7 @@ function ensureCLI({ canvas = false } = {}) {
     throw new Error(`不支持的平台：${process.platform}-${process.arch}`);
   }
   const cacheDir = path.join(os.homedir(), ".cache", "pippit-tool-cli", "xyq-skill", `${process.platform}-${process.arch}`);
-  const installedDir = path.join(cacheDir, "current");
+  const installedDir = path.join(cacheDir, REQUIRED_VERSION);
   const binaryRelative = path.join("node_modules", "@pippit-dev", "cli", "bin", `pippit-tool-cli${process.platform === "win32" ? ".exe" : ""}`);
   const cachedCLI = path.join(installedDir, binaryRelative);
   const env = { ...process.env };
@@ -82,8 +84,10 @@ function ensureCLI({ canvas = false } = {}) {
 
   function checkCLI(cliPath, expectedVersion) {
     const version = run(cliPath, ["--version"], "检查 CLI 版本", true).toString().trim();
-    if (expectedVersion && version !== expectedVersion) {
-      throw new Error(`CLI 版本 ${version} 与 npm 包版本 ${expectedVersion} 不一致。`);
+    if (version !== REQUIRED_VERSION || (expectedVersion && version !== expectedVersion)) {
+      const failure = new Error(`需要 CLI ${REQUIRED_VERSION}，当前为 ${version}。`);
+      failure.missingCommand = `version ${REQUIRED_VERSION}`;
+      throw failure;
     }
     const commands = REQUIRED_COMMANDS.map((command) => command.split(" "));
     if (canvas) {
@@ -110,6 +114,10 @@ function ensureCLI({ canvas = false } = {}) {
       const entry = path.resolve(path.dirname(fs.realpathSync(cliPath)), "../scripts/run.js");
       try {
         if (!fs.existsSync(entry)) throw new Error("缺少 npm 入口");
+        const packageFile = path.resolve(path.dirname(entry), "../package.json");
+        if (JSON.parse(fs.readFileSync(packageFile, "utf8")).version !== REQUIRED_VERSION) {
+          throw new Error("npm 运行时版本与二进制不一致");
+        }
         const catalog = JSON.parse(run(process.execPath, [entry, "canvas", "command", "list"], "检查 Canvas 运行时", true));
         if (!Array.isArray(catalog.commands) || !REQUIRED_CANVAS_COMMANDS.every(
           (name) => catalog.commands.some((command) => command.name === name),
@@ -143,7 +151,7 @@ function ensureCLI({ canvas = false } = {}) {
       return checkCLI(candidate);
     } catch (err) {
       if (!err.missingCommand) throw err;
-      console.error(`已有 CLI 的 ${err.missingCommand} 命令检查未通过；继续检查缓存，无可用缓存时自动安装最新版本。`);
+      console.error(`已有 CLI 的 ${err.missingCommand} 命令检查未通过；继续检查缓存，无可用缓存时安装固定版本 ${REQUIRED_VERSION}。`);
     }
   }
 
@@ -154,13 +162,13 @@ function ensureCLI({ canvas = false } = {}) {
     run(npm, [...npmArgs, "install", "--prefix", installDir,
       "--cache", path.join(installDir, ".npm-cache"), "--global=false", "--no-save",
       "--package-lock=false", "--ignore-scripts", "--prefer-online",
-      "--no-audit", "--no-fund", "@pippit-dev/cli@latest"], "下载最新 npm 包");
+      "--no-audit", "--no-fund", `@pippit-dev/cli@${REQUIRED_VERSION}`], "下载固定版本 npm 包");
     const packageDir = path.join(installDir, "node_modules", "@pippit-dev", "cli");
     const installer = path.join(packageDir, "scripts", "install-cli.js");
     if (!fs.existsSync(installer)) {
-      throw new Error("npm latest 尚未提供 scripts/install-cli.js，请先发布包含只安装 CLI 入口的版本。");
+      throw new Error("npm 包未提供 scripts/install-cli.js，请先发布包含只安装 CLI 入口的版本。");
     }
-    run(process.execPath, [installer], "下载并安装最新 CLI 二进制");
+    run(process.execPath, [installer], "下载并安装固定版本 CLI 二进制");
     const cliPath = path.join(packageDir, "bin", `pippit-tool-cli${process.platform === "win32" ? ".exe" : ""}`);
     const pkg = JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8"));
     const result = checkCLI(cliPath, pkg.version);
@@ -179,7 +187,7 @@ function ensureCLI({ canvas = false } = {}) {
 
 if (require.main === module) {
   if (process.argv.length === 3 && process.argv[2] === "--help") {
-    console.log("Usage: node ensure-cli.js [--canvas]\n优先复用 PATH 或缓存中命令齐全的 CLI，不存在或缺少必需命令时安装 npm latest，成功输出 {cli_path, version} JSON。--canvas 额外验证画布原生命令和 npm 运行时，并返回 canvas_entry。");
+    console.log("Usage: node ensure-cli.js [--canvas]\n优先复用 PATH 或缓存中命令齐全的 CLI，仅接受 1.0.57，不存在或不兼容时安装固定版本，成功输出 {cli_path, version} JSON。--canvas 额外验证画布原生命令和 npm 运行时，并返回 canvas_entry。");
   } else if (process.argv.length !== 2 && !(process.argv.length === 3 && process.argv[2] === "--canvas")) {
     console.error("不支持的参数。用法：node ensure-cli.js [--canvas]");
     process.exitCode = 1;

@@ -13,7 +13,7 @@ python <skill>/scripts/canvas.py bind --project <project> --target <画布链接
 python <skill>/scripts/canvas.py status --project <project>
 ```
 
-`setup`检测现有官方CLI及本Skill实际调用的命令，缺少时用包内`ensure-cli.js`安装到官方CLI缓存；不每次安装或升级。必要原生命令为status/login、canvas get/allocate/apply/upload及space list；canvas get必须支持--team-id。必要语义命令覆盖快照、权限、apply_mutations、节点创建/更新/删除（含update_asset）、引用连线的create_edge与精确删除引用边的delete_edges、提示词写入、角色/场景描述及角色主图更新。create_edge用于派生角色图片引用及历史黑幕引用；新none-v1视频仍不创建黑幕连线。角色updateAppearance须支持patch.generationPrompt与expected.generationPrompt，以及派生图片引用所需的patch.generation与expected.generation整体配置字段；不能只凭命令名存在认定支持。create_checkpoint只在权限支持时使用，保持可选；不探测本Skill不调用的模型列表/描述、生图、生视频、超分、擦字幕、积分、query-result、logout或canvas create。`auth --login`先检查status，已有登录不重复打开授权页。首次提示用户完成浏览器授权；CLI自行保存安全凭据。配置文件只保存CLI/Node路径、版本和公开账号标识，禁止保存密钥、完整status、认证环境变量或浏览器存储。CLI报401/403时先判断账号/权限；仅确认浏览器凭据过期或撤销后使用`auth --login --force`，不将force作为常规操作。
+`setup`只接受官方CLI及npm运行时版本1.0.57，核对两者版本和本Skill实际调用的命令；缺少时用包内`ensure-cli.js`安装固定的`@pippit-dev/cli@1.0.57`到版本专用缓存。必要原生命令为status/login、canvas get/allocate/upload及space list；canvas get必须支持--team-id。必要语义命令覆盖快照、权限、apply_mutations、节点创建/更新/删除（含update_asset）、引用连线的create_edge与精确删除引用边的delete_edges、提示词写入、角色/场景描述及角色主图更新。create_edge用于派生角色图片引用及历史黑幕引用；新none-v1视频仍不创建黑幕连线。角色updateAppearance须支持patch.generationPrompt与expected.generationPrompt，以及派生图片引用所需的patch.generation与expected.generation整体配置字段；不能只凭命令名存在认定支持。create_checkpoint只在权限支持时使用，保持可选；不探测本Skill不调用的模型列表/描述、生图、生视频、超分、擦字幕、积分、query-result、logout或canvas create。`auth --login`先检查status，已有登录不重复打开授权页。首次提示用户完成浏览器授权；CLI自行保存安全凭据。配置文件只保存CLI/Node路径、版本和公开账号标识，禁止保存密钥、完整status、认证环境变量或浏览器存储。CLI报401/403时先判断账号/权限；仅确认浏览器凭据过期或撤销后使用`auth --login --force`，不将force作为常规操作。
 
 链接按完整域名与路径共同解析，支持三种已核实的官方入口：`https://xyq.jianying.com/novel/detail/canvas?...`为个人空间候选；`https://xyq.jianying.com/project?...`与`https://www.xiaoyunque.com/project?...`均为团队空间入口，不能仅因域名含`xyq.jianying.com`就选择个人空间。严格校验域名、路径及唯一ID参数。收到完整链接时原样传给bind，由统一解析器保留projectId、canvasId及空间线索；不为绕过链接解析而抽出canvasId改走裸ID入口。入口分类用于选择候选空间，仍须只读核验画布身份与编辑权限后才保存绑定。overviewPippitAssetId须在选定空间后通过官方CLI解析实际canvas ID，不能把overview或project ID当成canvas ID。所有远端ID及TeamID保持字符串。
 
@@ -29,14 +29,14 @@ CLI的原生查询、分配、上传与语义查询、创建、编辑、删除�
 
 ## 资产与视频节点
 
-新建角色role、场景scene及道具image节点时，统一通过`create_biz_node.initialData.generation`设置图片默认参数：`resolution: "2K"`（清晰度2K）、`effort: "high"`（推理强度高）、`ratio: "16:9"`（比例16:9）。这三项属于节点图片配置，不写成提示词文字，也不套用到video节点。资产批量任务、直接assets入口及videos流程补建资产共用这套创建参数；创建后逐项回读，不以创建ACK代替参数验收。
+新建角色role、场景scene及道具image节点时，统一在本地通过`create_biz_node.initialData.generation`编译图片默认参数，再将官方SDK产出的节点和资产通过公开`create_node`批量提交：`resolution: "2K"`（清晰度2K）、`effort: "high"`（推理强度高）、`ratio: "16:9"`（比例16:9）。这三项属于节点图片配置，不写成提示词文字，也不套用到video节点。资产批量任务、直接assets入口及videos流程补建资产共用这套创建参数；创建后逐项回读，不以创建ACK代替参数验收。
 
 资产的完整`image_prompt`始终以`content.generation.prompt`为验收字段，与外观/资料描述独立。按节点类型使用以下契约：
 
 | 节点 | 写入入口 | 保留要求 |
 | --- | --- | --- |
 | 角色role | `xyq.role.updateAppearance`的`patch.generationPrompt`；`expected.generationPrompt`使用刚读到的原值 | 保留外观描述、主图及generation其他配置，不用普通图片/视频提示词接口写角色 |
-| 场景scene | 新建时使用`create_biz_node.initialData.generation.prompt`；已有节点由`update_asset`写入从最新快照完整合并的generation | 保留其他生成字段和包装层，不提交仅含prompt的浅层generation对象，不虚构scene.updateAppearance |
+| 场景scene | 新建时在本地以`create_biz_node.initialData.generation.prompt`编译，再通过公开`create_node`提交；已有节点由`update_asset`写入从最新快照完整合并的generation | 保留其他生成字段和包装层，不提交仅含prompt的浅层generation对象，不虚构scene.updateAppearance |
 | 道具image | `xyq.generation.update_prompt` | 保留当前生成配置与引用 |
 
 角色`updateDescription(field=appearance)`与场景`updateDescription(field=description)`只用于明确的描述编辑，不能代替生图提示词写入。三条资产入口——后台assets、直接assets、videos补建——共用canvas.py的资产初始化步骤与验收。创建后完成显示名/basicInfo.name、空形象/视角名和正确提示词回读；SDK工厂默认显示名不是最终名称。仅新建/未完成初始化节点检查上述默认图片参数，ready或采用节点的人工配置保持。所有操作仅配置节点，不触发生成。
@@ -141,15 +141,17 @@ python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind images 
 
 ## 本地编译与批量提交
 
-新资产、视频和引用任务冻结 `options.sync_protocol=sdk-local-batch-v1`。CLI适配归 `scripts/canvas.py` 与 `scripts/canvas_cli_batch.js`，分组执行、事务及回执归 `scripts/canvas_batch.py`，队列冻结和调度归 `canvas_jobs.py`、`canvas_job_backend.py`；资产初始化、派生图片引用计划及节点验收仍在 `canvas.py` 共用，不在项目中另建绕行脚本。
+新资产、视频和引用任务冻结 `options.sync_protocol=cli-command-batch-v2`，只适配小云雀CLI 1.0.57。旧任务保留原manifest、节点ID和回执；旧未决写入先只读核对，不能重发历史`canvas apply`请求。CLI适配归`scripts/canvas.py`，只读传输归`scripts/canvas_transport.py`，本地编译归`scripts/canvas_cli_batch.js`，同会话写前核验归`scripts/canvas_public_command.js`，分组执行与回执归`scripts/canvas_batch.py`，队列归`canvas_jobs.py`和`canvas_job_backend.py`。
 
-先盘点并解决资产身份与冲突；视频准备自动补建的上限为10个，按整次盘点统计，超过10个不补建、不写视频。新旧任务分别按冻结协议处理，未记录批量协议的历史任务保留原3个上限及串行恢复方式，不改旧manifest、ID或回执。
+按依赖顺序预申请真实ID并持久保存。资产默认每批12个，分镜默认每批6个，均为本地分组选择。公开普通mutations没有公布固定节点上限；64 MiB是CLI JSON输入上限，5000是一次预留ID上限。同步不触发生图或生视频。
 
-按依赖顺序预申请真实节点ID并持久保存，默认每批10个节点。这是本地分组参数，不是官方上限或实测最优值。通过已安装官方SDK的隔离文档执行业务工厂、各类型字段写入和引用解析；不启动网络同步、不改SDK源码，不自己仿造引用条目。基础资产与派生资产在同组时先在本地完成所有基础节点，再编译派生引用。官方注册命令在本地仍逐项执行完整业务校验，仅将最终SDK文档差异合并为一个事务；不把多个注册命令直接塞进远端apply_mutations，也不把其dryRun当完整业务预演。
+使用固定版本官方SDK在本地隔离文档中运行工厂、字段设置和引用解析，保留原命令与最终预期。新节点先由官方`create_biz_node`与领域命令编译完整node/assets，再通过公开`create_node`携带预分配ID及官方产物，与编译出的引用边一起由`canvas command run apply_mutations`提交普通原子批次。这样同时保留根节点显示名和资产内容。每条业务`invoke_command`独立调用。已有节点从新鲜快照合并配置并执行原业务命令，涉及媒体选材和派生引用时继续采用官方引用语义。禁止将旧基线patch直接套在另一次新快照上，也不以当前进程revision替代服务器资产版本。
 
-每批统一读取官方快照与资产版本，核对目标和引用源未变化。视频本地一次准备名称、毫秒时长、适用比例、完整提示词、实际选材及连线，已有generation从最新内容合并。通过公开 `canvas apply` 提交一个transaction内的多条patch，使用真实资产版本；不用隐藏传输参数、不绕过ACK校验、不发送HTTP私有请求。事务发送前保存 `canvas/batches/` 请求及摘要、原节点ID和逐节点预期字段，整批ACK仅表示事务已确认。
+写入前保存原ID、每步请求和预期字段；在官方命令实际使用的同一store内核验，再传本会话expectedRevision给官方执行器，后续持久化版本冲突交由SDK处理。源节点的布局变化不算业务冲突，素材身份与内容继续严格核验。成功回执及时落盘，SDK revision不作为服务器资产版本。回读采用原生`canvas get`的重复`--asset-id`参数，读取根图、本批目标及必要引用源；根图和资产原始内容、字段存在性与版本都参与核验。启动盘点可全读，单批验收定向读取。只读查询不启用SDK布局修复或写入传输。
 
-写后统一回读本批，逐节点核验名称、类型、提示词、参数、完整引用条目及reference连线，每个节点仍保存独立回执。节点没有图片时仍建立真实节点引用及连线，只记录missing_image；不阻塞同步、不要求补图、不把节点ID当成云媒体ID，也不宣称图片输入已就绪。有媒体时保留官方图片/声音选材。批次未知确认或最终回读失败立即停止，沿原请求和ID只读核对，不重放整批、不重新分配ID；暂停前确定未发送的事务记cancelled，已发送但未知的仍保留pending/uncertain。只有实际字段与引用全通过才推进完成计数。安装升级不自动切换正在运行的旧worker。
+响应解析兼容SDK在最终JSON前输出的诊断行，仍检查进程退出码和结果的`ok`。EOF、连接重置、超时及暂缺资产按只读总预算退避；明确认证、权限或输入错误直接报告。缺资产、必要字段未返回或版本证据不足进入待核验，可选空字段只按明确契约归一化；足够完整的实际字段差异保留冲突。提示词、时长、非空媒体ID与必要引用边继续逐项核验。
+
+写后读取失败保留已确认写入和原节点，恢复先只读核对，通过后推进完成数。提交结果未知同样沿原ID核对，不能自动重放。节点没有图片时建立节点引用并记录missing_image；已有主图或音色时核验对应媒体条目。历史receipt保持可读，暂停任务只按当前明确续接请求恢复。
 
 ## 节点引用与黑幕
 

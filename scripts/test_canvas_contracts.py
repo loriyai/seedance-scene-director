@@ -144,12 +144,13 @@ class CanvasContractChecks(unittest.TestCase):
         cli.config = {k: __file__ for k in ('node_path', 'cli_path', 'canvas_entry')}
         cli.config['canvas_contract'] = c.ASSET_CONTRACT
         calls = []
-        with patch.object(c, 'run_json', side_effect=lambda args, *a, **kw: calls.append(args) or {'ok': True, 'data': {}}):
+        with patch.object(cli, 'ready'), patch.object(c, 'run_json', side_effect=lambda args, *a, **kw: calls.append(args) or {'ok': True, 'data': {}}):
             cli.native('canvas', 'get', '--asset-id', 'ROOT')
-            cli.command('ROOT', 'get_snapshot')
+            cli.command('ROOT', 'update_node_data', {'id': 'X', 'patch': {'name': 'Y'}})
         for args in calls:
             self.assertEqual(args[args.index('--team-id') + 1], '12')
-        with self.assertRaises(ValueError): cli.command('OTHER', 'delete_nodes', {'ids': ['X']})
+        with patch.object(cli, 'ready'), self.assertRaises(ValueError):
+            cli.command('OTHER', 'delete_nodes', {'ids': ['X']})
 
     def test_legacy_binding_does_not_silently_adopt_default(self):
         with self.assertRaises(c.CanvasError) as error:

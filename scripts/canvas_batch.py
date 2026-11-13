@@ -11,7 +11,9 @@ import uuid
 import canvas as c
 import director as d
 
-DEFAULT_BATCH_SIZE = 10
+DEFAULT_BATCH_SIZE = 12
+VIDEO_BATCH_SIZE = 6
+ORDINARY_COMMANDS = {"create_biz_node", "create_node", "update_node_data", "update_asset", "create_edge", "delete_edges"}
 
 
 def command(name, value):
@@ -24,9 +26,9 @@ def reference_edges(doc, node_id):
 
 
 def exact_targets(doc, node_id):
-    return [{"action": "generation_settings", "node_id": node_id,
+    return [{"action": "semantic_generation_settings", "node_id": node_id,
              "value": copy.deepcopy(c.content(doc, node_id).get("generation") or {})},
-            {"action": "reference_graph", "node_id": node_id, "value": reference_edges(doc, node_id)}]
+            {"action": "semantic_reference_graph", "node_id": node_id, "value": reference_edges(doc, node_id)}]
 
 
 def boundary(cli):
@@ -47,9 +49,15 @@ def snapshot(cli, state, previous, items, sources=(), asset_reference_policy=Non
                 if not c.target_satisfied(fresh, identity):
                     c.fail('CONCURRENT_EDIT', '引用资产原节点已消失或类型改变，不能按名称替代。', node_id=node_id)
                 continue
-        if node_id and (node_id not in c.nodes(fresh) or node_id not in c.nodes(previous)
-                        or c.fingerprint(fresh, node_id) != c.fingerprint(previous, node_id)):
-            c.fail("CONCURRENT_EDIT", "批次中的目标或引用资产已变化，停止写入。", node_id=node_id)
+        if node_id and (node_id not in c.nodes(fresh) or node_id not in c.nodes(previous) or node_id not in fresh['assets']):
+            c.fail('READBACK_PENDING', '批次中的目标或引用节点尚未完整返回。', node_id=node_id)
+        if node_id and node_id in previous['assets']:
+            source_only = node_id not in targets
+            observation = c.compare_expected(c.semantic_projection(fresh, node_id, source_only),
+                                             c.semantic_projection(previous, node_id, source_only))
+            if observation != 'matched':
+                c.fail('READBACK_PENDING' if observation == 'unknown' else 'CONCURRENT_EDIT',
+                       '批次中的目标或引用资产需重新核验。', node_id=node_id)
     for item in items:
         if not item.get("node_id") and any(c.kind_of(n) == item["kind"] and c.name_of(fresh, nid) == item["name"]
                                            for nid, n in c.nodes(fresh).items()):
@@ -71,6 +79,60 @@ def reserve(project, cli, state, items):
     return ids
 
 
+def semantic_steps(baseline, compiled):
+    """Use public commands; SDK patches are only an offline change detector."""
+    before, after = baseline["document"], compiled["document"]
+    created = set(c.nodes(after)) - set(c.nodes(before))
+    changed = {p["assetId"] for p in compiled["patches"]} - {before["rootCanvasId"]}
+    if created and changed <= created:
+        # The official factories and domain commands have already constructed
+        # these new nodes. create_node accepts that official node/asset shape,
+        # preserving business display names as well as the asset content.
+        mutations = [{"kind": "create_node", "node": copy.deepcopy(c.nodes(after)[nid]),
+                      "assets": [copy.deepcopy(after["assets"][nid])], "autoCreateNodeAsset": False}
+                     for nid in c.nodes(after) if nid in created]
+        old_edges = before["assets"][before["rootCanvasId"]]["content"].get("edges", {})
+        new_edges = after["assets"][after["rootCanvasId"]]["content"].get("edges", {})
+        d.require(all(new_edges.get(key) == edge for key, edge in old_edges.items()),
+                  "新建批次不得修改已有引用边")
+        mutations.extend({"kind": "create_edge", "edge": copy.deepcopy(edge)}
+                         for key, edge in new_edges.items() if key not in old_edges)
+        return [command("apply_mutations", {"atomic": True, "intent": "Seedance 创建已编译的新节点及引用", "mutations": mutations})]
+    steps, ordinary = [], []
+    for cmd in compiled["commands"]:
+        if cmd["name"] in ORDINARY_COMMANDS:
+            ordinary.append({"kind": cmd["name"], **copy.deepcopy(cmd["input"])})
+            continue
+        if ordinary:
+            steps.append(command("apply_mutations", {"atomic": True, "intent": "Seedance 节点字段更新", "mutations": ordinary}))
+            ordinary = []
+        steps.append(copy.deepcopy(cmd))
+    if ordinary:
+        steps.append(command("apply_mutations", {"atomic": True, "intent": "Seedance 节点字段更新", "mutations": ordinary}))
+    return steps
+
+
+def step_commands(step):
+    if step["name"] == "apply_mutations":
+        return [command(value["kind"], {key: val for key, val in value.items() if key != "kind"})
+                for value in step["input"]["mutations"]]
+    return [step]
+
+
+def intermediate_targets(before, after):
+    targets = []
+    for node_id in c.nodes(after):
+        if c.fingerprint(before, node_id) == c.fingerprint(after, node_id):
+            continue
+        old, new = c.content(before, node_id), c.content(after, node_id)
+        targets.append({"action": "node_kind", "node_id": node_id, "kind": c.kind_of(c.nodes(after)[node_id])})
+        targets.extend(exact_targets(after, node_id))
+        fields = {key: copy.deepcopy(value) for key, value in new.items() if key != "generation" and old.get(key) != value}
+        if fields:
+            targets.append({"action": "patch", "node_id": node_id, "patch": fields})
+    return targets
+
+
 def submit(project, cli, state, baseline, compiled, targets, receipts=(), asset_reference_policy=None):
     """Save the complete request before sending. Never replay an ambiguous batch."""
     patches = compiled["patches"]
@@ -90,6 +152,11 @@ def submit(project, cli, state, baseline, compiled, targets, receipts=(), asset_
     from canvas_asset_reference_policy import source_target
     for sid in sources - touched:
         target = source_target(policy, compiled['document'], sid)
+        if target['action'] == 'asset_snapshot':
+            target = {'action': 'semantic_asset_snapshot', 'node_id': sid,
+                      'value': c.source_fingerprint(compiled['document'], sid),
+                      'projection': 'source-business-v1',
+                      'expected': c.semantic_projection(compiled['document'], sid, source_only=True)}
         if target['action'] == 'bound_asset_identity':
             target['consumers'] = sorted(nid for nid in touched if sid in c.node_asset_ids(c.prompt_of(compiled['document'], nid))
                 or any(e['source'] == sid for e in reference_edges(compiled['document'], nid)))
@@ -97,24 +164,53 @@ def submit(project, cli, state, baseline, compiled, targets, receipts=(), asset_
     if not patches:
         return None
     c.check_control(cli)
-    doc, versions = baseline["document"], baseline["asset_versions"]
+    doc = baseline["document"]
+    steps = semantic_steps(baseline, compiled)
+    current = doc
+    entry = None
+    source_only_ids = {target['node_id'] for target in targets
+                       if target['action'] in {'semantic_asset_snapshot', 'bound_asset_identity'}} - touched
+    for index, step in enumerate(steps):
+        final = index == len(steps) - 1
+        # The public runtime checks these saved expectations immediately before
+        # dispatch, in the same session that performs the operation.
+        expected = compiled["document"] if final else cli.compile_batch(current, step_commands(step))["document"]
+        checks = targets if final else intermediate_targets(current, expected)
+        if not final:
+            checks.extend(copy.deepcopy(target) for target in targets
+                          if target['action'] in {'semantic_asset_snapshot', 'bound_asset_identity'})
+            checked_ids = {target['node_id'] for target in checks}
+            checks.extend({'action': 'node_kind', 'node_id': node_id, 'kind': c.kind_of(c.nodes(expected)[node_id])}
+                          for node_id in {target['node_id'] for target in targets} - checked_ids
+                          if node_id in c.nodes(expected))
+        expected_nodes = [{'node_id': node_id, 'node': copy.deepcopy(c.nodes(current).get(node_id)),
+                           'asset': copy.deepcopy(current['assets'].get(node_id)), 'source_only': node_id in source_only_ids}
+                          for node_id in sorted({target['node_id'] for target in targets})]
+        current_edges = current['assets'][current['rootCanvasId']]['content'].get('edges', {})
+        consumers = {target['node_id'] for target in targets
+                     if target['action'] not in {'semantic_asset_snapshot', 'bound_asset_identity'}}
+        guarded_edges = {edge_id for edge_id, edge in current_edges.items() if edge.get('target') in consumers}
+        if step['name'] == 'apply_mutations':
+            guarded_edges.update(mutation['edge']['id'] for mutation in step['input']['mutations']
+                                 if mutation['kind'] == 'create_edge')
+        expected_edges = [{'edge_id': edge_id, 'value': copy.deepcopy(current_edges.get(edge_id))}
+                          for edge_id in sorted(guarded_edges)]
+        entry = submit_step(project, cli, state, step, checks, receipts, compiled["runtime_sha256"], expected_nodes, expected_edges)
+        if not final:
+            current = readback(project, cli, state, entry, checks)
+    return entry
+
+
+def submit_step(project, cli, state, step, targets, receipts, runtime_sha256, expected_nodes, expected_edges):
     operation = uuid.uuid4().hex
-    converted = []
-    for patch in patches:
-        asset_id = patch["assetId"]
-        version = versions.get(asset_id) if asset_id in doc["assets"] else 0
-        d.require(type(version) is int and version >= 0, "目标资产缺少可核验版本，不能提交批次：" + asset_id)
-        converted.append({"asset_id": asset_id, "base_asset_version": version, "op": patch["op"],
-                          "path": patch["path"], **({"value": patch["value"]} if patch["op"] != "remove" else {})})
-    request = {"batch_id": "seedance-" + operation, "client_id": "seedance-batch-" + operation,
-               "root_pippit_asset_id": doc["rootCanvasId"],
-               "transactions": [{"transaction_id": operation, "patches": converted}]}
+    request = {**step, 'expected_nodes': expected_nodes, 'expected_edges': expected_edges}
     d.require(len(d.packed(request).encode("utf-8")) <= 64 * 1024 * 1024, "批量事务超过CLI输入限制，尚未发送")
     path = Path(project) / "canvas" / "batches" / (operation + ".json")
-    d.write_json(path, {"protocol": c.BATCH_PROTOCOL, "request": request, "runtime_sha256": compiled["runtime_sha256"]})
+    d.write_json(path, {"protocol": c.BATCH_PROTOCOL, "request": request, "runtime_sha256": runtime_sha256})
     entry = {"id": operation, "command": "canvas_batch", "protocol": c.BATCH_PROTOCOL,
              "input": {"request_path": str(path), "request_sha256": c.digest(request)},
              "targets": copy.deepcopy(targets), "status": "pending"}
+    previous_mappings = c.read_state(project)['mappings']
     for receipt in receipts:
         receipt["steps"].append(operation)
         receipt["batch_operation_id"] = operation
@@ -122,7 +218,10 @@ def submit(project, cli, state, baseline, compiled, targets, receipts=(), asset_
     state["journal"].append(entry)
     c.save(project, state)
     try:
-        cli.apply_batch(request)
+        if hasattr(cli, 'command_guarded'):
+            result = cli.command_guarded(state["binding"]["canvas_id"], step["name"], step["input"], expected_nodes, expected_edges)
+        else:
+            result = cli.command(state["binding"]["canvas_id"], step["name"], step["input"])
     except BaseException as exc:
         # Queue control exceptions are raised before transport. Unlike timeouts,
         # these are known not-sent requests and must not poison future resume.
@@ -131,38 +230,78 @@ def submit(project, cli, state, baseline, compiled, targets, receipts=(), asset_
             entry.update(status="cancelled", resolution="control_before_send")
             for mapping in state["mappings"].values():
                 if mapping.get("node_id") in {t["node_id"] for t in targets}:
-                    mapping["stage"] = "ready" if mapping["node_id"] in c.nodes(doc) else "allocated"
+                    mapping["stage"] = "allocated" if step["name"] == "apply_mutations" and any(
+                        m.get("node", {}).get("id") == mapping["node_id"] for m in step["input"]["mutations"]) else "writing"
             c.save(project, state)
             raise
         if not isinstance(exc, (ValueError, OSError, KeyError, TypeError)):
             # A killed process/unknown failure leaves the durable pending entry.
             raise
-        entry.update(status="rejected" if getattr(exc, "code", None) == "COMMAND_REJECTED" else "uncertain",
-                     error=c.safe_message(exc))
+        if getattr(exc, 'details', {}).get('not_sent') is True:
+            entry.update(status='rejected', error=c.safe_message(exc), not_sent=True)
+            for key, mapping in state['mappings'].items():
+                if mapping.get('node_id') in {target['node_id'] for target in targets} and key in previous_mappings:
+                    state['mappings'][key] = previous_mappings[key]
+            for receipt in receipts:
+                receipt.update(status='rejected', error=c.safe_message(exc))
+                d.write_json(receipt['path'], receipt)
+            c.save(project, state)
+            raise
+        entry.update(status="uncertain", error=c.safe_message(exc))
         c.save(project, state)
-        c.fail("COMMAND_REJECTED" if entry["status"] == "rejected" else "UNCERTAIN_WRITE",
-               "批量事务未得到确定成功确认；保留原ID和事务，不重放。" + c.safe_message(exc), operation=operation)
+        # The public command may have saved before its reply was lost. Resolve
+        # the original IDs by reads only; never issue the command twice here.
+        try:
+            readback(project, cli, state, entry, targets)
+            return entry
+        except (ValueError, OSError, KeyError, TypeError):
+            c.fail("UNCERTAIN_WRITE", "批量命令结果仍待核对；保留原ID与请求。" + c.safe_message(exc), operation=operation)
     entry["status"] = "acknowledged"
+    entry["ack"] = {"command": step["name"], "result_sha256": c.digest(result)}
+    acknowledgement = getattr(cli, 'last_command_result', {})
+    if acknowledgement.get('ok') is True:
+        entry['ack']['ok'] = True
+    if type(acknowledgement.get('revision')) is int:
+        # This is the SDK store revision, not a server asset-version fence.
+        entry['ack']['sdk_revision'] = acknowledgement['revision']
     c.save(project, state)
     return entry
 
 
 def readback(project, cli, state, entry, targets):
+    observations = []
+    node_ids = sorted({t["node_id"] for t in targets})
     for attempt in range(c.VIDEO_READBACK_ATTEMPTS):
         boundary(cli)
-        doc = cli.batch_snapshot(state["binding"])["document"]
-        if all(c.target_satisfied(doc, t) for t in targets):
+        try:
+            doc = cli.batch_snapshot(state["binding"], node_ids=node_ids)["document"]
+        except c.CanvasError as exc:
+            if exc.code not in {"CLI_TIMEOUT", "CLI_ERROR", "READBACK_INCOMPLETE", "READBACK_PENDING", "NETWORK_ERROR"}:
+                raise
+            if entry:
+                entry["readback_error"] = c.safe_message(exc)
+                c.save(project, state)
+            if exc.code == 'READBACK_PENDING':
+                # The native read layer has already consumed its retry budget.
+                raise
+            if attempt + 1 == c.VIDEO_READBACK_ATTEMPTS:
+                c.fail("READBACK_PENDING", "写入后的只读查询暂不可用；已保存原ID与提交状态。")
+            time.sleep(c.VIDEO_READBACK_DELAY * (2 ** attempt))
+            continue
+        observations = [c.target_state(doc, t) for t in targets]
+        if all(value == "matched" for value in observations):
             if entry:
                 entry.update(status="verified", after={t["node_id"]: c.fingerprint(doc, t["node_id"]) for t in targets})
                 c.save(project, state)
             return doc
         if attempt + 1 < c.VIDEO_READBACK_ATTEMPTS:
             c.check_control(cli)
-            time.sleep(c.VIDEO_READBACK_DELAY)
+            time.sleep(c.VIDEO_READBACK_DELAY * (2 ** attempt))
     if entry:
-        entry.update(status="uncertain", error="批次最终字段或引用回读不一致")
+        entry.update(readback_status="pending" if "unknown" in observations else "conflict",
+                     error="批次字段或引用仍待核验" if "unknown" in observations else "批次字段或引用回读差异")
         c.save(project, state)
-    c.fail("READBACK_FAILED", "批次最终字段或引用未全部通过核验；保留原事务和节点，停止续写。",
+    c.fail("READBACK_PENDING" if "unknown" in observations else "READBACK_FAILED", "批次最终字段或引用未全部通过核验；保留原事务和节点，停止续写。",
            operation=entry["id"] if entry else "")
 
 
@@ -286,13 +425,35 @@ def prepare_assets(project, cli, session, state, doc, plan, summary):
     return doc, summary
 
 
-def sync_videos(project, cli, state, doc, plan, pending, context, references_only=False, batch_size=DEFAULT_BATCH_SIZE, asset_reference_policy=None):
+def video_matches(doc, item, references_only=False):
+    node_id = item.get("node_id")
+    if not node_id or node_id not in doc["assets"] or node_id not in c.nodes(doc):
+        return False
+    checks = [{"action": "node_kind", "node_id": node_id, "kind": "video"},
+              {"action": "prompt", "node_id": node_id, "value": item["prompt"]}]
+    if not references_only:
+        checks.extend([{"action": "patch", "node_id": node_id,
+                        "patch": {field: item["name"] for field in ("name", "title", "caption")}},
+                       {"action": "generation_settings", "node_id": node_id, "value": item.get("settings", {})}])
+    return all(c.target_satisfied(doc, target) for target in checks) and c.video_references_satisfied(doc, node_id, item)
+
+
+def sync_videos(project, cli, state, doc, plan, pending, context, references_only=False, batch_size=VIDEO_BATCH_SIZE, asset_reference_policy=None):
     policy_args = {'asset_reference_policy': asset_reference_policy} if asset_reference_policy is not None else {}
     if asset_reference_policy is not None:
         context['asset_reference_policy'] = asset_reference_policy
     positions = c.layout_positions(doc, plan)
     created = updated = reused = 0
     verified = set()
+    remaining = []
+    for item in plan:
+        if video_matches(doc, item, references_only):
+            if c.accept_synced_item(project, state, doc, item, pending, context, references_only):
+                verified.add(item["key"])
+                reused += 1
+                continue
+        remaining.append(item)
+    plan = remaining
     for offset in range(0, len(plan), batch_size):
         group = plan[offset:offset + batch_size]
         sources = {sid for i in group for sid in c.node_asset_ids(i["prompt"])}
@@ -353,7 +514,7 @@ def sync_videos(project, cli, state, doc, plan, pending, context, references_onl
             actual = readback(project, cli, state, entry, targets)
         except (ValueError, OSError, KeyError, TypeError) as exc:
             for receipt in receipts:
-                receipt.update(status="uncertain", error=c.safe_message(exc))
+                receipt.update(status="pending_verification" if entry and entry["status"] in ("acknowledged", "verified") else "uncertain", error=c.safe_message(exc))
                 d.write_json(receipt["path"], receipt)
             raise
         for item, receipt in zip(group, receipts):

@@ -78,7 +78,7 @@ class BatchCLI(AssetJobCLI):
             c.fail("LOCAL_COMPILE_FAILED", value.get("message", result.stderr))
         return value["data"]
 
-    def batch_snapshot(self, binding):
+    def batch_snapshot(self, binding, node_ids=None):
         self.control()
         self.batch_reads += 1
         doc = copy.deepcopy(self.doc)
@@ -87,12 +87,17 @@ class BatchCLI(AssetJobCLI):
             root["edges"] = {}
         return {"document": doc, "asset_versions": {key: 1 for key in doc["assets"]}}
 
-    def apply_batch(self, request):
+    def command(self, canvas_id, name, value=None):
+        if name in {'get_snapshot', 'get_permissions'}:
+            return super().command(canvas_id, name, value)
         self.control()
-        self.batch_writes.append(copy.deepcopy(request))
+        self.batch_writes.append({"name": name, "input": copy.deepcopy(value)})
         if self.reject_batch:
             c.fail("COMMAND_REJECTED", "rejected before applying")
-        for patch_value in request["transactions"][0]["patches"]:
+        commands = batch.step_commands(batch.command(name, value))
+        compiled = self.compile_batch(self.doc, commands)
+        for patch_value in compiled['patches']:
+            patch_value = {**patch_value, 'asset_id': patch_value['assetId']}
             apply_patch(self.doc, patch_value)
         if self.lose_ack:
             c.fail("CLI_TIMEOUT", "server applied the batch but ACK was lost")
@@ -178,12 +183,10 @@ class BatchBehavior(unittest.TestCase):
     def test_lost_ack_does_not_reallocate_or_replay_and_recovers_same_ids(self):
         self.assets()
         self.cli.lose_ack = True
-        with self.assertRaises(c.CanvasError) as failure:
-            self.videos(self.video_items())
-        self.assertEqual(failure.exception.code, "UNCERTAIN_WRITE")
+        self.videos(self.video_items())
         state = c.read_state(self.project)
         ids = {k: v["node_id"] for k, v in state["mappings"].items()}
-        self.assertEqual(state["journal"][-1]["status"], "uncertain")
+        self.assertEqual(state["journal"][-1]["status"], "verified")
         writes = len(self.cli.batch_writes)
         c.reconcile(self.project, self.cli, state, self.cli.doc)
         self.assertEqual(state["journal"][-1]["status"], "verified")
@@ -229,8 +232,8 @@ class BatchBehavior(unittest.TestCase):
         writes, reads = len(self.cli.batch_writes), self.cli.batch_reads
         (_, _, verified), _ = self.videos(self.video_items(21))
         self.assertEqual(len(verified), 21)
-        self.assertEqual(len(self.cli.batch_writes) - writes, 3)
-        self.assertEqual(self.cli.batch_reads - reads, 6)
+        self.assertEqual(len(self.cli.batch_writes) - writes, 4)
+        self.assertEqual(self.cli.batch_reads - reads, 8)
 
     def test_existing_video_preserves_model_resolution_ratio_and_extra_config(self):
         self.assets()
@@ -248,11 +251,93 @@ class BatchBehavior(unittest.TestCase):
                          {"modelKey": "user-model", "resolution": "4K", "ratio": "9:16", "seed": 42})
         self.assertEqual(actual["durationMs"], 12000)
 
+    def test_ack_read_eof_retries_only_reads(self):
+        self.assets()
+        original = self.cli.batch_snapshot
+        writes = len(self.cli.batch_writes)
+        failures = []
+
+        def snapshot(binding, node_ids=None):
+            if node_ids and len(self.cli.batch_writes) > writes and not failures:
+                failures.append(True)
+                c.fail('CLI_TIMEOUT', 'query transport timed out')
+            return original(binding, node_ids)
+
+        with patch.object(self.cli, 'batch_snapshot', side_effect=snapshot), patch.object(c, 'VIDEO_READBACK_DELAY', 0):
+            (_, _, verified), _ = self.videos(self.video_items(2))
+        self.assertEqual(len(verified), 2)
+        self.assertEqual(len(self.cli.batch_writes) - writes, 1)
+        self.assertEqual(len(failures), 1)
+
+    def test_omitted_empty_references_pass_exact_batch_acceptance(self):
+        self.assets()
+        original = self.cli.batch_snapshot
+
+        def snapshot(binding, node_ids=None):
+            value = original(binding, node_ids)
+            for node_id in c.nodes(value['document']):
+                generation = c.content(value['document'], node_id).get('generation', {})
+                if generation.get('references') == []:
+                    del generation['references']
+            return value
+
+        with patch.object(self.cli, 'batch_snapshot', side_effect=snapshot):
+            (_, _, verified), _ = self.videos(self.video_items(2))
+        self.assertEqual(len(verified), 2)
+
+    def test_verified_current_snapshot_skips_new_writes(self):
+        self.assets()
+        self.videos(self.video_items(2))
+        state = c.read_state(self.project)
+        items = self.video_items(2)
+        for item in items:
+            item['node_id'] = state['mappings'][item['key']]['node_id']
+        writes, reads = len(self.cli.batch_writes), self.cli.batch_reads
+        (_, _, verified), _ = self.videos(items)
+        self.assertEqual(len(verified), 2)
+        self.assertEqual(len(self.cli.batch_writes), writes)
+        self.assertEqual(self.cli.batch_reads, reads)
+
+    def test_existing_video_new_reference_accepts_sdk_edge_identity(self):
+        self.assets()
+        self.videos(self.video_items(1))
+        state = c.read_state(self.project)
+        item = self.video_items(1)[0]
+        item['node_id'] = state['mappings'][item['key']]['node_id']
+        scene = state['mappings']['SET0001']['node_id']
+        item['prompt'] += f' <node-asset>{scene}</node-asset>'
+        item['reference_keys'].append('SET0001')
+        (_, _, verified), _ = self.videos([item])
+        self.assertEqual(verified, {'UNIT1'})
+        self.assertEqual({edge['source'] for edge in batch.reference_edges(self.cli.doc, item['node_id'])},
+                         {state['mappings']['CHAR0001']['node_id'], scene})
+
+    def test_same_session_guard_rejection_preserves_allocated_ids(self):
+        self.assets()
+        writes = len(self.cli.batch_writes)
+
+        def rejected(canvas_id, name, value, expected_nodes, expected_edges):
+            self.assertEqual(name, 'apply_mutations')
+            self.assertEqual(sum(row['node'] is None for row in expected_nodes), 2)
+            self.assertTrue(expected_edges)
+            c.fail('CONCURRENT_EDIT', 'guard rejected before execution', not_sent=True)
+
+        with patch.object(self.cli, 'command_guarded', side_effect=rejected, create=True):
+            with self.assertRaises(c.CanvasError) as failure:
+                self.videos(self.video_items(2))
+        self.assertEqual(failure.exception.code, 'CONCURRENT_EDIT')
+        state = c.read_state(self.project)
+        self.assertEqual(state['journal'][-1]['status'], 'rejected')
+        self.assertTrue(state['journal'][-1]['not_sent'])
+        self.assertEqual(len(self.cli.batch_writes), writes)
+        self.assertEqual([value['stage'] for key, value in state['mappings'].items() if key.startswith('UNIT')],
+                         ['allocated', 'allocated'])
+
     def test_pause_before_send_is_known_cancelled_and_reuses_reserved_ids(self):
         from canvas_jobs import PauseRequested
         self.assets()
         writes = len(self.cli.batch_writes)
-        with patch.object(self.cli, "apply_batch", side_effect=PauseRequested()):
+        with patch.object(self.cli, "command", side_effect=PauseRequested()):
             with self.assertRaises(PauseRequested):
                 self.videos(self.video_items())
         state = c.read_state(self.project)
@@ -277,7 +362,7 @@ class BatchBehavior(unittest.TestCase):
                              context=context, session_override=self.session)
         self.assertEqual(result["status"], "synced")
         self.assertEqual(result["sync_protocol"], c.BATCH_PROTOCOL)
-        self.assertEqual(len(self.cli.batch_writes) - writes, 1)
+        self.assertEqual(sum(row['name'] == 'apply_mutations' for row in self.cli.batch_writes[writes:]), 1)
 
     def test_new_missing_asset_limit_is_ten_legacy_remains_three(self):
         self.session["ledger"]["scene_assets"] = []
