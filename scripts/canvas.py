@@ -84,8 +84,11 @@ def run_json(argv, cwd, timeout=120):
     if isinstance(value, dict) and value.get("ok") is False:
         message = str(value.get('message') or value.get('error') or d.packed(value))
         code = transport.error_code(message)
-        if value.get('code') in {'CONCURRENT_EDIT', 'READBACK_PENDING'} and value.get('not_sent') is True:
-            fail(value['code'], safe_message(message), not_sent=True)
+        if value.get('code') in {'CONCURRENT_EDIT', 'READBACK_PENDING'}:
+            details = {'not_sent': value.get('not_sent') is True}
+            if isinstance(value.get('recovery_path'), str):
+                details['recovery_path'] = value['recovery_path']
+            fail(value['code'], safe_message(message), **details)
         fail('COMMAND_REJECTED' if code == 'CLI_ERROR' else code, safe_message(message), rejection=rejection_details(value))
     if result.returncode:
         message = result.stderr or d.packed(value)
@@ -186,7 +189,7 @@ class CLI:
         self.last_command_result = result
         return result.get("data", {})
 
-    def command_guarded(self, canvas_id, name, value, expected_nodes, expected_edges=None):
+    def command_guarded(self, canvas_id, name, value, expected_nodes, expected_edges=None, expected_edge_targets=None, operation_id=None):
         from project_paths import assert_writable
         assert_writable(self.project, cloud=True)
         self.ready()
@@ -196,7 +199,8 @@ class CLI:
         request = {'canvas_entry': self.config['canvas_entry'], 'cli_path': self.config['cli_path'],
                    'canvas_id': canvas_id, 'team_id': normalize_team_id(binding['team_id']),
                    'project': str(self.project), 'name': name, 'input': value,
-                   'expected_nodes': expected_nodes, 'expected_edges': expected_edges or []}
+                   'expected_nodes': expected_nodes, 'expected_edges': expected_edges or [],
+                   'expected_edge_targets': expected_edge_targets or [], 'operation_id': operation_id}
         with tempfile.TemporaryDirectory(prefix='guarded-', dir=self.directory) as temporary:
             path = Path(temporary) / 'input.json'
             d.write_json(path, request)
@@ -414,8 +418,23 @@ def fingerprint(doc, node_id):
     return digest({"node": nodes(doc).get(node_id), "asset": doc["assets"].get(node_id)})
 
 
-def semantic_projection(doc, node_id, source_only=False):
+def identity_projection(doc, node_id):
+    """A reference source is its existing canvas node/asset identity, not its label or media."""
+    node = nodes(doc).get(node_id)
+    asset = doc.get('assets', {}).get(node_id)
+    return {'node_id': node_id,
+            'node': {key: node[key] for key in ('type',) if key in node} if isinstance(node, dict) else node,
+            'asset': {key: asset[key] for key in ('type', 'pippitAssetId') if key in asset} if isinstance(asset, dict) else asset}
+
+
+def identity_fingerprint(doc, node_id):
+    return digest(identity_projection(doc, node_id))
+
+
+def semantic_projection(doc, node_id, source_only=False, identity_only=False):
     """Normalize only SDK-defined optional empty fields for new comparisons."""
+    if identity_only:
+        return identity_projection(doc, node_id)
     value = copy.deepcopy({'node': nodes(doc).get(node_id), 'asset': doc['assets'].get(node_id)})
     if source_only and isinstance(value['node'], dict):
         value['node'] = {key: value['node'][key] for key in ('type', 'data') if key in value['node']}
@@ -431,8 +450,8 @@ def semantic_projection(doc, node_id, source_only=False):
     return value
 
 
-def semantic_fingerprint(doc, node_id, source_only=False):
-    return digest(semantic_projection(doc, node_id, source_only))
+def semantic_fingerprint(doc, node_id, source_only=False, identity_only=False):
+    return digest(semantic_projection(doc, node_id, source_only, identity_only))
 
 
 def source_fingerprint(doc, node_id):
@@ -472,16 +491,16 @@ def compare_expected(actual, expected, path=(), allow_extra=False):
                 if child_path[-2:] == ('basicInfo', 'appearanceName') and value == '' and observed is None:
                     observed = ''
                 states.append(compare_expected(observed, value, child_path))
-        if 'unknown' in states:
-            return 'unknown'
         if 'conflict' in states or (not allow_extra and set(actual) - set(expected)):
             return 'conflict'
+        if 'unknown' in states:
+            return 'unknown'
         return 'matched'
     if isinstance(expected, list):
         if not isinstance(actual, list) or len(actual) != len(expected):
             return 'conflict'
         states = [compare_expected(left, right, path) for left, right in zip(actual, expected)]
-        return 'unknown' if 'unknown' in states else 'conflict' if 'conflict' in states else 'matched'
+        return 'conflict' if 'conflict' in states else 'unknown' if 'unknown' in states else 'matched'
     return 'matched' if type(actual) is type(expected) and actual == expected else 'conflict'
 
 
@@ -497,7 +516,7 @@ def compare_reference_rows(actual, expected, doc):
         states.append(state)
         if comparisons:
             remaining.pop(comparisons.index(state))
-    return 'unknown' if 'unknown' in states else 'conflict' if 'conflict' in states else 'matched'
+    return 'conflict' if 'conflict' in states else 'unknown' if 'unknown' in states else 'matched'
 
 
 def bind(project, cli, target, switch=False, team_id=None):
@@ -630,8 +649,8 @@ def node_asset_ids(text):
 
 
 def role_reference_media(doc, source, target):
-    # CLI 1.0.38 Fa/GO/gL: role media creates a saved reference alongside its edge.
-    # Other node references are represented by edges and need not appear in the draft.
+    # CLI 1.0.57 LD/MD/Dee: only role sources get saved reference selection rows.
+    # Scene/image sources use their live node assets through reference edges.
     data = content(doc, source)
     sources = media.source_infos(data)
     allowed = {"image"} if kind_of(nodes(doc)[target]) == "image" else {"image", "video", "audio"}
@@ -694,6 +713,10 @@ def black_prompt_absent(prompt, source):
 def video_references_satisfied(doc, node_id, item):
     if not prompt_references_satisfied(doc, node_id, item["prompt"]):
         return False
+    from canvas_asset_reference_policy import reference_media_satisfied
+    if not all(reference_media_satisfied(doc, source, node_id) for source in node_asset_ids(item['prompt'])
+               if source in nodes(doc) and kind_of(nodes(doc)[source]) in ('role', 'scene', 'image')):
+        return False
     if edge_only_black(item) and item.get("references_bound"):
         source = item.get("black_node_id")
         return (source in nodes(doc) and kind_of(nodes(doc)[source]) == item.get("black_node_kind")
@@ -703,16 +726,20 @@ def video_references_satisfied(doc, node_id, item):
 
 
 def stale_role_reference_edges(doc, node_id, prompt):
-    """Shared plan for refreshing an empty-role edge after media arrives."""
+    """Refresh absent or obsolete role media; retain still-selectable user choices."""
     if node_id not in nodes(doc):
         return []
     edges = doc["assets"][doc["rootCanvasId"]]["content"].get("edges", {})
     references = content(doc, node_id).get("generation", {}).get("references", [])
+    from canvas_asset_reference_policy import reference_media_satisfied
     ids = []
     for source in node_asset_ids(prompt):
         if source not in nodes(doc) or kind_of(nodes(doc)[source]) != "role":
             continue
-        if not role_reference_media(doc, source, node_id) or role_reference_row(references, source):
+        has_row = role_reference_row(references, source)
+        if has_row and reference_media_satisfied(doc, source, node_id):
+            continue
+        if not has_row and not role_reference_media(doc, source, node_id):
             continue
         ids.extend(edge_id for edge_id, edge in edges.items() if edge.get("source") == source
                    and edge.get("target") == node_id and edge.get("type") == "reference")
@@ -764,13 +791,16 @@ def _target_satisfied(doc, target):
     if action == "asset_snapshot":
         return fingerprint(doc, node_id) == target["value"]
     if action == 'semantic_asset_snapshot':
-        identify = source_fingerprint if target.get('projection') == 'source-business-v1' else semantic_fingerprint
+        identify = (identity_fingerprint if target.get('projection') == 'source-identity-v1' else
+                    source_fingerprint if target.get('projection') == 'source-business-v1' else semantic_fingerprint)
         return identify(doc, node_id) == target['value']
     if action == "bound_asset_identity":
         from canvas_asset_reference_policy import reference_media_satisfied
         return (target.get('canvas_id') == doc.get('rootCanvasId')
                 and target.get('kind') in ('role', 'scene', 'image') and node_id in nodes(doc)
                 and kind_of(nodes(doc)[node_id]) == target['kind']
+                and (doc['assets'][node_id].get('type', KINDS[target['kind']]) == KINDS[target['kind']])
+                and doc['assets'][node_id].get('pippitAssetId', node_id) == node_id
                 and all(reference_media_satisfied(doc, node_id, consumer) for consumer in target.get('consumers', [])))
     if action == "prompt":
         return prompt_of(doc, node_id) == target["value"] and prompt_references_satisfied(doc, node_id, target["value"])
@@ -832,16 +862,20 @@ def target_state(doc, target):
             return 'conflict'
         expected = target['value']
         if action == 'semantic_generation_settings' and 'references' in expected:
-            if 'references' not in generation and expected['references']:
-                return 'unknown'
-            state = compare_reference_rows(generation.get('references', []), expected['references'], doc)
+            state = ('unknown' if 'references' not in generation and expected['references']
+                     else compare_reference_rows(generation.get('references', []), expected['references'], doc))
             others = compare_expected(generation, {key: value for key, value in expected.items() if key != 'references'},
                                       path=('generation',), allow_extra=True)
-            return 'unknown' if 'unknown' in (state, others) else 'conflict' if 'conflict' in (state, others) else 'matched'
+            return 'conflict' if 'conflict' in (state, others) else 'unknown' if 'unknown' in (state, others) else 'matched'
         return compare_expected(generation, expected, path=('generation',), allow_extra=True)
     if action == 'semantic_asset_snapshot' and 'expected' in target:
-        current = semantic_projection(doc, node_id, source_only=target.get('projection') == 'source-business-v1')
+        current = semantic_projection(doc, node_id, source_only=target.get('projection') == 'source-business-v1',
+                                      identity_only=target.get('projection') == 'source-identity-v1')
         return compare_expected(current, target['expected'])
+    if action == 'bound_asset_identity' and 'expected' in target:
+        identity_state = compare_expected(identity_projection(doc, node_id), target['expected'])
+        if identity_state != 'matched':
+            return identity_state
     paths = []
     if action in {'prompt', 'prompt_text'}:
         paths.append(('generation', 'prompt'))
@@ -894,6 +928,13 @@ def reconcile(project, cli, state, doc, preview=False, decisions=None):
                 # to recreate it. Preserve the old operation; do not replay it.
                 entry.update(status="superseded", resolution="explicitly_recreate_deleted_video", key=replaced)
                 changed = True
+                continue
+            if entry.get('command') == 'canvas_batch' and entry.get('protocol') == BATCH_PROTOCOL:
+                from canvas_batch import recover_entry
+                fresh = recover_entry(project, cli, state, entry, preview=preview)
+                doc['assets'].update(fresh['assets'])
+                for target_id in target_ids - set(nodes(fresh)):
+                    doc['assets'].pop(target_id, None)
                 continue
             if isinstance(cli, CLI) and not all(target_satisfied(doc, t) for t in entry['targets']):
                 # A recovered write is queried using its original identities.
@@ -1551,9 +1592,6 @@ def reference_map(session, state, doc, asset_ids=None, blocked_assets=(), inspec
         if node_id in node_map and (actual_kind != expected_kind or mapping.get("kind", expected_kind) != expected_kind):
             pending.append({"key": key, "name": name, "reason": "node_type_changed", "node_id": node_id,
                             "expected_kind": expected_kind, "actual_kind": actual_kind})
-        elif asset_reference_policy is None and node_id in node_map and name_of(doc, node_id) != name:
-            pending.append({"key": key, "name": name, "reason": "node_name_changed", "node_id": node_id,
-                            "actual_name": name_of(doc, node_id)})
         elif node_id in node_map:
             resolved[name] = "<node-asset>" + node_id + "</node-asset>"
             if inspect_media and not ready_image(doc, node_id):
@@ -1677,7 +1715,7 @@ def consume_image_references(session, state, completed, pending):
             remaining.pop(key, None)
 
 
-def asset_reconciliation_plan(session, state, doc, decisions=None, asset_reference_policy=None):
+def asset_reconciliation_plan(session, state, doc, decisions=None, asset_reference_policy=None, bound_identity=False):
     """Resolve the ledger against one inventory, preserving unrelated/manual nodes."""
     by_name = {}
     for node_id, node in nodes(doc).items():
@@ -1701,6 +1739,15 @@ def asset_reconciliation_plan(session, state, doc, decisions=None, asset_referen
             continue
         mapping = state["mappings"].get(key, {})
         node_id = mapping.get("node_id")
+        if bound_identity and mapping and choice.get('reuse') is None:
+            if node_id not in nodes(doc):
+                conflicts.append({'key': key, 'name': name, 'node_id': node_id, 'reason': 'mapped_node_missing'})
+            elif kind_of(nodes(doc)[node_id]) != kind or mapping.get('kind', kind) != kind:
+                conflicts.append({'key': key, 'name': name, 'node_id': node_id, 'reason': 'node_type_changed',
+                                  'expected_kind': kind, 'actual_kind': kind_of(nodes(doc)[node_id])})
+            else:
+                plan.append(dict(item, node_id=node_id, resolution='mapped', preserve_bound_asset=True))
+            continue
         if choice.get("reuse") is not None:
             chosen = choice["reuse"]
             valid = chosen in nodes(doc) and kind_of(nodes(doc)[chosen]) == kind and name_of(doc, chosen) == name
@@ -1744,7 +1791,7 @@ def asset_reconciliation_plan(session, state, doc, decisions=None, asset_referen
 
 def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, preview=False, context=None, batch_mode=False, asset_reference_policy=None):
     policy_args = {'asset_reference_policy': asset_reference_policy} if asset_reference_policy is not None else {}
-    plan, conflicts = asset_reconciliation_plan(session, state, doc, decisions, **policy_args)
+    plan, conflicts = asset_reconciliation_plan(session, state, doc, decisions, bound_identity=True, **policy_args)
     missing = [{"key": item["key"], "name": item["name"], "kind": item["kind"],
                 "previous_node_id": state["mappings"].get(item["key"], {}).get("node_id")}
                for item in plan if item["resolution"] == "create"]
@@ -1777,6 +1824,9 @@ def reconcile_asset_nodes(project, cli, session, state, doc, decisions=None, pre
         initialized = False
         if context is not None:
             context["active"] = {"key": key, "name": item["name"], "kind": item["kind"], "node_id": node_id}
+        if item.get('preserve_bound_asset'):
+            summary['reused'].append(key)
+            continue
         if item["resolution"] == "create":
             if preview:
                 summary["created"].append(key)
@@ -1933,14 +1983,25 @@ def sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview=
                     exc.details["report_error"] = safe_message(report_exc)
         raise
     if kind == "videos" and not preview:
-        report = reference_report(project, context)
+        report = reference_report(project, context, cli=cli)
         result.update(reference_report=report.get("report"), reference_issues=report.get("issues", []))
     return result
 
 
-def reference_report(project, context):
+def reference_report(project, context, cli=None):
     import canvas_reference_report
     state = context["state"]
+    if cli is not None and hasattr(cli, 'batch_snapshot'):
+        wanted = canvas_reference_report.required_node_ids(context['session'], state, context['doc'], context.get('units', []))
+        if any(node_id in nodes(context['doc']) and not canvas_reference_report.content_observed(context['doc'], node_id) for node_id in wanted):
+            try:
+                # Refresh all report inputs together. Never fill missing asset
+                # fields from an older snapshot or use unqueried data as empty.
+                snapshot = cli.batch_snapshot(state['binding'], node_ids=wanted)
+                if snapshot.get('complete') is True:
+                    context['doc'] = snapshot['document']
+            except (ValueError, OSError, KeyError, TypeError) as exc:
+                context['report_readback_error'] = safe_message(exc)
     state["last_reference_failures"] = copy.deepcopy(context["failures"])
     save(project, state)
     return canvas_reference_report.write_reference_report(project, context["session"], state, context["doc"],
@@ -2137,15 +2198,15 @@ def _sync(project, cli, kind, request_id=None, ids=None, decisions=None, preview
         if edge_only_black(item) and item.get("references_bound") and item.get("black_node_id"):
             reference_sources.add(item["black_node_id"])
         for source in reference_sources:
-            if policy is not None:
-                target = reference_policy.source_target(policy, doc, source)
+            if policy is not None or kind == 'videos':
+                target = reference_policy.source_target(policy, doc, source, identity_only=kind == 'videos')
                 if target['action'] == 'bound_asset_identity':
                     if not target_satisfied(fresh, target):
                         fail('CONCURRENT_EDIT', '引用资产原节点已消失或类型改变，不能按名称替代。', key=key, node_id=source)
                     continue
             if (source not in nodes(fresh) or source not in nodes(doc)
                     or kind_of(nodes(fresh)[source]) != kind_of(nodes(doc)[source])
-                    or name_of(fresh, source) != name_of(doc, source)):
+                    or kind != 'videos' and name_of(fresh, source) != name_of(doc, source)):
                 context["doc"] = fresh
                 fail("CONCURRENT_EDIT", "引用资产节点在操作期间删除或改名/改类型，已停止。", key=key, node_id=source)
         doc = fresh

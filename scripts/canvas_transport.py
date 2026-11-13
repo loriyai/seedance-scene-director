@@ -60,7 +60,7 @@ def execute(argv, cwd, timeout):
 def error_code(message):
     if re.search(r'(?i)\b(401|403)\b|unauthorized|forbidden|login required|未登录|无权限', message):
         return 'CLI_AUTH_ERROR'
-    if re.search(r'(?i)\bEOF\b|ECONNRESET|ETIMEDOUT|socket hang up|connection reset|TLS|connection refused|timed out|wsarecv|forcibly closed|connection was aborted', message):
+    if re.search(r'(?i)\bEOF\b|ECONNRESET|ETIMEDOUT|socket hang up|connection reset|TLS|connection refused|timed out|wsarecv|forcibly closed|connection was aborted|\b(?:429|502|503|504)\b', message):
         return 'CLI_TRANSIENT'
     if re.search(r'(?i)did not return requested assets|returned invalid (?:data|asset)|missing.*content', message):
         return 'READBACK_INCOMPLETE'

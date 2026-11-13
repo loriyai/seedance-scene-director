@@ -429,7 +429,9 @@ def run_job(project, manifest, check_control, progress):
         progress({"completed": count, "total": total})
         # The original image workflow reports unmatched/missing files separately.
         unresolved = any(result.get(key) for key in ("processing", "conflicts", "unbound_assets", "duplicates", "invalid"))
-        result["status"] = "synced" if result.get("status") == "images_imported" and not unresolved and result.get("references", {}).get("status") != "pending" else "partial"
+        reference_result = result.get("references", {})
+        references_complete = not reference_result or reference_result.get("status") in {"synced", "unchanged"}
+        result["status"] = "synced" if result.get("status") == "images_imported" and not unresolved and references_complete else "partial"
         return result
     versions = {u["id"]: u["version"] for u in session["units"]}
     verified = {}

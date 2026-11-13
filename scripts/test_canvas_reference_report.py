@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock
 
 sys.dont_write_bytecode = True
 import canvas as c
@@ -130,6 +131,54 @@ class ReferenceReportChecks(unittest.TestCase):
         self.assertEqual(result['missing_video_count'], 1)
         black = next(i for i in result['issues'] if i['reason'] == 'missing_video')
         self.assertEqual(black['unit_ids'], ['V', 'V2'])
+
+    def test_unqueried_asset_is_unverified_instead_of_missing_media(self):
+        del self.doc['assets']['I']
+        result = report.write_reference_report(self.project, self.session, self.state, self.doc, [self.unit])
+        issues = {(issue['key'], issue['reason']) for issue in result['issues']}
+        self.assertIn(('P', 'readback_unverified'), issues)
+        self.assertNotIn(('P', 'missing_image'), issues)
+        self.assertEqual(result['unverified_node_ids'], ['I'])
+        self.assertFalse(result['media_readiness_checked'])
+        self.assertIn('尚未核验', Path(result['report']).read_text(encoding='utf-8'))
+
+    def test_unqueried_video_and_black_do_not_become_missing_references(self):
+        del self.doc['assets']['V']
+        del self.doc['assets']['B']
+        issues = self.issues()
+        self.assertEqual({(row['key'], row['reason']) for row in issues if row['key'] in {'V', 'BLACK'}},
+                         {('V', 'readback_unverified'), ('BLACK', 'readback_unverified')})
+
+    def test_success_report_reads_all_required_inputs_once_and_replaces_partial_document(self):
+        fresh = copy.deepcopy(self.doc)
+        fresh['assets']['I']['content']['pippitAssetId'] = 'REAL_IMAGE'
+        del self.doc['assets']['I']
+        self.doc['assets']['V']['content']['old_cached_field'] = 'do not carry forward'
+        context = {'session': self.session, 'state': self.state, 'doc': self.doc, 'units': [self.unit], 'failures': []}
+        cli = Mock()
+        cli.batch_snapshot.return_value = {'document': fresh, 'complete': True}
+        result = c.reference_report(self.project, context, cli=cli)
+        cli.batch_snapshot.assert_called_once_with(self.state['binding'], node_ids=['B', 'I', 'R', 'S', 'V'])
+        self.assertIs(context['doc'], fresh)
+        self.assertNotIn('old_cached_field', c.content(context['doc'], 'V'))
+        self.assertNotIn('P', {issue['key'] for issue in result['issues']})
+
+    def test_report_read_failure_still_writes_unverified_result_without_false_missing_image(self):
+        del self.doc['assets']['I']
+        context = {'session': self.session, 'state': self.state, 'doc': self.doc, 'units': [self.unit], 'failures': []}
+        cli = Mock()
+        cli.batch_snapshot.side_effect = c.CanvasError('READBACK_PENDING', 'network read budget exhausted')
+        result = c.reference_report(self.project, context, cli=cli)
+        self.assertEqual(cli.batch_snapshot.call_count, 1)
+        self.assertIn('report_readback_error', context)
+        self.assertIn(('P', 'readback_unverified'), {(issue['key'], issue['reason']) for issue in result['issues']})
+        self.assertNotIn(('P', 'missing_image'), {(issue['key'], issue['reason']) for issue in result['issues']})
+
+    def test_complete_report_does_not_start_additional_read(self):
+        context = {'session': self.session, 'state': self.state, 'doc': self.doc, 'units': [self.unit], 'failures': []}
+        cli = Mock()
+        c.reference_report(self.project, context, cli=cli)
+        cli.batch_snapshot.assert_not_called()
 
 
 if __name__ == '__main__':

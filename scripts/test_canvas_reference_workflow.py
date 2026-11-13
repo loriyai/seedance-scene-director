@@ -21,7 +21,7 @@ def add_node(doc, node_id, kind, name, image=None, generation=None):
             data["pippitAssetId"] = image
     if generation is not None:
         data["generation"] = copy.deepcopy(generation)
-    doc["assets"][node_id] = {"content": data}
+    doc["assets"][node_id] = {"pippitAssetId": node_id, "type": c.KINDS[kind], "content": data}
 
 
 class WorkflowCLI:
@@ -55,7 +55,8 @@ class WorkflowCLI:
             c.nodes(self.doc)[node_id] = {"id": node_id, "type": c.KINDS[value["nodeKind"]], **value["topLeft"]}
             if value["nodeKind"] in ("role", "scene"):
                 c.nodes(self.doc)[node_id]["data"] = {"name": "未命名角色" if value["nodeKind"] == "role" else "未命名场景"}
-            self.doc["assets"][node_id] = {"content": copy.deepcopy(value["initialData"])}
+            self.doc["assets"][node_id] = {"pippitAssetId": node_id, "type": c.KINDS[value['nodeKind']],
+                                           "content": copy.deepcopy(value["initialData"])}
             return {}
         if name in ("xyq.role.updateDescription", "xyq.scene.updateDescription"):
             data = c.content(self.doc, value["nodeId"])
@@ -88,7 +89,12 @@ class WorkflowCLI:
         if name == "delete_edges":
             edges = self.doc["assets"]["ROOT"]["content"]["edges"]
             for edge_id in value["ids"]:
-                edges.pop(edge_id, None)
+                edge = edges.pop(edge_id, None)
+                if edge:
+                    generation = c.content(self.doc, edge['target']).get('generation', {})
+                    if 'references' in generation:
+                        generation['references'] = [row for row in generation['references']
+                            if row.get('sourceNodeId') != edge['source'] and row.get('edgeId') != edge_id]
             return {}
         if name == "create_edge":
             edge = value["edge"]
@@ -115,7 +121,9 @@ class WorkflowCLI:
                 edge_id = source + "-" + target
                 edges[edge_id] = {"id": edge_id, "source": source, "target": target, "type": "reference"}
                 if c.kind_of(c.nodes(self.doc)[source]) == "role" and c.role_reference_media(self.doc, source, target):
-                    references.append({"sourceNodeId": source, "nodeAssetId": source, "id": source, "type": "image"})
+                    info = c.content(self.doc, source).get('appearanceInfo', {})
+                    references.append({"sourceNodeId": source, "nodeAssetId": source, "id": source, "type": "image",
+                                       **{key: info[key] for key in ('pippitAssetId', 'assetId') if key in info}})
             return {}
         raise AssertionError("Unexpected fake CLI mutation: " + name)
 
@@ -195,12 +203,14 @@ class ReferenceWorkflowChecks(unittest.TestCase):
         self.assertTrue(c.prompt_references_satisfied(self.cli.doc, target, c.prompt_of(self.cli.doc, target)))
         self.assertTrue(state["mappings"][self.session["units"][0]["id"]]["references_bound"])
 
-    def test_stale_id_reuses_unique_remote_asset_without_duplicates(self):
+    def test_stale_mapped_id_does_not_switch_to_a_same_name_node(self):
         add_node(self.cli.doc, "RIGHT", "role", "Actor")
         self.state["mappings"]["CHAR1"] = {"node_id": "DELETED", "kind": "role", "name": "Actor", "stage": "ready"}
         c.save(self.project, self.state)
-        self.sync(ids=[self.session["units"][0]["id"]])
-        self.assertEqual(c.read_state(self.project)["mappings"]["CHAR1"]["node_id"], "RIGHT")
+        result = self.sync(ids=[self.session["units"][0]["id"]])
+        self.assertEqual(c.read_state(self.project)["mappings"]["CHAR1"]["node_id"], "DELETED")
+        self.assertIn({'key': 'CHAR1', 'name': 'Actor', 'node_id': 'DELETED', 'reason': 'mapped_node_missing'},
+                      result['asset_reconciliation']['conflicts'])
         self.assertEqual([nid for nid in c.nodes(self.cli.doc) if c.name_of(self.cli.doc, nid) == "Actor"], ["RIGHT"])
 
     def test_preview_plans_adoption_and_creation_without_persisting_or_writing(self):
@@ -215,7 +225,7 @@ class ReferenceWorkflowChecks(unittest.TestCase):
         self.assertEqual(self.cli.allocations, [])
         self.assertFalse((self.project / "canvas" / "reference-check.json").exists())
 
-    def test_same_name_duplicates_wrong_type_and_manual_rename_are_conflicts(self):
+    def test_duplicate_names_and_wrong_type_block_but_valid_renamed_id_is_reused(self):
         add_node(self.cli.doc, "R1", "role", "Actor")
         add_node(self.cli.doc, "R2", "role", "Actor")
         add_node(self.cli.doc, "S_WRONG", "image", "Room")
@@ -224,10 +234,10 @@ class ReferenceWorkflowChecks(unittest.TestCase):
         c.save(self.project, self.state)
         result = self.sync(ids=[self.session["units"][0]["id"]])
         conflicts = {row["key"]: row["reason"] for row in result["asset_reconciliation"]["conflicts"]}
-        self.assertEqual(conflicts, {"CHAR1": "ambiguous_node", "SET1": "same_name_wrong_kind", "PROP1": "node_name_changed"})
+        self.assertEqual(conflicts, {"CHAR1": "ambiguous_node", "SET1": "same_name_wrong_kind"})
         state = c.read_state(self.project)
         target = state["mappings"][self.session["units"][0]["id"]]["node_id"]
-        self.assertEqual(set(c.node_asset_ids(c.prompt_of(self.cli.doc, target))), {"BLACK"})
+        self.assertEqual(set(c.node_asset_ids(c.prompt_of(self.cli.doc, target))), {"P_EDITED", "BLACK"})
         self.assertIn("@Actor ", c.prompt_of(self.cli.doc, target))
         self.assertEqual(result["status"], "partial")
         self.assertEqual(len(self.cli.allocations), 1)
@@ -321,6 +331,43 @@ class ReferenceWorkflowChecks(unittest.TestCase):
         self.assertEqual(self.cli.allocations, [])
         self.assertFalse(any(name == "create_biz_node" for name, _ in self.cli.writes))
 
+    def test_bound_asset_user_name_prompt_and_upload_are_preserved_during_video_sync(self):
+        self.prepared()
+        uid = self.session['units'][0]['id']
+        for nid in ('ROLE', 'SET', 'PROP'):
+            data = c.content(self.cli.doc, nid)
+            data.setdefault('basicInfo', {})['name'] = 'User renamed ' + nid
+            data.update(name='User renamed ' + nid, title='User renamed ' + nid)
+            data['generation'] = {'prompt': 'User changed prompt'}
+        c.content(self.cli.doc, 'ROLE')['appearanceInfo'] = {'pippitAssetId': 'ROLE-UPLOAD'}
+        c.content(self.cli.doc, 'PROP')['pippitAssetId'] = 'PROP-UPLOAD'
+        original = {nid: copy.deepcopy(self.cli.doc['assets'][nid]) for nid in ('ROLE', 'SET', 'PROP')}
+        result = self.sync(ids=[uid])
+        self.assertEqual(result['status'], 'synced')
+        self.assertEqual({nid: self.cli.doc['assets'][nid] for nid in original}, original)
+        self.assertEqual(set(c.node_asset_ids(c.prompt_of(self.cli.doc, uid))), {'ROLE', 'SET', 'PROP', 'BLACK'})
+        self.assertFalse(any(value.get('nodeId', value.get('assetId', value.get('id'))) in original
+                             for _, value in self.cli.writes))
+
+    def test_role_upload_between_planning_and_video_write_is_not_a_source_conflict(self):
+        self.prepared()
+        original = self.cli.command
+        reads = []
+        def command(canvas_id, name, value=None):
+            if name == 'get_snapshot':
+                reads.append(name)
+                if len(reads) == 2:
+                    data = c.content(self.cli.doc, 'ROLE')
+                    data['basicInfo']['name'] = 'Changed during sync'
+                    data['appearanceInfo'] = {'pippitAssetId': 'NEW-UPLOAD'}
+                    data['generation'] = {'prompt': 'User prompt'}
+            return original(canvas_id, name, value)
+        with patch.object(self.cli, 'command', side_effect=command):
+            result = self.sync(ids=[self.session['units'][0]['id']])
+        self.assertEqual(result['status'], 'synced')
+        self.assertEqual(c.name_of(self.cli.doc, 'ROLE'), 'Changed during sync')
+        self.assertEqual(c.content(self.cli.doc, 'ROLE')['appearanceInfo']['pippitAssetId'], 'NEW-UPLOAD')
+
     def test_unknown_asset_creation_and_resume_report_exact_asset_and_allocated_id(self):
         self.cli.ignore_create_names.add("Actor")
         for attempt in (1, 2):
@@ -411,6 +458,7 @@ class ReferenceWorkflowChecks(unittest.TestCase):
         self.prepared()
         first, second = [unit["id"] for unit in self.session["units"]]
         c.nodes(self.cli.doc)["BLACK"]["type"] = c.KINDS["image"]
+        self.cli.doc['assets']['BLACK']['type'] = c.KINDS['image']
         self.state["mappings"][first]["references_requested"] = True
         self.state["mappings"].pop(second)
         c.nodes(self.cli.doc).pop(second)

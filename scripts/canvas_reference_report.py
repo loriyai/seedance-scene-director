@@ -19,6 +19,7 @@ REASONS = {
     "reference_edge_missing": "节点引用连线未建立",
     "role_media_reference_missing": "角色图片引用记录尚未刷新",
     "reference_failed": "节点引用回读未通过",
+    "readback_unverified": "本次未取得完整资产内容，尚未核验",
     "existing_name": "同名节点无法唯一确定",
     "cloud_edited": "节点已被人工修改",
     "name_changed": "节点名称已被修改",
@@ -52,6 +53,26 @@ def api():
     return canvas
 
 
+def content_observed(doc, node_id):
+    asset = doc.get('assets', {}).get(node_id)
+    return isinstance(asset, dict) and isinstance(asset.get('content'), dict)
+
+
+def required_node_ids(session, state, doc, units):
+    c = api()
+    ids = {state.get('mappings', {}).get(item['key'], {}).get('node_id') for item in c.desired_assets(session)}
+    for unit in units:
+        mapping = state.get('mappings', {}).get(unit['id'], {})
+        ids.add(mapping.get('node_id'))
+        if not c.no_black(unit):
+            black = mapping.get('black_node_id') if 'black_node_id' in mapping else state.get('black_node_id')
+            ids.add(black)
+            if black not in c.nodes(doc) and 'black_node_id' not in mapping:
+                kind = state.get('black_node_kind', 'video')
+                ids.update(node_id for node_id, node in c.nodes(doc).items() if c.kind_of(node) == kind)
+    return sorted(node_id for node_id in ids if node_id)
+
+
 def collect_issues(session, state, doc, units, failures=(), inspect_media=True):
     c = api()
     nodes = c.nodes(doc)
@@ -77,12 +98,28 @@ def collect_issues(session, state, doc, units, failures=(), inspect_media=True):
             add(item["key"], "missing_node", nid)
         elif c.kind_of(nodes[nid]) != item["kind"]:
             add(item["key"], "node_type_changed", nid)
+        elif not content_observed(doc, nid):
+            add(item['key'], 'readback_unverified', nid)
         elif inspect_media and not c.ready_image(doc, nid):
             add(item["key"], "missing_image", nid)
     black_by_unit = {}
     for unit in units:
         if c.no_black(unit):
             continue
+        mapping = state.get('mappings', {}).get(unit['id'], {})
+        bound = mapping.get('black_node_id') if 'black_node_id' in mapping else state.get('black_node_id')
+        if bound in nodes and not content_observed(doc, bound):
+            black_by_unit[unit['id']] = bound
+            add('BLACK', 'readback_unverified', bound, [unit['id']], kind=c.kind_of(nodes[bound]))
+            continue
+        if bound not in nodes and 'black_node_id' not in mapping:
+            kind = state.get('black_node_kind', 'video')
+            unchecked = [node_id for node_id, node in nodes.items() if c.kind_of(node) == kind and not content_observed(doc, node_id)]
+            if unchecked:
+                black_by_unit[unit['id']] = None
+                for node_id in unchecked:
+                    add('BLACK', 'readback_unverified', node_id, [unit['id']], kind=kind)
+                continue
         black, kind, issue = c.black_reference(state, doc, unit["id"])
         black_by_unit[unit["id"]] = black
         if issue is not None:
@@ -96,6 +133,9 @@ def collect_issues(session, state, doc, units, failures=(), inspect_media=True):
         target = state.get("mappings", {}).get(unit["id"], {}).get("node_id")
         if target not in nodes or c.kind_of(nodes[target]) != "video":
             add(unit["id"], "video_missing", target, [unit["id"]])
+            continue
+        if not content_observed(doc, target):
+            add(unit['id'], 'readback_unverified', target, [unit['id']], kind='video')
             continue
         prompt = c.prompt_of(doc, target)
         tagged = set(c.node_asset_ids(prompt))
@@ -122,7 +162,7 @@ def collect_issues(session, state, doc, units, failures=(), inspect_media=True):
                 add(key, "reference_edge_missing", source, [unit["id"]], video_node_id=target,
                     **({"kind": c.kind_of(nodes[source])} if key == "BLACK" else {}))
                 specific_failures += 1
-            elif c.kind_of(nodes[source]) == "role" and c.role_reference_media(doc, source, target):
+            elif content_observed(doc, source) and c.kind_of(nodes[source]) == "role" and c.role_reference_media(doc, source, target):
                 row_exists = isinstance(draft, list) and any(isinstance(row, dict) and
                     source in [row.get(field, "").strip() for field in ("sourceNodeId", "nodeAssetId", "id")
                                if isinstance(row.get(field), str)] and row.get("type") in ("image", "video", "audio")
@@ -160,6 +200,7 @@ def write_reference_report(project, session, state, doc, units, failures=(), out
     issues = collect_issues(session, state, doc, units, failures, inspect_media)
     missing_images = [issue for issue in issues if issue["reason"] == "missing_image"]
     missing_videos = [issue for issue in issues if issue["reason"] == "missing_video"]
+    unverified = [issue for issue in issues if issue['reason'] == 'readback_unverified']
     other = [issue for issue in issues if issue["reason"] not in ("missing_image", "missing_video")]
     unit_names = {unit["id"]: unit.get("display_name", unit["id"]) for unit in session.get("units", units)}
     display_units = lambda ids: "，".join(unit_names.get(uid, uid) for uid in ids)
@@ -178,7 +219,7 @@ def write_reference_report(project, session, state, doc, units, failures=(), out
               "用户检查报告不能写入Skill或画布后台状态目录")
     lines = ["小云雀资产与引用检查记录", "画布ID：" + str(state.get("binding", {}).get("canvas_id", "未绑定")),
              "本次分镜：" + (display_units(u["id"] for u in units) or "无"), "",
-             "缺少图片的资产节点：" + str(len(missing_images)) + "项"]
+             ("已确认缺少图片的资产节点：" if unverified else "缺少图片的资产节点：") + str(len(missing_images)) + "项"]
     for issue in missing_images:
         kind = "黑幕图片节点" if issue["key"] == "BLACK" else KIND_NAMES.get(issue["kind"], issue["kind"])
         image = "黑幕图片" if issue["key"] == "BLACK" else "按完整资产名称命名的" + ("主图" if issue["kind"] in ("role", "scene") else "图片")
@@ -216,11 +257,13 @@ def write_reference_report(project, session, state, doc, units, failures=(), out
     temporary.replace(output)
     record = {"schema": 1, "canvas_id": state.get("binding", {}).get("canvas_id"),
               "unit_ids": [u["id"] for u in units], "report": str(output), "issues": issues,
-              "media_readiness_checked": inspect_media,
+              "media_readiness_checked": inspect_media and not unverified,
+              'unverified_node_ids': sorted({issue['node_id'] for issue in unverified}),
               "missing_image_count": len(missing_images) if inspect_media else None,
               "missing_video_count": len(missing_videos) if inspect_media else None, "reference_issue_count": len(other)}
     d.write_json(project / "canvas" / "reference-check.json", record)
     return {"report": str(output), "issues": issues,
-            "media_readiness_checked": inspect_media,
+            "media_readiness_checked": inspect_media and not unverified,
+            'unverified_node_ids': sorted({issue['node_id'] for issue in unverified}),
             "missing_image_count": len(missing_images) if inspect_media else None,
             "missing_video_count": len(missing_videos) if inspect_media else None, "reference_issue_count": len(other)}

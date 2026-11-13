@@ -1,4 +1,4 @@
-"""Opt-in user-authorized asset references by frozen mapped node identity.
+"""Mapped node identity references, including legacy explicitly frozen policies.
 
 This never writes an asset, guesses an identity from a name, or weakens video,
 transport ACK, version/CAS or actual reference/media identity verification.
@@ -115,14 +115,18 @@ def source_issue(policy, key, state, doc):
     return None
 
 
-def source_target(policy, doc, node_id):
-    """Only frozen asset sources get identity-only concurrency protection."""
+def source_target(policy, doc, node_id, identity_only=False):
+    """Storyboard sources use node identity; asset-writing callers retain full protection."""
+    import canvas as c
+    if identity_only and node_id in c.nodes(doc) and c.kind_of(c.nodes(doc)[node_id]) in ('role', 'scene', 'image'):
+        return {'action': 'bound_asset_identity', 'node_id': node_id,
+                'kind': c.kind_of(c.nodes(doc)[node_id]), 'canvas_id': doc['rootCanvasId'],
+                'expected': c.identity_projection(doc, node_id)}
     if policy is not None:
         match = next((row for row in policy['nodes'].values() if row['node_id'] == node_id), None)
         if match is not None:
             return {'action': 'bound_asset_identity', 'node_id': node_id, 'kind': match['kind'],
                     'canvas_id': policy['binding']['canvas_id']}
-    import canvas as c
     return {'action': 'asset_snapshot', 'node_id': node_id, 'value': c.fingerprint(doc, node_id)}
 
 
@@ -142,6 +146,9 @@ def reference_media_satisfied(doc, source, target):
         r.get(k) == source for k in ('sourceNodeId', 'nodeAssetId', 'id'))]
     if c.kind_of(c.nodes(doc)[source]) == 'role' and c.role_reference_media(doc, source, target) and not matching:
         return False
+    # CLI 1.0.57 LD only materializes default generation.references rows for
+    # role sources. Scene/image node references resolve their media from the
+    # source asset through the separately verified graph edge.
     data = c.content(doc, source)
     available = [{**info, 'pippitAssetId': info.get('pippitAssetId', key)}
                  for key, info in c.media.source_infos(data).items() if isinstance(info, dict)]

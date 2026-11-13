@@ -51,8 +51,10 @@ class FakeCLI:
                 edge_id = source + '-' + value['nodeId']
                 edges[edge_id] = {'id': edge_id, 'source': source, 'target': value['nodeId'], 'type': 'reference'}
                 if c.kind_of(c.nodes(self.doc)[source]) == 'role' and c.role_reference_media(self.doc, source, value['nodeId']):
+                    info = c.content(self.doc, source).get('appearanceInfo', {})
                     generation.setdefault('references', []).append({'id': source, 'sourceNodeId': source,
-                        'nodeAssetId': source, 'type': 'image'})
+                        'nodeAssetId': source, 'type': 'image',
+                        **{key: info[key] for key in ('pippitAssetId', 'assetId') if key in info}})
             generation['prompt'] = value['prompt']
             return {}
         if name == 'delete_nodes':

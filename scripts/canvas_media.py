@@ -288,7 +288,7 @@ def refresh_references(project, cli, session, changed):
     try:
         result = c.sync(project, cli, "videos", ids=units, bind_references=True, existing_only=True, references_only=True)
     except (ValueError, OSError) as exc:
-        return {"status": "pending", "units": units, "message": c.safe_message(exc)}
+        return {"status": "pending", "units": units, "code": getattr(exc, "code", "ERROR"), "message": c.safe_message(exc)}
     return result
 
 

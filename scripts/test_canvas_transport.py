@@ -55,8 +55,30 @@ assert len(calls) == 2
         with self.assertRaises(ValueError):
             transport.final_json(output + '\ntruncated tail')
 
+    def test_known_edit_is_not_hidden_by_another_missing_field(self):
+        self.assertEqual(c.compare_expected({'prompt': 'human change'},
+            {'prompt': 'before', 'name': 'asset'}), 'conflict')
+        self.assertEqual(c.compare_expected([{'prompt': 'human change'}],
+            [{'prompt': 'before', 'name': 'asset'}]), 'conflict')
+
+    def test_guard_recovery_codes_survive_before_and_after_handler(self):
+        for code in ('READBACK_PENDING', 'CONCURRENT_EDIT'):
+            for not_sent in (True, False):
+                result = subprocess.CompletedProcess([], 1, json.dumps({'ok': False, 'code': code,
+                    'message': 'guard decision', 'not_sent': not_sent, 'recovery_path': 'saved-evidence.json'}), '')
+                with patch.object(transport, 'execute', return_value=result):
+                    with self.assertRaises(c.CanvasError) as caught:
+                        c.run_json(['node'], '.')
+                self.assertEqual(caught.exception.code, code)
+                self.assertIs(caught.exception.details['not_sent'], not_sent)
+                self.assertEqual(caught.exception.details['recovery_path'], 'saved-evidence.json')
+
     def test_eof_read_retries_but_auth_and_writes_do_not(self):
         self.assertEqual(transport.error_code('read tcp: wsarecv: An existing connection was forcibly closed by the remote host.'), 'CLI_TRANSIENT')
+        for status in (429, 502, 503, 504):
+            self.assertEqual(transport.error_code(f'HTTP status {status}'), 'CLI_TRANSIENT')
+        for status in (401, 403):
+            self.assertEqual(transport.error_code(f'HTTP status {status}'), 'CLI_AUTH_ERROR')
         replies = [c.CanvasError('CLI_TRANSIENT', 'EOF'), {'ok': True}]
         calls = []
         def read(timeout):

@@ -138,6 +138,14 @@ def job_state(project, job):
     if "total" not in value:
         value["total"] = job_total(job)
     value.setdefault("stage", value["status"])
+    # Older image jobs treated a partial reference refresh as upload completion.
+    # Expose that pending verification honestly; resume persists the corrected
+    # state and reruns the existing job without uploading unchanged files again.
+    reference_result = (value.get("result") or {}).get("references", {})
+    if (job["kind"] == "images" and value["status"] == "completed" and reference_result
+            and reference_result.get("status") not in {"synced", "unchanged"}):
+        value.update(status="needs_attention", stage="needs_attention", completion_requires_verification=True,
+                     error={"code": "REFERENCE_VERIFICATION_REQUIRED", "message": "图片已挂载，引用刷新仍须完成核验。"})
     value.setdefault("cumulative_node_ids", copy.deepcopy(value.get("node_ids", {})))
     value.setdefault("cumulative_completed", value.get("completed", 0))
     return value
@@ -718,6 +726,46 @@ def dependency_complete(job_id, states, seen=()):
     return False
 
 
+def recoverable_error(project, error):
+    code = (error or {}).get("code")
+    if code in {"READBACK_PENDING", "READBACK_INCOMPLETE", "CLI_TRANSIENT", "CLI_TIMEOUT", "NETWORK_ERROR"}:
+        return True
+    if code != "UNCERTAIN_WRITE":
+        return False
+    # Only the current protocol carries the pre-write state required for a
+    # guarded recovery. Historical uploads/commands must not be replayed.
+    from canvas_batch import recovery_request, recoverable_command
+    for entry in c.read_state(project).get("journal", []):
+        if (entry.get("protocol") != c.BATCH_PROTOCOL
+                or entry.get("status") not in {"pending", "uncertain", "acknowledged"}
+                or (error.get("operation") and error["operation"] != entry.get("id"))):
+            continue
+        try:
+            request = recovery_request(project, entry)
+        except (ValueError, OSError, KeyError, TypeError):
+            continue
+        if request and recoverable_command(request):
+            return True
+    return False
+
+
+def wait_for_recovery(project, job, state, check_control):
+    state["retry_count"] = state.get("retry_count", 0) + 1
+    delay = min(30, 2 ** min(state["retry_count"], 5))
+    state.update(status="running", stage="recovering", last_error=copy.deepcopy(state["error"]),
+                 next_retry_at=time.time() + delay, updated_at=time.time())
+    d.write_json(state_file(project, job["job_id"]), state)
+    for second in range(delay):
+        check_control()
+        time.sleep(1)
+        if second % 5 == 4:
+            state["updated_at"] = time.time()
+            d.write_json(state_file(project, job["job_id"]), state)
+    check_control()
+    state.update(status="queued", stage="recovering", updated_at=time.time())
+    d.write_json(state_file(project, job["job_id"]), state)
+
+
 def run_worker(project, runner=None, run_id=None):
     project = Path(project).resolve()
     binding = c.read_state(project).get("binding")
@@ -760,6 +808,8 @@ def run_worker(project, runner=None, run_id=None):
                 state = states[job["job_id"]]
                 state["cumulative_node_ids"] = {**state.get("cumulative_node_ids", {}), **state.get("node_ids", {})}
                 state["cumulative_completed"] = max(state.get("cumulative_completed", 0), state.get("completed", 0))
+                state.pop("finished_at", None)
+                state.pop("next_retry_at", None)
                 state.update(status="running", started_at=time.time(), error=None)
                 d.write_json(state_file(project, job["job_id"]), state)
 
@@ -810,6 +860,11 @@ def run_worker(project, runner=None, run_id=None):
                     check_control()
                     result = runner(project, job, check_control, progress)
                 state.update(result=result, status="completed" if result.get("status") == "synced" else "needs_attention")
+                if state["status"] == "completed":
+                    state.pop("completion_requires_verification", None)
+                reference_error = result.get("references", {})
+                if state["status"] != "completed" and reference_error.get("code"):
+                    state["error"] = {"code": reference_error["code"], "message": reference_error.get("message", "")}
             except PauseRequested:
                 state["status"] = "paused"
             except Superseded:
@@ -818,6 +873,17 @@ def run_worker(project, runner=None, run_id=None):
                 state.update(status="needs_attention", error={"code": getattr(exc, "code", "ERROR"), "message": c.safe_message(exc)})
                 state["error"].update({key: value for key, value in getattr(exc, "details", {}).items()
                                       if key in ("operation", "node_id", "key", "command") and isinstance(value, str)})
+            if state["status"] == "needs_attention" and recoverable_error(project, state.get("error")):
+                try:
+                    wait_for_recovery(project, job, state, check_control)
+                    continue
+                except PauseRequested:
+                    state["status"] = "paused"
+                except Superseded:
+                    state["status"] = "superseded"
+                except Exception as exc:
+                    state.update(status="needs_attention", error={"code": getattr(exc, "code", "ERROR"),
+                                                                  "message": c.safe_message(exc)})
             state["finished_at"] = time.time()
             state["stage"] = ("awaiting_readback" if (state.get("error") or {}).get("code") == "READBACK_PENDING"
                               else state["status"])
