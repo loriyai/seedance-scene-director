@@ -11,8 +11,8 @@ import uuid
 import canvas as c
 import director as d
 
-DEFAULT_BATCH_SIZE = 12
-VIDEO_BATCH_SIZE = 6
+DEFAULT_BATCH_SIZE = 20
+VIDEO_BATCH_SIZE = DEFAULT_BATCH_SIZE
 ORDINARY_COMMANDS = {"create_biz_node", "create_node", "update_node_data", "update_asset", "create_edge", "delete_edges"}
 
 

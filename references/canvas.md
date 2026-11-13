@@ -147,7 +147,7 @@ python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind images 
 
 新资产、视频和引用任务冻结 `options.sync_protocol=cli-command-batch-v2`，只适配小云雀CLI 1.0.57。旧任务保留原manifest、节点ID和回执；旧未决写入先只读核对，不能重发历史`canvas apply`请求。CLI适配归`scripts/canvas.py`，只读传输归`scripts/canvas_transport.py`，本地编译归`scripts/canvas_cli_batch.js`，同会话写前核验归`scripts/canvas_public_command.js`，分组执行与回执归`scripts/canvas_batch.py`，队列归`canvas_jobs.py`和`canvas_job_backend.py`。
 
-按依赖顺序预申请真实ID并持久保存。资产默认每批12个，分镜默认每批6个，均为本地分组选择。公开普通mutations没有公布固定节点上限；64 MiB是CLI JSON输入上限，5000是一次预留ID上限。同步不触发生图或生视频。
+按依赖顺序预申请真实ID并持久保存。按用户约定，资产与分镜统一默认每批20个；这是本地逻辑分组，不是服务端节点上限，也不是已证明最优的批量大小。一个逻辑分组可按命令类型和依赖拆成多次提交及回读，保持原有依赖顺序和断线恢复机制。公开普通mutations没有公布固定节点上限；64 MiB是CLI JSON输入上限，5000是一次预留ID上限。同步不触发生图或生视频。
 
 使用固定版本官方SDK在本地隔离文档中运行工厂、字段设置和引用解析，保留原命令与最终预期。新节点先由官方`create_biz_node`与领域命令编译完整node/assets，再通过公开`create_node`携带预分配ID及官方产物，与编译出的引用边一起由`canvas command run apply_mutations`提交普通原子批次。这样同时保留根节点显示名和资产内容。每条业务`invoke_command`独立调用。已有节点从新鲜快照合并配置并执行原业务命令，涉及媒体选材和派生引用时继续采用官方引用语义。禁止将旧基线patch直接套在另一次新快照上，也不以当前进程revision替代服务器资产版本。
 

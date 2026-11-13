@@ -243,8 +243,8 @@ class BatchBehavior(unittest.TestCase):
         writes, reads = len(self.cli.batch_writes), self.cli.batch_reads
         (_, _, verified), _ = self.videos(self.video_items(21))
         self.assertEqual(len(verified), 21)
-        self.assertEqual(len(self.cli.batch_writes) - writes, 4)
-        self.assertEqual(self.cli.batch_reads - reads, 8)
+        self.assertEqual(len(self.cli.batch_writes) - writes, 2)
+        self.assertEqual(self.cli.batch_reads - reads, 4)
 
     def test_live_reference_labels_do_not_fail_video_readback(self):
         self.assets()
