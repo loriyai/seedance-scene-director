@@ -1,4 +1,4 @@
-"""Pure text-dialogue lower-bound checks; no automatic authoring or approval."""
+"""Pure text-dialogue risk checks; no automatic authoring or approval."""
 import copy
 from decimal import Decimal
 import json
@@ -34,7 +34,7 @@ class TextDialogueCapacityTests(unittest.TestCase):
 
     def test_below_threshold_has_precise_unit_shot_and_deficit(self):
         result = text_dialogue_capacity([unit(['甲乙丙丁戊己庚'])])
-        self.assertEqual(result['status'], 'blocked')
+        self.assertEqual(result['status'], 'checked')
         error = result['warnings'][0]
         self.assertEqual((error['code'], error['unit'], error['shot']),
                          ('DIALOGUE_CAPACITY', 'SC0001/u01', 1))
@@ -46,8 +46,8 @@ class TextDialogueCapacityTests(unittest.TestCase):
         text = '甲，乙、丙,丁。戊！己？!?'  # 6 letters, 3 commas, 5 sentence endings.
         result = text_dialogue_capacity([unit([text], end=Decimal('2.3'))])
         self.assertEqual(result['status'], 'checked')
-        blocked = text_dialogue_capacity([unit([text], end=Decimal('2.29'))])
-        error = blocked['warnings'][0]
+        risky = text_dialogue_capacity([unit([text], end=Decimal('2.29'))])
+        error = risky['warnings'][0]
         self.assertEqual(error['dialogue_characters'], 6)
         self.assertEqual(error['comma_or_pause_count'], 3)
         self.assertEqual(error['sentence_end_count'], 5)
@@ -57,14 +57,14 @@ class TextDialogueCapacityTests(unittest.TestCase):
     def test_decimal_comparison_has_no_float_epsilon_exemption(self):
         result = text_dialogue_capacity([unit(['甲乙丙丁戊己，。'],
                                              end=Decimal('1.299999999999999999999'))])
-        self.assertEqual(result['status'], 'blocked')
+        self.assertEqual(result['status'], 'checked')
         self.assertGreater(result['warnings'][0]['deficit'], 0)
         self.assertEqual(text_dialogue_capacity([
             unit(['甲乙丙丁戊己，。'], end=Decimal('1.3'))])['status'], 'checked')
 
     def test_every_fragment_in_one_shot_is_aggregated(self):
         result = text_dialogue_capacity([unit(['甲乙丙', '丁戊己庚'])])
-        self.assertEqual(result['status'], 'blocked')
+        self.assertEqual(result['status'], 'checked')
         self.assertEqual(len([e for e in result['warnings'] if e['code'] == 'DIALOGUE_CAPACITY']), 1)
         self.assertEqual(result['warnings'][0]['dialogue_characters'], 7)
 
@@ -73,17 +73,18 @@ class TextDialogueCapacityTests(unittest.TestCase):
         for index, part in enumerate(data['shots'][0]['dialogue_parts'], 1):
             part['character_id'] = f'CHAR{index:04d}'
         result = text_dialogue_capacity([data])
-        self.assertEqual(result['status'], 'blocked')
+        self.assertEqual(result['status'], 'checked')
         self.assertEqual(result['warnings'][0]['dialogue_characters'], 8)
 
-    def test_original_shot_check_is_retained_beside_stricter_window_check(self):
+    def test_original_shot_check_is_retained_beside_fragment_risk_check(self):
         data = unit(['甲乙丙丁戊己'], end=2)
         data['shots'][0]['dialogue_parts'][0].update(start=.2, end=.3)
         result = text_dialogue_capacity([data])
-        self.assertEqual(result['status'], 'blocked')
+        self.assertEqual(result['status'], 'checked')
         self.assertNotIn('DIALOGUE_CAPACITY', {e['code'] for e in result['errors']})
         self.assertIn('SPEECH_WINDOW_CAPACITY', {e['code'] for e in result['warnings']})
-        self.assertIn('SPEECH_READING_CAPACITY', {e['code'] for e in result['errors']})
+        self.assertIn('SPEECH_READING_CAPACITY', {e['code'] for e in result['warnings']})
+        self.assertEqual(result['errors'], [])
 
     def test_silent_shots_are_skipped_without_inferring_duration_or_activity(self):
         data = {'draft_key': 'SC0001/u01', 'shots': [
@@ -102,7 +103,7 @@ class TextDialogueCapacityTests(unittest.TestCase):
         result = text_dialogue_capacity([unit(['甲乙丙丁戊己庚'], start=3, end=4)])
         self.assertEqual(result['warnings'][0]['duration'], 1)
 
-    def test_only_blocking_shot_reported_and_input_remains_byte_equivalent(self):
+    def test_only_risky_shot_reported_and_input_remains_byte_equivalent(self):
         data = unit(['甲乙丙丁戊己'], end=1)
         data['shots'].append({'start': 1, 'end': 2,
                              'dialogue_parts': [{'text': '甲乙丙丁戊己庚', 'record': 'L000002', 'start': 1, 'end': 2}]})
@@ -112,7 +113,8 @@ class TextDialogueCapacityTests(unittest.TestCase):
         self.assertEqual(data, original)
         self.assertEqual(json.dumps(data, ensure_ascii=False, sort_keys=True), encoded)
         self.assertEqual(result['checked_dialogue_shots'], 2)
-        self.assertEqual({error['shot'] for error in result['errors']}, {2})
+        self.assertEqual({warning['shot'] for warning in result['warnings']}, {2})
+        self.assertEqual(result['errors'], [])
         json.dumps(result, ensure_ascii=False)  # Public diagnostics can be emitted as JSON.
 
     def test_invalid_dialogue_text_is_rejected(self):

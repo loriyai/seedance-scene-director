@@ -1,7 +1,8 @@
-"""One frozen, deterministic timing conversion after base-draft review.
+"""Freeze reviewed timing unchanged; verify historical conversions by policy.
 
-Only structured timestamps change. Source dialogue, visual prose, cuts and
-unit boundaries remain authored. Historical exports consume saved results.
+New deliveries use the reviewed execution timeline without compression.
+The former minus-one algorithm is retained only for explicitly versioned
+historical receipts, whose frozen output must remain reproducible.
 """
 import copy
 from decimal import Decimal, ROUND_HALF_UP
@@ -10,7 +11,8 @@ import re
 import director as d
 
 
-POLICY = 'reviewed-shot-minus-one-v1'
+POLICY = 'reviewed-direct-timing-v1'
+LEGACY_POLICY = 'reviewed-shot-minus-one-v1'
 SHOT_TIME = re.compile(r'^·\d{2}秒-\d{2}秒')
 VOICE_TIME = re.compile(r'^(声音\[(?:L|SV)\d{6,},)(\d+(?:\.\d{1,3})?)-(\d+(?:\.\d{1,3})?)(\])')
 
@@ -47,16 +49,18 @@ def _retime_shot_line(text, final_start, base_length, final_length):
     return line
 
 
-def convert(units, constraints=None):
-    """Return final copies and an auditable mapping, never mutate a draft."""
+def convert(units, constraints=None, *, policy=POLICY):
+    """Freeze reviewed copies, or reproduce an explicit historical policy."""
+    d.require(policy in (POLICY, LEGACY_POLICY), '未知的最终时长转换政策')
+    legacy = policy == LEGACY_POLICY
     constraints = constraints or {}
     final_units = copy.deepcopy(units)
     mapping = []
     for base, final in zip(units, final_units):
-        d.require(not base.get('delivery_timing_policy'), '已转换的最终单元不能重复减秒')
+        d.require(not base.get('delivery_timing_policy'), '已冻结的最终单元不能重复转换或重复减秒')
         d.require(type(base['duration']) is int and 4 <= base['duration'] <= 30,
                   '基础单元须为4～30秒整数')
-        exempt = base['duration'] == 4
+        exempt = legacy and base['duration'] == 4
         cursor = 0
         base_cursor = 0
         shot_mappings = []
@@ -65,12 +69,17 @@ def convert(units, constraints=None):
             length = end - start
             d.require(type(start) is int and type(end) is int and start == base_cursor
                       and 1 <= length <= 7, '基础单镜须为连续的1～7秒整数')
-            final_length = length - 1 if length >= 4 and not exempt else length
+            final_length = length - 1 if legacy and length >= 4 and not exempt else length
             result.update(start=cursor, end=cursor + final_length)
-            result['text'] = _retime_shot_line(shot['text'], cursor, length, final_length)
+            if legacy:
+                result['text'] = _retime_shot_line(shot['text'], cursor, length, final_length)
             for part in result['dialogue_parts']:
-                part['start'], part['end'] = _window(
-                    part['start'], part['end'], start, length, cursor, final_length)
+                if legacy:
+                    part['start'], part['end'] = _window(
+                        part['start'], part['end'], start, length, cursor, final_length)
+                else:
+                    d.require(start <= part['start'] < part['end'] <= end,
+                              '已审声音窗口越界')
             row = {'shot_key': f'{base["draft_key"]}#{index}',
                    'base_start': start, 'base_end': end,
                    'final_start': cursor, 'final_end': cursor + final_length}
@@ -79,39 +88,46 @@ def convert(units, constraints=None):
                 row['base_constraints'] = copy.deepcopy(local)
                 row['final_constraints'] = copy.deepcopy(local)
                 for constraint in row['final_constraints']:
-                    constraint['start'], constraint['end'] = _window(
-                        constraint['start'], constraint['end'], 0, length, 0, final_length)
+                    if legacy:
+                        constraint['start'], constraint['end'] = _window(
+                            constraint['start'], constraint['end'], 0, length, 0, final_length)
+                    else:
+                        d.require(0 <= constraint['start'] < constraint['end'] <= length,
+                                  '已审局部时间窗口越界')
             shot_mappings.append(row)
             base_cursor = end
             cursor += final_length
         d.require(base_cursor == base['duration'] and 4 <= cursor <= 30,
                   '最终单元时长或基础时间轴不合法')
-        # Rewrite only structured time fields. Dialogue and prose are untouched.
+        # Direct delivery keeps the exact source bytes and numerical windows.
+        # Only historical conversion rewrites structured time fields.
         lines = []
         shot_index = -1
         for line in base['source_text'].splitlines(keepends=True):
             if SHOT_TIME.match(line):
                 shot_index += 1
                 row = shot_mappings[shot_index]
-                line = _retime_shot_line(line, row['final_start'],
-                                         row['base_end'] - row['base_start'],
-                                         row['final_end'] - row['final_start'])
+                if legacy:
+                    line = _retime_shot_line(line, row['final_start'],
+                                             row['base_end'] - row['base_start'],
+                                             row['final_end'] - row['final_start'])
             match = VOICE_TIME.match(line)
             if match:
                 d.require(shot_index >= 0, '声音时码缺少所属镜头')
-                row = shot_mappings[shot_index]
-                start, end = _window(float(match[2]), float(match[3]),
-                    row['base_start'], row['base_end'] - row['base_start'],
-                    row['final_start'], row['final_end'] - row['final_start'])
-                if (start, end) != (float(match[2]), float(match[3])):
-                    line = f'{match[1]}{start}-{end}{match[4]}' + line[match.end():]
+                if legacy:
+                    row = shot_mappings[shot_index]
+                    start, end = _window(float(match[2]), float(match[3]),
+                        row['base_start'], row['base_end'] - row['base_start'],
+                        row['final_start'], row['final_end'] - row['final_start'])
+                    if (start, end) != (float(match[2]), float(match[3])):
+                        line = f'{match[1]}{start}-{end}{match[4]}' + line[match.end():]
             lines.append(line)
         d.require(shot_index + 1 == len(shot_mappings), '基础文本与镜头数量不一致')
-        final.update(source_text=''.join(lines), duration=cursor, delivery_timing_policy=POLICY)
+        final.update(source_text=''.join(lines), duration=cursor, delivery_timing_policy=policy)
         mapping.append({'draft_key': base['draft_key'], 'base_duration': base['duration'],
                         'final_duration': cursor, 'four_second_unit_exempt': exempt,
                         'shots': shot_mappings})
-    summary = {'policy': POLICY, 'base_total_duration': sum(u['duration'] for u in units),
+    summary = {'policy': policy, 'base_total_duration': sum(u['duration'] for u in units),
                'final_total_duration': sum(u['duration'] for u in final_units), 'units': mapping,
                'base_units_sha256': d.sha(d.packed(units)),
                'final_units_sha256': d.sha(d.packed(final_units))}
@@ -125,14 +141,14 @@ def verify_receipt(receipt):
         d.require(not any(u.get('delivery_timing_policy') for u in receipt.get('units', [])),
                   '最终时长转换回执缺少政策记录')
         return receipt['units']
-    d.require(isinstance(timing, dict) and timing.get('policy') == POLICY,
+    d.require(isinstance(timing, dict) and timing.get('policy') in (POLICY, LEGACY_POLICY),
               '未知的最终时长转换政策')
     bases = receipt.get('source_units')
     d.require(isinstance(bases, list) and bases, '最终时长转换回执缺少已审基础单元')
     constraints = {shot['shot_key']: shot['base_constraints']
                    for unit in timing.get('units', []) for shot in unit.get('shots', [])
                    if shot.get('base_constraints')}
-    expected, summary = convert(bases, constraints)
+    expected, summary = convert(bases, constraints, policy=timing['policy'])
     d.require(expected == receipt['units'] and summary == timing,
               '最终时长转换与已审基础单元或冻结回执不一致')
     return bases

@@ -52,13 +52,15 @@ class ReadingContractTests(unittest.TestCase):
         self.assertIn('SPEECH_READING_REQUIRED', {e['code'] for e in report['errors']})
         self.assertEqual(report['semantic_review'], 'not_performed')
 
-    def test_longer_pronunciation_fails_its_actual_window(self):
+    def test_longer_pronunciation_warns_for_its_authored_window_without_approval(self):
         state, draft = self.candidate('W', [reading('W', ['达', '不', '溜'])], '0-0.2')
         report = text_dialogue_capacity(core.parse(draft, state))
-        codes = {e['code'] for e in report['errors']}
+        codes = {e['code'] for e in report['warnings']}
         self.assertNotIn('DIALOGUE_CAPACITY', codes)
         self.assertNotIn('SPEECH_WINDOW_CAPACITY', codes)
         self.assertIn('SPEECH_READING_CAPACITY', codes)
+        self.assertEqual(report['errors'], [])
+        self.assertEqual(report['semantic_review'], 'not_performed')
 
     def test_shorter_reading_retains_raw_screening_without_raw_rejection(self):
         state, draft = self.candidate('10000', [reading('10000', ['一', '万'])], '0-0.4')
@@ -210,19 +212,26 @@ class OverlapContractTests(unittest.TestCase):
 
 
 class SpeechDeliveryTests(unittest.TestCase):
-    def test_narrow_window_blocks_preview_and_incremental_without_writing_success(self):
+    def test_narrow_window_reaches_preview_and_incremental_as_unapproved_risk(self):
         from test_storyboard_text_delivery import TextDeliveryIntegration
         fx = TextDeliveryIntegration()
         fx.setUp()
         self.addCleanup(fx.doCleanups)
         draft = fx.write_draft('narrow.txt', fx.authored_text().replace('0.2-2.8', '2.7-2.8'))
-        before = fx.snapshot()
+        original = draft.read_bytes()
+        report = delivery.preview(fx.project, draft)
+        self.assertIn('SPEECH_READING_CAPACITY', {w['code'] for w in report['dialogue_capacity']['warnings']})
+        self.assertEqual(report['semantic_review'], 'not_performed')
+        self.assertEqual(draft.read_bytes(), original)
         with self.assertRaises(ValueError):
-            delivery.preview(fx.project, draft)
-        self.assertEqual(fx.snapshot(), before)
+            delivery.verify_review({}, report)
         prefix = fx.write_draft('narrow-prefix.txt', fx.authored_text(fx.state['records'][:2]).replace('0.2-2.8', '2.7-2.8'))
-        with self.assertRaises(ValueError):
-            delivery.check_incremental(fx.project, prefix)
+        before = fx.snapshot()
+        report = delivery.check_incremental(fx.project, prefix)
+        self.assertIn('SPEECH_READING_CAPACITY', {w['code'] for w in report['dialogue_capacity']['warnings']})
+        self.assertFalse(report['delivery_eligible'])
+        self.assertEqual(report['semantic_review'], 'not_performed')
+        self.assertEqual(fx.snapshot(), before)
 
     def test_cloud_pause_does_not_block_local_commit(self):
         from test_storyboard_text_delivery import TextDeliveryIntegration

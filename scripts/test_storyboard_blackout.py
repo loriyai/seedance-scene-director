@@ -129,7 +129,7 @@ class BlackoutDeliveryTests(unittest.TestCase):
         receipt = state['receipts'][0]
         self.assertEqual(timing.verify_receipt(receipt), receipt['source_units'])
         final = receipt['units'][0]
-        self.assertIn(',2.5-5秒]', final['shots'][0]['text'])
+        self.assertIn(',3-6秒]', final['shots'][0]['text'])
         self.assertIn(final['shots'][0]['text'], final['source_text'])
         delivered = self.fx.output.read_bytes()
         self.assertNotIn(self.rid.encode(), delivered)

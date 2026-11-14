@@ -41,10 +41,10 @@ def _candidate_scope(state, draft, authoring_trace, span):
 
 
 def require_dialogue_capacity(units):
-    """Reject impossible speech capacity; never redistribute author timings."""
+    """Reject malformed speech/readings; retain speed risks for review."""
     from speech_timing_audit import text_dialogue_capacity
     report = text_dialogue_capacity(units)
-    d.require(not report['errors'], '台词容量下限：' + '; '.join(
+    d.require(not report['errors'], '台词结构与读法：' + '; '.join(
         f'{row["unit"]}/镜头{row["shot"]}：{row["code"]}' for row in report['errors']))
     return report
 
@@ -56,7 +56,7 @@ def _delivery_errors(camera, capacity):
                        'message': f'摄影约束：{row["unit"]}/镜头{row["shot"]}：{row["kind"]}'})
     for row in capacity['errors']:
         errors.append({**row,
-                       'message': f'台词容量下限：{row["unit"]}/镜头{row["shot"]}：{row["code"]}'})
+                       'message': f'台词结构与读法：{row["unit"]}/镜头{row["shot"]}：{row["code"]}'})
     return errors
 
 
@@ -160,7 +160,7 @@ def check_incremental(project, draft, span=None, authoring_trace=None):
         'video_ratio': ratio,
         'ratio_profile': profile,
         'camera_constraints': camera, 'dialogue_capacity': capacity,
-        'warnings': camera['warnings'],
+        'warnings': camera['warnings'] + capacity['warnings'],
         'limits': '仅检查已经逐镜写出的前缀；没有推断动作覆盖、补写后文或审阅通过。完整场景仍须正常preview及独立主审。',
     }
 
@@ -371,7 +371,7 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
                        for unit in trace.get('units', []) for shot in unit.get('shots', [])
                        if shot.get('timing_constraints')}
     final_units, info['delivery_timing'] = storyboard_delivery_timing.convert(units, constraints)
-    # Millisecond rounding can close a visible gap at an inline transition.
+    # Check the frozen execution timeline used by all new delivery consumers.
     if any(storyboard_blackout.INLINE_MARKER.search(shot['text'])
            for unit in units for shot in unit['shots']):
         errors = _blackout_errors(state, final_units, replace_ids)
@@ -379,6 +379,7 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
             raise text_core.TextValidationError(errors, final_units)
     info['warnings'].extend(camera['warnings'])
     info['warnings'].extend(authoring.get('warnings', []))
+    info['warnings'].extend(info['dialogue_capacity']['warnings'])
     binding = {'draft_sha256': hashlib.sha256(draft_bytes).hexdigest(),
                'context_sha256': context,
                'header_sha256': d.sha(header)}
@@ -829,7 +830,8 @@ def commit(project, draft, request_id, review, output, span=None,
         units, delivery_timing = storyboard_delivery_timing.convert(source_units, constraints)
         final_by_id = {unit['id']: unit for unit in units}
         working['units'] = [final_by_id.get(unit['id'], unit) for unit in working['units']]
-        # Validate source projections and windows without reapplying base-speed gates.
+        # Timing is unchanged from prepare/review; validate the same source
+        # projections and windows after attaching delivery metadata.
         text_core.validate(working, units)
         receipt = {'policy': POLICY, 'request_id': request_id, 'request_hash': request_hash,
                    'mode': mode, 'output': str(target), 'units': copy.deepcopy(units),

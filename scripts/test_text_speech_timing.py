@@ -1,4 +1,4 @@
-"""Window capacity rejects impossible timings without approving performance."""
+"""Speech-load risks remain visible without turning estimates into approval."""
 import copy
 from decimal import Decimal
 import json
@@ -26,15 +26,19 @@ class TextSpeechWindowTests(unittest.TestCase):
         self.assertEqual(result['speech_window_diagnostics']['shots'], [])
         self.assertEqual(result['status'], 'checked')
 
-    def test_tight_fragment_is_blocked_even_when_whole_shot_has_capacity(self):
+    def test_tight_fragment_warns_even_when_whole_shot_has_capacity(self):
         data = unit(parts=[fragment(start=.2, end=.3)])
         result = text_dialogue_capacity([data])
-        self.assertEqual(result['status'], 'blocked')
+        self.assertEqual(result['status'], 'checked')
         self.assertIn('SPEECH_WINDOW_CAPACITY', {e['code'] for e in result['warnings']})
-        self.assertIn('SPEECH_READING_CAPACITY', {e['code'] for e in result['errors']})
-        self.assertNotIn('DIALOGUE_CAPACITY', {e['code'] for e in result['errors']})
+        self.assertIn('SPEECH_READING_CAPACITY', {e['code'] for e in result['warnings']})
+        self.assertIn('UTTERANCE_CAPACITY', {e['code'] for e in result['warnings']})
+        self.assertEqual(result['errors'], [])
+        self.assertEqual(result['semantic_review'], 'not_performed')
         diagnostics = result['speech_window_diagnostics']
         self.assertIs(diagnostics['blocking'], True)
+        self.assertFalse(diagnostics['capacity_estimates_blocking'])
+        self.assertFalse(diagnostics['acceptance_standard'])
         row = diagnostics['shots'][0]
         self.assertAlmostEqual(row['before_first_speech'], .2)
         self.assertAlmostEqual(row['after_last_speech'], 1.7)
@@ -44,6 +48,9 @@ class TextSpeechWindowTests(unittest.TestCase):
         self.assertEqual(part['mechanical_minimum'], 1)
         self.assertIs(part['below_mechanical_minimum'], True)
         self.assertAlmostEqual(part['deficit'], .9)
+        warning = next(w for w in result['warnings'] if w['code'] == 'SPEECH_READING_CAPACITY')
+        self.assertAlmostEqual(warning['window_average_units_per_second'], 60)
+        self.assertEqual(data['shots'][0]['dialogue_parts'][0]['text'], '甲乙丙丁戊己')
 
     def test_unit_relative_times_and_multiple_fragments_preserve_gaps(self):
         data = unit(start=10, end=16, parts=[
@@ -74,10 +81,11 @@ class TextSpeechWindowTests(unittest.TestCase):
     def test_original_whole_shot_screening_is_preserved(self):
         result = text_dialogue_capacity([unit(end=1, parts=[
             fragment('甲乙丙丁戊己庚', start=0, end=1)])])
-        self.assertEqual(result['status'], 'blocked')
+        self.assertEqual(result['status'], 'checked')
         self.assertEqual(result['warnings'][0]['code'], 'DIALOGUE_CAPACITY')
         self.assertAlmostEqual(result['warnings'][0]['minimum'], 7 / 6)
-        self.assertEqual(result['errors'][0]['code'], 'SPEECH_READING_CAPACITY')
+        self.assertIn('SPEECH_READING_CAPACITY', {w['code'] for w in result['warnings']})
+        self.assertEqual(result['errors'], [])
 
     def test_fragment_load_uses_same_exact_formula_and_decimal_comparison(self):
         row = self.facts(unit(end=2, parts=[fragment(
@@ -117,14 +125,19 @@ class TextSpeechWindowTests(unittest.TestCase):
         self.assertEqual(data, original)
         json.dumps(result, ensure_ascii=False, allow_nan=False)
 
-    def test_delivery_wrapper_forwards_nested_facts_and_keeps_gate(self):
+    def test_delivery_wrapper_forwards_risks_and_keeps_structural_gate(self):
         from storyboard_text_delivery import require_dialogue_capacity
         data = unit(parts=[fragment(start=.2, end=1.3)])
         self.assertEqual(require_dialogue_capacity([data]), text_dialogue_capacity([data]))
-        with self.assertRaisesRegex(ValueError, 'SPEECH_READING_CAPACITY'):
-            require_dialogue_capacity([unit(parts=[fragment(start=.2, end=.3)])])
-        with self.assertRaisesRegex(ValueError, 'SPEECH_READING_CAPACITY'):
-            require_dialogue_capacity([unit(end=1, parts=[fragment('甲乙丙丁戊己庚', start=0, end=1)])])
+        for data in [unit(parts=[fragment(start=.2, end=.3)]),
+                     unit(end=1, parts=[fragment('甲乙丙丁戊己庚', start=0, end=1)])]:
+            result = require_dialogue_capacity([data])
+            self.assertIn('SPEECH_READING_CAPACITY', {w['code'] for w in result['warnings']})
+            self.assertEqual(result['semantic_review'], 'not_performed')
+        with self.assertRaisesRegex(ValueError, 'SPEECH_WINDOW_INVALID'):
+            require_dialogue_capacity([unit(parts=[fragment(start=.2, end=3)])])
+        with self.assertRaisesRegex(ValueError, 'SPEECH_READING_REQUIRED'):
+            require_dialogue_capacity([unit(parts=[fragment('API', start=0, end=1)])])
 
     def test_complete_and_incremental_reports_forward_actual_parsed_windows(self):
         import storyboard_text_delivery as delivery

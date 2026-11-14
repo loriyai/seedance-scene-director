@@ -95,15 +95,17 @@ class IncrementalAuthorChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '增量检查'):
             delivery.verify_review({}, {'validation_scope': 'authored_prefix_only'})
 
-    def test_incremental_never_bypasses_missing_refs_or_impossible_dialogue(self):
+    def test_incremental_keeps_reference_gate_and_exposes_short_speech_risk(self):
         text = self.fx.authored_text(self.fx.state['records'][:1]).replace(
             '人物站位：@{CHAR0001}在画面左侧。', '人物站位：陈默在画面左侧。')
         with self.assertRaisesRegex(ValueError, 'REFERENCE|引用'):
             delivery.check_incremental(self.fx.project, self.draft(text))
         blocks = self.fx.authored_text(self.fx.state['records'][:2]).strip().split('\n\n')
         blocks[1] = blocks[1].replace('00秒-04秒', '00秒-01秒').replace('0.2-2.8', '0.1-0.9')
-        with self.assertRaisesRegex(ValueError, 'SPEECH_READING_CAPACITY'):
-            delivery.check_incremental(self.fx.project, self.draft('\n\n'.join(blocks)))
+        result = delivery.check_incremental(self.fx.project, self.draft('\n\n'.join(blocks)))
+        self.assertIn('SPEECH_READING_CAPACITY', {w['code'] for w in result['dialogue_capacity']['warnings']})
+        self.assertFalse(result['delivery_eligible'])
+        self.assertEqual(result['semantic_review'], 'not_performed')
 
     def test_multiscene_prefix_rejected_without_changing_default_complete_route(self):
         with self.assertRaisesRegex(ValueError, '一场|单场'):

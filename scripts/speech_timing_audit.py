@@ -7,7 +7,7 @@ import unicodedata
 from dialogue_layout import pause_seconds, SPEEDS, PAUSE_RANGES
 
 
-TEXT_DIALOGUE_CAPACITY_POLICY = 'scene-text-dialogue-capacity-v2'
+TEXT_DIALOGUE_CAPACITY_POLICY = 'scene-text-dialogue-capacity-v3'
 
 # Readings are authored, source-local annotations, never inferred pronunciation.
 READING_TOKEN = re.compile(
@@ -189,12 +189,12 @@ def _speech_window_facts(key, number, parts, start, end):
 
 
 def text_dialogue_capacity(units):
-    """Screen raw text and check declared readings in actual speech windows.
+    """Screen authored speech windows without imposing a universal speed limit.
 
-    The original character formula is a nonblocking screening diagnostic.
-    Source-supported overlap is screened per participant. Actual reading
-    capacity is checked per fragment without editing source text or approving
-    natural pacing.
+    Character and declared-reading formulas are nonblocking risk diagnostics,
+    not physical lower bounds or measured speech. Invalid windows, annotations
+    and missing readings still block. Source-supported overlap is screened per
+    participant; no estimate rewrites dialogue or approves natural pacing.
     """
     errors = []
     warnings = []
@@ -261,9 +261,13 @@ def text_dialogue_capacity(units):
                                    'kind': '片段字符公式提示容量疑点，须结合实际读法核对；不单独阻断。'})
                 _, phonetic_minimum, missing = _reading_load(part)
                 if not missing and Decimal(str(part['end'])) - Decimal(str(part['start'])) < phonetic_minimum:
-                    errors.append({**common, 'code': 'SPEECH_READING_CAPACITY',
+                    warnings.append({**common, 'code': 'SPEECH_READING_CAPACITY',
                                    'minimum': float(phonetic_minimum), 'duration': fact['duration'],
-                                   'kind': '实际发声窗口放不下已声明读法及机械停顿下限。'})
+                                   'deficit': float(phonetic_minimum - (Decimal(str(part['end'])) - Decimal(str(part['start'])))),
+                                   'phonetic_units': fact['phonetic_units'],
+                                   'window_average_units_per_second': fact['phonetic_units'] / fact['duration'],
+                                   'kind': '声音窗口低于读法经验估值，须核对整次发言、必要停顿与完整表达；'
+                                           '公式不是物理下限，不单独阻断，也不表示语速已获批准。'})
                 utterances.setdefault(part.get('record'), []).append({
                     **common, 'start': float(offset + Decimal(str(part['start']))),
                     'end': float(offset + Decimal(str(part['end']))), 'text': part['text'],
@@ -286,8 +290,11 @@ def text_dialogue_capacity(units):
             'phonetic_minimum': float(reading_minimum) if readings_complete else None,
             'between_parts': [round(parts[i]['start'] - parts[i - 1]['end'], 6) for i in range(1, len(parts))]})
         if readings_complete and available < reading_minimum:
-            errors.append({'code': 'UTTERANCE_CAPACITY', 'unit': parts[0]['unit'], 'shot': parts[0]['shot'],
-                           'record': record, 'kind': '本选区同次发言的实际声音窗口合计不足，跨镜间隔不计为发声。'})
+            warnings.append({'code': 'UTTERANCE_CAPACITY', 'unit': parts[0]['unit'], 'shot': parts[0]['shot'],
+                             'record': record, 'minimum': float(reading_minimum),
+                             'duration': float(available), 'deficit': float(reading_minimum - available),
+                             'kind': '本选区同次发言的声音窗口合计低于读法经验估值，须实际复核完整说法；'
+                                     '跨镜间隔不计为发声，公式不单独阻断，也不证明能够自然说完。'})
     return {'policy': TEXT_DIALOGUE_CAPACITY_POLICY,
             'status': 'blocked' if errors else 'checked',
             'errors': errors, 'warnings': warnings, 'checked_dialogue_shots': checked,
@@ -296,11 +303,14 @@ def text_dialogue_capacity(units):
             'skipped_no_dialogue_shots': skipped,
             'speech_window_diagnostics': {
                 'blocking': True, 'time_basis': 'authored_unit_relative_seconds',
+                'capacity_estimates_blocking': False, 'acceptance_standard': False,
                 'shots': window_facts,
                 'limits': '仅列作者声音时窗与原话机械负荷；不是实际录音测量或语速批准。'
-                          '确定容量不足阻断，宽窗及前后间隔不自动判为拖慢；必要气口与声画关系须实际审阅。',
+                          '非法时窗、无效依据或读法缺失阻断；经验容量不足只提示风险。'
+                          '宽窗及前后间隔不自动判为拖慢；完整发言、必要气口与声画关系须实际审阅。',
             },
             'utterance_diagnostics': {'time_basis': 'selected_units_concatenated_seconds',
+                'capacity_estimates_blocking': False,
                 'records': utterance_facts, 'scope': '仅合看本候选实际原话片段；不推断范围外发言或实际录音'},
             'semantic_review': 'not_performed'}
 

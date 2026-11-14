@@ -196,7 +196,7 @@ class TextDiagnosticsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             delivery.verify_review({}, result)
 
-    def test_gate_camera_and_speech_errors_are_returned_together(self):
+    def test_gate_and_camera_errors_remain_blocking_despite_speech_risks(self):
         text = self.fx.draft.read_text(encoding='utf-8')
         text = re.sub(r'(；转场：硬切）)[^；]+；', r'\1摄影机固定在桌侧观察；', text)
         text = re.sub(r'主光：[^；\r\n]+；', '', text)
@@ -220,8 +220,8 @@ class TextDiagnosticsTests(unittest.TestCase):
         with self.assertRaises(gate.AuthoringGateError) as caught:
             delivery.preview(self.fx.project, self.fx.draft, authoring_trace=trace)
         codes = {e['code'] for e in caught.exception.errors}
-        self.assertTrue({'AUTHORING_LIGHTING_UNDER_SPECIFIED', 'CAMERA_CONSTRAINT',
-                         'SPEECH_READING_CAPACITY'} <= codes, codes)
+        self.assertTrue({'AUTHORING_LIGHTING_UNDER_SPECIFIED', 'CAMERA_CONSTRAINT'} <= codes, codes)
+        self.assertNotIn('SPEECH_READING_CAPACITY', codes)
         self.assertEqual(before, self.fx.snapshot())
 
 

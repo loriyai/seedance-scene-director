@@ -21,34 +21,34 @@ class FinalTimingDeliveryTests(unittest.TestCase):
         self.fx.draft.write_text(self.fx.authored_text().replace('00秒-04秒', '00秒-07秒'),
                                  encoding='utf-8')
 
-    def test_preview_keeps_base_and_commit_freezes_final_for_all_consumers(self):
+    def test_preview_and_commit_freeze_the_same_timeline_for_all_consumers(self):
         base_bytes = self.fx.draft.read_bytes()
         preview = delivery.preview(self.fx.project, self.fx.draft)
         self.assertEqual(preview['total_duration'], 28)
-        self.assertEqual(preview['delivery_timing']['final_total_duration'], 24)
+        self.assertEqual(preview['delivery_timing']['final_total_duration'], 28)
         self.assertIn('00秒-07秒', Path(preview['output']).read_text(encoding='utf-8'))
         result = self.fx.commit_fixture()
-        self.assertEqual(result['total_seconds'], 24)
+        self.assertEqual(result['total_seconds'], 28)
         state = d.load(self.fx.project)
         receipt = state['receipts'][0]
         self.assertEqual([u['duration'] for u in receipt['source_units']], [7] * 4)
-        self.assertEqual([u['duration'] for u in state['units']], [6] * 4)
+        self.assertEqual([u['duration'] for u in state['units']], [7] * 4)
         self.assertEqual(self.fx.draft.read_bytes(), base_bytes)
         for unit in state['units']:
-            self.assertIn('00秒-06秒', unit['source_text'])
+            self.assertIn('00秒-07秒', unit['source_text'])
             rendered = d.render_unit(state, unit)
-            self.assertIn('时长：6秒', rendered)
-            self.assertIn('00秒-06秒', rendered)
+            self.assertIn('时长：7秒', rendered)
+            self.assertIn('00秒-07秒', rendered)
         part = state['units'][1]['shots'][0]['dialogue_parts'][0]
-        self.assertEqual((part['start'], part['end']), (0.171, 2.4))
+        self.assertEqual((part['start'], part['end']), (0.2, 2.8))
         self.assertEqual(timing.verify_receipt(receipt), receipt['source_units'])
         self.assertEqual(self.fx.output.read_text(encoding='utf-8'),
                          delivery.render_units(state, receipt['units'], historical_receipt=receipt))
         videos, _ = canvas.desired_videos(state, {'mappings': {}}, {}, state['units'])
-        self.assertEqual([video['duration'] for video in videos], [6] * 4)
-        self.assertTrue(all('时长：6秒' in video['prompt'] for video in videos))
+        self.assertEqual([video['duration'] for video in videos], [7] * 4)
+        self.assertTrue(all('时长：7秒' in video['prompt'] for video in videos))
 
-    def test_failed_write_retry_and_cli_export_never_repeat_compression(self):
+    def test_failed_write_retry_and_cli_export_keep_reviewed_timing(self):
         self.fx.write_synthetic_review_fixture()
         atomic_text = d.atomic_text
 
@@ -64,7 +64,7 @@ class FinalTimingDeliveryTests(unittest.TestCase):
         for _ in range(2):
             result = delivery.commit(self.fx.project, self.fx.draft, 'timed', self.fx.review, self.fx.output)
             self.assertEqual(result['status'], 'already_committed')
-            self.assertEqual(result['total_seconds'], 24)
+            self.assertEqual(result['total_seconds'], 28)
             self.assertEqual((self.fx.project / 'session.json').read_bytes(), frozen)
         exported = self.fx.project / 'outputs/reexport.txt'
         self.fx.cli('storyboard_text_delivery.py', 'render', '--project', self.fx.project,
@@ -84,7 +84,7 @@ class FinalTimingDeliveryTests(unittest.TestCase):
         self.assertEqual((self.fx.project / 'session.json').read_bytes(), before)
         self.assertFalse(self.fx.output.exists())
 
-    def test_replacement_keeps_original_compressed_receipt_renderable(self):
+    def test_replacement_keeps_original_direct_receipt_renderable(self):
         self.fx.commit_fixture()
         old_bytes = self.fx.output.read_bytes()
         old = d.load(self.fx.project)['receipts'][0]
@@ -94,16 +94,16 @@ class FinalTimingDeliveryTests(unittest.TestCase):
         revised_output = self.fx.project / 'outputs/revised.txt'
         self.fx.commit_fixture(replacement, 'revision', revised_output, replace_ids=[selected['id']])
         state = d.load(self.fx.project)
-        self.assertEqual(state['units'][0]['duration'], 5)
-        self.assertEqual(state['receipts'][0]['units'][0]['duration'], 6)
+        self.assertEqual(state['units'][0]['duration'], 6)
+        self.assertEqual(state['receipts'][0]['units'][0]['duration'], 7)
         d.render_receipt(state, state['receipts'][0], self.fx.project)
         self.assertEqual(self.fx.output.read_bytes(), old_bytes)
         retry = delivery.commit(self.fx.project, replacement, 'revision', self.fx.review,
                                  revised_output, replace_ids=[selected['id']])
         self.assertEqual(retry['status'], 'already_committed')
-        self.assertEqual(retry['total_seconds'], 5)
+        self.assertEqual(retry['total_seconds'], 6)
 
-    def test_speech_capacity_is_checked_on_base_before_authorized_final_conversion(self):
+    def test_reviewed_speech_windows_and_capacity_are_unchanged_at_delivery(self):
         from speech_timing_audit import text_dialogue_capacity
         authored = self.fx.authored_text().replace('00秒-04秒', '00秒-05秒').replace(
             ',0.2-2.8]', ',0.2-1.7]')
@@ -112,7 +112,8 @@ class FinalTimingDeliveryTests(unittest.TestCase):
         self.assertEqual(info['dialogue_capacity']['errors'], [])
         self.fx.commit_fixture()
         receipt = d.load(self.fx.project)['receipts'][0]
-        self.assertTrue(text_dialogue_capacity(receipt['units'])['errors'])
+        self.assertEqual(text_dialogue_capacity(receipt['units'])['errors'], [])
+        self.assertEqual(receipt['units'][1]['shots'], receipt['source_units'][1]['shots'])
         self.assertEqual(receipt['units'][1]['shots'][0]['dialogue_parts'][0]['text'],
                          receipt['source_units'][1]['shots'][0]['dialogue_parts'][0]['text'])
 
@@ -135,11 +136,58 @@ class FinalTimingDeliveryTests(unittest.TestCase):
         rendered = delivery.render_units(state, receipt['units'])
         receipt['output_sha256'] = d.sha(rendered)
         d.write_json(self.fx.project / 'session.json', state)
-        self.fx.output.write_text(rendered, encoding='utf-8')
+        self.fx.output.write_text(rendered, encoding='utf-8', newline='\n')
         result = delivery.commit(self.fx.project, self.fx.draft, 'fictional-first',
                                  self.fx.review, self.fx.output)
         self.assertEqual(result['total_seconds'], 24)
         self.assertIn('00秒-06秒', self.fx.output.read_text(encoding='utf-8'))
+
+    def test_minus_one_receipt_retry_render_and_replacement_keep_frozen_history(self):
+        self.fx.commit_fixture()
+        state = d.load(self.fx.project)
+        receipt = state['receipts'][0]
+        # Reconstruct a historical minus-one receipt from its reviewed draft;
+        # the current retry must use that frozen policy, not the new default.
+        legacy_units, report = timing.convert(receipt['source_units'], policy=timing.LEGACY_POLICY)
+        receipt.update(units=legacy_units, delivery_timing=report)
+        state['units'] = copy.deepcopy(legacy_units)
+        binding = {'policy': delivery.POLICY,
+                   'delivery_timing_policy': timing.LEGACY_POLICY,
+                   'draft_sha256': receipt['final_review']['draft_sha256'], 'mode': 'append',
+                   'replace_ids': [], 'span': [legacy_units[0]['span'][0], legacy_units[-1]['span'][1]],
+                   'header_sha256': d.sha(self.fx.header), 'video_ratios': receipt['video_ratios'],
+                   'ratio_profiles': receipt['ratio_profiles']}
+        receipt['request_hash'] = delivery.digest(binding)
+        rendered = delivery.render_units(state, legacy_units, historical_receipt=receipt)
+        receipt['output_sha256'] = d.sha(rendered)
+        d.write_json(self.fx.project / 'session.json', state)
+        self.fx.output.write_text(rendered, encoding='utf-8', newline='\n')
+        old_bytes = self.fx.output.read_bytes()
+        old_session = (self.fx.project / 'session.json').read_bytes()
+        for _ in range(2):
+            result = delivery.commit(self.fx.project, self.fx.draft, 'fictional-first',
+                                     self.fx.review, self.fx.output)
+            self.assertEqual(result['status'], 'already_committed')
+            self.assertEqual(result['total_seconds'], 24)
+            self.assertEqual(self.fx.output.read_bytes(), old_bytes)
+            self.assertEqual((self.fx.project / 'session.json').read_bytes(), old_session)
+        exported = self.fx.project / 'outputs/legacy-reexport.txt'
+        self.fx.cli('storyboard_text_delivery.py', 'render', '--project', self.fx.project,
+                    '--request-id', 'fictional-first', '--output', exported)
+        self.assertEqual(exported.read_bytes(), old_bytes)
+        selected = receipt['source_units'][0]
+        replacement = self.fx.write_draft('legacy-replacement.txt', selected['source_text'].replace(
+            '00秒-07秒', '00秒-05秒'))
+        revised_output = self.fx.project / 'outputs/revised-direct.txt'
+        result = self.fx.commit_fixture(replacement, 'direct-revision', revised_output,
+                                        replace_ids=[selected['id']])
+        self.assertEqual(result['total_seconds'], 5)
+        revised = d.load(self.fx.project)
+        self.assertEqual(revised['units'][0]['duration'], 5)
+        self.assertEqual(revised['receipts'][1]['delivery_timing']['policy'], timing.POLICY)
+        self.assertEqual(revised['receipts'][0]['units'][0]['duration'], 6)
+        d.render_receipt(revised, revised['receipts'][0], self.fx.project)
+        self.assertEqual(self.fx.output.read_bytes(), old_bytes)
 
     def test_modern_trace_constraints_are_frozen_without_changing_reviewed_files(self):
         bound = authoring_fixtures.TraceBindingIntegrationTest('runTest')
@@ -167,7 +215,7 @@ class FinalTimingDeliveryTests(unittest.TestCase):
         delivery.commit(fx.project, fx.draft, 'bound-timing', fx.review, fx.output)
         receipt = d.load(fx.project)['receipts'][0]
         constraint = receipt['delivery_timing']['units'][0]['shots'][0]['final_constraints'][0]
-        self.assertEqual((constraint['start'], constraint['end']), (0.8, 3.2))
+        self.assertEqual((constraint['start'], constraint['end']), (1, 4))
         self.assertEqual(trace.read_bytes(), trace_bytes)
         self.assertEqual(fx.draft.read_text(encoding='utf-8'), authored)
         retry = delivery.commit(fx.project, fx.draft, 'bound-timing', fx.review, fx.output)
