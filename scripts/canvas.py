@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,11 +25,33 @@ import director as d
 import canvas_media as media
 import ratio_profiles
 import canvas_transport as transport
+import canvas_space_defaults as space_defaults
 
 KINDS = {"role": "biz/role", "scene": "biz/scene", "image": "biz/image", "video": "biz/video", "audio": "biz/audio", "text": "biz/text"}
 NODE_ASSET_TAG = re.compile(r"<node-asset\b[^>]*>([^<]*)</node-asset>")
 VIDEO_READBACK_ATTEMPTS = 3
 VIDEO_READBACK_DELAY = 0.5
+
+
+def credential_identity(status):
+    """Identify the active credential without storing its secret or guessing a UID.
+
+    CLI 1.0.57 deliberately omits browser identity for an environment Access
+    Key. Use a domain-separated credential fingerprint for local isolation;
+    preflight still verifies the selected space, canvas and permissions on the
+    server. A changed Key gets a different scope and cannot reuse a binding.
+    """
+    identity = status.get("uid") or status.get("credential_scope")
+    if identity:
+        return str(identity), "cli-account-or-scope"
+    if status.get("logged_in") is True and status.get("source") == "environment":
+        key = os.environ.get("XYQ_ACCESS_KEY", "").strip()
+        if key:
+            fingerprint = hashlib.sha256(b"seedance-environment-credential-v1\0" + key.encode("utf-8")).hexdigest()
+            return "environment-credential-v1:" + fingerprint, "environment-credential-scope"
+    return None, None
+
+
 ASSET_IMAGE_DEFAULTS = {"resolution": "2K", "effort": "high", "ratio": "16:9"}
 ASSET_CONTRACT = "generation-prompt-v2"
 BATCH_PROTOCOL = "cli-command-batch-v2"
@@ -158,12 +181,14 @@ class CLI:
             status = self.native("status")
         if not status.get("logged_in"):
             fail("LOGIN_REQUIRED", "小云雀CLI尚未完成授权。")
-        identity = status.get("uid") or status.get("credential_scope")
+        identity, identity_kind = credential_identity(status)
         if not identity:
             fail("IDENTITY_REQUIRED", "CLI未返回账号标识；请使用浏览器登录后再绑定画布。")
         status["identity"] = str(identity)
+        status["identity_kind"] = identity_kind
         # Store public account metadata only, never status wholesale.
-        self.config.update(account_id=str(identity), source=status.get("source"), expires_at=status.get("expires_at"))
+        self.config.update(account_id=str(identity), identity_kind=identity_kind,
+                           source=status.get("source"), expires_at=status.get("expires_at"))
         d.write_json(self.directory / "connection.json", self.config)
         return status
 
@@ -182,7 +207,11 @@ class CLI:
         with tempfile.TemporaryDirectory(prefix="command-", dir=self.directory) as temporary:
             path = Path(temporary) / "input.json"
             d.write_json(path, value or {})
-            result = run_json([self.config["node_path"], self.config["canvas_entry"], "canvas", "command", "run",
+            entry = ([self.config["node_path"], Path(__file__).with_name("canvas_key_command.js"),
+                      self.config["cli_path"], self.config["canvas_entry"]]
+                     if os.environ.get("XYQ_ACCESS_KEY", "").strip()
+                     else [self.config["node_path"], self.config["canvas_entry"]])
+            result = run_json([*entry, "canvas", "command", "run",
                                name, "--canvas-id", canvas_id, *self.space_args(), "--file", path], self.project)
         if result.get("ok") is not True:
             fail("CLI_ERROR", "画布命令没有确认成功。")
@@ -364,18 +393,46 @@ def binding_space(cli, target, previous, account_id, explicit=None):
         return normalize_team_id(explicit), "explicit"
     if same and previous.get("team_id") is not None:
         return normalize_team_id(previous["team_id"]), "saved_binding"
-    spaces = cli.native("space", "list")
-    teams = [row for row in spaces.get("spaces", []) if row.get("team_id") not in (None, "0")]
+    # A successful intake preflight may precede the formal asset binding by a
+    # long local production stage. Reuse its selected space only as a candidate
+    # for the same credential and target; bind/preflight still query it again.
+    preflight_path = Path(cli.project) / "canvas" / "preflight.json" if getattr(cli, "project", None) else None
+    if preflight_path and preflight_path.is_file():
+        cached = d.read_json(preflight_path)
+        checked = cached.get("target") or {}
+        matching_target = (bool(target.get("canvas_id")) and target.get("canvas_id") == checked.get("canvas_id")
+                           or bool(target.get("overview_id")) and target.get("overview_id") == checked.get("overview_id"))
+        if (cached.get("status") == "passed" and cached.get("account_id") == account_id
+                and matching_target and target.get("project_id") == checked.get("project_id")
+                and cached.get("team_id") is not None):
+            return normalize_team_id(cached["team_id"]), "verified_preflight_candidate"
     if target.get("space_hint") == "personal":
         return "0", "url_candidate"
-    if target.get("space_hint") == "team":
-        if len(teams) == 1:
-            return normalize_team_id(teams[0]["team_id"]), "url_and_single_team_candidate"
-        fail("SPACE_REQUIRED", "链接提示团队空间，但不能唯一确定团队；请按space list结果传--team-id。", teams=teams)
-    current = spaces.get("current") or {}
-    if current.get("team_id") is not None:
-        return normalize_team_id(current["team_id"]), "current_space_candidate"
-    fail("SPACE_REQUIRED", "无法确定本次画布空间；请传--team-id。", teams=teams)
+    selected = space_defaults.selection(account_id)
+    if selected:
+        return normalize_team_id(selected['team_id']), "user_space_default"
+    spaces = cli.native("space", "list")
+    fail("SPACE_REQUIRED", "首次使用请选择默认空间；选择一次后，后续项目自动沿用。",
+         spaces=spaces.get("spaces", []))
+
+
+def space_options(cli):
+    account = cli.auth()
+    spaces = cli.native('space', 'list').get('spaces')
+    d.require(isinstance(spaces, list) and spaces, 'CLI未返回可选空间')
+    return {'status': 'space_options', 'spaces': spaces,
+            'default_space': space_defaults.selection(account['identity'])}
+
+
+def select_space(cli, team_id):
+    account = cli.auth()
+    selected = normalize_team_id(team_id)
+    spaces = cli.native('space', 'list').get('spaces', [])
+    matches = [row for row in spaces if isinstance(row, dict) and row.get('team_id') == selected]
+    d.require(len(matches) == 1, '当前凭据可访问的空间列表中没有唯一匹配项；默认空间未改变')
+    saved = space_defaults.save_selection(account['identity'], selected, matches[0].get('name', selected))
+    return {'status': 'space_default_saved', 'default_space': saved,
+            'existing_project_bindings_changed': False}
 
 
 def document(cli, binding):
@@ -578,17 +635,22 @@ def preflight(project, cli, target, team_id=None):
         selected, evidence = binding_space(cli, parsed, previous, account["identity"], team_id)
         candidate = dict(parsed, account_id=account["identity"], team_id=selected,
                          space_evidence=evidence)
+        # Resolving an overview asset is already a space-scoped query. Install
+        # the in-memory candidate first; this is not a persisted canvas binding.
+        cli.use_binding(candidate)
         if not candidate.get("canvas_id"):
             candidate.update(parse_target(target, cli))
         cli.use_binding(candidate)
     except (ValueError, OSError, KeyError) as exc:
+        details = getattr(exc, 'details', {})
+        selection = ({'spaces': details['spaces']} if 'spaces' in details else {})
         receipt = {"schema": 1, "mode": "read-only-preflight", "status": "failed",
                    "target": candidate, "account_id": (account or {}).get("identity"),
                    "team_id": selected, "error": safe_message(exc),
-                   "writes_performed": []}
+                   "reason_code": getattr(exc, 'code', None), **selection, "writes_performed": []}
         d.write_json(receipt_path, receipt)
         fail("PREFLIGHT_FAILED", "画布只读预检未通过；未写入绑定、未创建节点。",
-             team_id=selected, cause=safe_message(exc))
+             team_id=selected, cause=safe_message(exc), reason_code=getattr(exc, 'code', None), **selection)
     try:
         permissions = cli.command(candidate["canvas_id"], "get_permissions")
         d.require(permissions.get("canvasId") == candidate["canvas_id"], "权限回执画布不一致")
@@ -2622,7 +2684,7 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("setup", "auth", "preflight", "bind", "status", "assets", "videos", "references", "images", "edit", "delete", "black"))
+    parser.add_argument("command", choices=("setup", "auth", "space-options", "space-select", "preflight", "bind", "status", "assets", "videos", "references", "images", "edit", "delete", "black"))
     parser.add_argument("--project", required=True, type=Path)
     parser.add_argument("--node")
     parser.add_argument("--login", action="store_true")
@@ -2648,6 +2710,11 @@ def main():
             elif args.command == "auth":
                 auth = cli.auth(login=args.login, force=args.force)
                 result = {"status": "authenticated", "account_id": auth["identity"]}
+            elif args.command == 'space-options':
+                result = space_options(cli)
+            elif args.command == 'space-select':
+                d.require(args.team_id is not None, '选择默认空间需要--team-id')
+                result = select_space(cli, args.team_id)
             elif args.command == "preflight":
                 d.require(args.target, "只读画布预检需要--target")
                 result = preflight(args.project, cli, args.target, args.team_id)

@@ -9,15 +9,29 @@
 ```text
 python <skill>/scripts/canvas.py setup --project <project> [--node <node绝对路径>]
 python <skill>/scripts/canvas.py auth --project <project> --login
+python <skill>/scripts/canvas.py space-options --project <project>
+python <skill>/scripts/canvas.py space-select --project <project> --team-id <所选空间ID>
 python <skill>/scripts/canvas.py bind --project <project> --target <画布链接或真实画布ID> [--team-id <空间ID>]
 python <skill>/scripts/canvas.py status --project <project>
 ```
 
-`setup`只接受官方CLI及npm运行时版本1.0.57，核对两者版本和本Skill实际调用的命令；缺少时用包内`ensure-cli.js`安装固定的`@pippit-dev/cli@1.0.57`到版本专用缓存。必要原生命令为status/login、canvas get/allocate/upload及space list；canvas get必须支持--team-id。必要语义命令覆盖快照、权限、apply_mutations、节点创建/更新/删除（含update_asset）、引用连线的create_edge与精确删除引用边的delete_edges、提示词写入、角色/场景描述及角色主图更新。create_edge用于派生角色与场景图片引用及历史黑幕引用；新none-v1视频仍不创建黑幕连线。角色updateAppearance须支持patch.generationPrompt与expected.generationPrompt，以及派生图片引用所需的patch.generation与expected.generation整体配置字段；不能只凭命令名存在认定支持。create_checkpoint只在权限支持时使用，保持可选；不探测本Skill不调用的模型列表/描述、生图、生视频、超分、擦字幕、积分、query-result、logout或canvas create。`auth --login`先检查status，已有登录不重复打开授权页。首次提示用户完成浏览器授权；CLI自行保存安全凭据。配置文件只保存CLI/Node路径、版本和公开账号标识，禁止保存密钥、完整status、认证环境变量或浏览器存储。CLI报401/403时先判断账号/权限；仅确认浏览器凭据过期或撤销后使用`auth --login --force`，不将force作为常规操作。
+`setup`只接受官方CLI及npm运行时版本1.0.57，核对两者版本和本Skill实际调用的命令；缺少时用包内`ensure-cli.js`安装固定的`@pippit-dev/cli@1.0.57`到版本专用缓存。必要原生命令为status/login、canvas get/allocate/upload及space list；canvas get必须支持--team-id。必要语义命令覆盖快照、权限、apply_mutations、节点创建/更新/删除（含update_asset）、引用连线的create_edge与精确删除引用边的delete_edges、提示词写入、角色/场景描述及角色主图更新。create_edge用于派生角色与场景图片引用及历史黑幕引用；新none-v1视频仍不创建黑幕连线。角色updateAppearance须支持patch.generationPrompt与expected.generationPrompt，以及派生图片引用所需的patch.generation与expected.generation整体配置字段；不能只凭命令名存在认定支持。create_checkpoint只在权限支持时使用，保持可选；不探测本Skill不调用的模型列表/描述、生图、生视频、超分、擦字幕、积分、query-result、logout或canvas create。`auth --login`先检查status，已有登录不重复打开授权页。仅用户选择网页登录且没有有效环境Key时才提示浏览器授权；长期Key流程见下节。配置文件只保存CLI/Node路径、版本和公开账号标识，禁止保存密钥、完整status、认证环境变量或浏览器存储。CLI报401/403时先判断账号/权限；仅确认浏览器凭据过期或撤销后使用`auth --login --force`，不将force作为常规操作。
 
 链接按完整域名与路径共同解析，支持三种已核实的官方入口：`https://xyq.jianying.com/novel/detail/canvas?...`为个人空间候选；`https://xyq.jianying.com/project?...`与`https://www.xiaoyunque.com/project?...`均为团队空间入口，不能仅因域名含`xyq.jianying.com`就选择个人空间。严格校验域名、路径及唯一ID参数。收到完整链接时原样传给bind，由统一解析器保留projectId、canvasId及空间线索；不为绕过链接解析而抽出canvasId改走裸ID入口。入口分类用于选择候选空间，仍须只读核验画布身份与编辑权限后才保存绑定。overviewPippitAssetId须在选定空间后通过官方CLI解析实际canvas ID，不能把overview或project ID当成canvas ID。所有远端ID及TeamID保持字符串。
 
-绑定先复用同账号、同画布已保存的team_id；首次绑定可用`--team-id`明确指定（个人为`0`）。没有明确值时，旧格式链接选择个人候选，新格式链接结合`space list`在只有一个团队时选择该团队候选；裸ID沿用CLI当前空间作为候选。只读核对该候选下的画布身份及编辑权限，通过后保存account_id/canvas_id/team_id和空间选择依据；不从查询响应回显的team_id反推归属。多个团队不能唯一确定时返回SPACE_REQUIRED及选项，失败返回SPACE_LOOKUP_FAILED，不遍历团队、不回退个人、不修改CLI全局默认空间。已绑定画布后续不重复选择。
+### 长期 Access Key 与网页登录
+
+先复用宿主已安全配置的凭据；需要从终端配置加载时，在调用CLI或队列的同一shell中加载，使子进程及后台worker继承`XYQ_ACCESS_KEY`，不读取展示密钥文件。环境Key优先于浏览器凭据；其`status`只返回`logged_in=true/source=environment`而缺少uid、credential_scope是CLI 1.0.57的正常行为。存在可用环境Key时不因缺少这些字段要求用户重新输入或网页登录；`logged_in=true`本身不证明服务端有效，仍通过空间和目标画布查询核验。
+
+纯Key模式使用带域分隔的SHA-256指纹作为本地凭据作用域，配置中的account_id此时是作用域标识而非已知UID；不保存Key，不将指纹当成服务端凭据。Key改变后作用域改变，旧绑定和默认值不能跨凭据静默复用。原始Key仍仅由官方CLI以Bearer认证发送；官方包和SDK保持原样。`canvas_key_command.js`与`canvas_key_invocation.js`只限制纯Key模式的自动login/logout，其余命令继续调用官方CLI。认证拒绝按原诊断停止，不自动打开浏览器，也不悄悄改用其他凭据或空间。仅明确请求网页登录且无有效Key覆盖时才走上述`auth --login`；`--force`只用于已确认失效的浏览器凭据。
+
+官方持久化checkpoint仍要求原生browser credential_scope；本地指纹不补造该字段，纯Key同步跳过可选checkpoint，保留本项目的写入日志、队列与回执。普通节点命令没有统一的网页登录前置条件；是否能写入须由实际服务端ACK和回读确认。只读预检通过不表示图片/视频生成或所有写权限已验证。
+
+空间选择按本次明确指定、同凭据同画布的项目绑定、同目标已通过预检、当前凭据的用户默认值依次取候选；明确的旧式个人链接可选择个人候选`0`。首次没有选择记录时用`space-options`读取当前授权的个人/团队选项，让用户选择一次；即使只有一个团队，也不把列表存在当作用户选择。收到明确团队名时按返回列表唯一匹配ID；已给出ID直接核对，不要求用户重复选择。用`space-select --team-id`验证该空间仍在当前可访问列表中并保存默认值，之后新项目自动沿用。没有默认值的团队链接或裸ID返回`SPACE_REQUIRED`及`spaces`，供宿主展示选项；只读预检保留`reason_code`和同一选项，不将它误报为登录失效。
+
+默认值保存在用户配置目录`seedance-scene-director/canvas-space-defaults.json`（采用`XDG_CONFIG_HOME`，否则`~/.config`），按网页登录身份或长期Key的本地凭据作用域隔离；不保存原始Key，不在Skill内硬编码任何团队。其他使用者、不同Key或账号没有对应默认值时重新选择。用户要求更换默认团队时重跑`space-options`和`space-select`；只影响后续未绑定项目，已有项目仍使用自己的team_id。明确要求切换现有项目时再对指定目标执行`bind --switch`，归档旧映射并重新核验。仅修改默认值不暗中迁移节点或恢复暂停队列。
+
+候选确定后仍只读核对该空间下的画布身份与编辑条件，再保存正式绑定；查询失败返回`SPACE_LOOKUP_FAILED`，不遍历其他团队、不回退个人。链接中的projectId/canvasId用于定位，agent_thread_id及页面模式/来源参数不能代替凭据或团队归属；不能从返回值回显的team_id反推所属团队。本Skill不依赖CLI自身的`space use`来保存纯Key模式的默认值，也不修改CLI全局默认空间。每次实际CLI调用由脚本显式附加已保存的`--team-id`，用户无需重复输入。
 
 CLI的原生查询、分配、上传与语义查询、创建、编辑、删除、检查点及回读由同一入口自动附加已绑定--team-id，不由各业务分支猜测参数。新进程恢复也使用该绑定。旧绑定缺少空间时，先对同一目标重新执行bind并核对必要信息，保留节点映射；不得静默采用当前默认空间。绑定验证失败不覆盖原绑定。
 

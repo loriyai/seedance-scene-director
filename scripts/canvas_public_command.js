@@ -7,6 +7,7 @@ const fs = require("fs");
 const path = require("path");
 const { createHash, randomUUID } = require("crypto");
 const { isDeepStrictEqual } = require("util");
+const { nativeInvocation } = require("./canvas_key_invocation");
 
 const READ_ATTEMPTS = 3;
 const READ_BUDGET_MS = 60000;
@@ -414,8 +415,7 @@ async function main(input, dependencies = {}) {
       ], {
         sdk: guardedSdk(sdk, input, observation, recovery), cwd: input.project,
         stateDirectory: recovery.stateDirectory,
-        nativeInvocation: { command: input.cli_path,
-          env: { ...process.env, PIPPIT_CLI_DISABLE_UPDATE_CHECK: "1" } },
+        nativeInvocation: nativeInvocation(input.cli_path),
         stdout: { write(value) { output += value; } }, stderr: process.stderr,
       });
       if (observation.bootstrapError || observation.rebaseError) throw observation.bootstrapError || observation.rebaseError;

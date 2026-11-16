@@ -49,6 +49,9 @@ class CanvasContractChecks(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.project = Path(self.temp.name)
+        defaults = patch.object(c.space_defaults, 'defaults_path', return_value=self.project / 'user-defaults.json')
+        defaults.start()
+        self.addCleanup(defaults.stop)
 
     def test_official_link_routes_and_host_validation(self):
         for url, hint in [(PERSONAL, 'personal'), (TEAM, 'team'), (TEAM_XYQ, 'team')]:
@@ -72,12 +75,12 @@ class CanvasContractChecks(unittest.TestCase):
 
     def test_jianying_project_retains_context_and_selects_team_not_current_personal(self):
         cli = SpaceCLI()
-        binding = c.bind(self.project, cli, TEAM_XYQ)['binding']
+        binding = c.bind(self.project, cli, TEAM_XYQ, team_id='12')['binding']
         self.assertEqual(binding['team_id'], '12')
         self.assertEqual(binding['project_id'], 'P')
         self.assertEqual(binding['canvas_id'], 'ROOT')
         self.assertEqual(binding['url'], 'https://xyq.jianying.com/project?projectId=P&canvasId=ROOT')
-        self.assertEqual(binding['space_evidence'], 'url_and_single_team_candidate')
+        self.assertEqual(binding['space_evidence'], 'explicit')
         self.assertTrue(cli.selected)
         self.assertEqual(set(cli.selected), {'12'})
         self.assertFalse(cli.writes)
@@ -93,7 +96,7 @@ class CanvasContractChecks(unittest.TestCase):
     def test_jianying_project_failed_team_verification_does_not_fallback(self):
         cli = SpaceCLI(accepted='34')
         with self.assertRaises(c.CanvasError) as error:
-            c.bind(self.project, cli, TEAM_XYQ)
+            c.bind(self.project, cli, TEAM_XYQ, team_id='12')
         self.assertEqual(error.exception.code, 'SPACE_LOOKUP_FAILED')
         self.assertEqual(cli.selected, ['12'])
         self.assertIsNone(c.read_state(self.project)['binding'])
@@ -106,7 +109,7 @@ class CanvasContractChecks(unittest.TestCase):
 
     def test_url_candidate_is_read_only_validated_and_saved(self):
         cli = SpaceCLI()
-        result = c.bind(self.project, cli, TEAM)
+        result = c.bind(self.project, cli, TEAM, team_id='12')
         self.assertEqual(result['binding']['team_id'], '12')
         self.assertFalse(cli.writes)
         self.assertEqual(set(cli.selected), {'12'})
@@ -124,14 +127,14 @@ class CanvasContractChecks(unittest.TestCase):
 
     def test_saved_team_survives_rebind_and_changed_default(self):
         cli = SpaceCLI()
-        c.bind(self.project, cli, TEAM)
+        c.bind(self.project, cli, TEAM, team_id='12')
         cli.teams = ('12', '34')
         with patch.object(cli, 'native', side_effect=AssertionError('No repeated team choice')):
             self.assertEqual(c.bind(self.project, cli, TEAM)['binding']['team_id'], '12')
 
     def test_failed_candidate_does_not_fallback_or_persist_binding(self):
         cli = SpaceCLI(accepted='34')
-        with self.assertRaises(c.CanvasError) as error: c.bind(self.project, cli, TEAM)
+        with self.assertRaises(c.CanvasError) as error: c.bind(self.project, cli, TEAM, team_id='12')
         self.assertEqual(error.exception.code, 'SPACE_LOOKUP_FAILED')
         self.assertEqual(cli.selected, ['12'])
         self.assertIsNone(c.read_state(self.project)['binding'])
