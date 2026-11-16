@@ -309,7 +309,8 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
                     header_policy=header_policy,
                     black_reference_mode=d.BLACK_REFERENCE_MODE,
                     export_format=EXPORT_FORMAT,
-                    voice_display_policy=text_core.VOICE_DISPLAY_POLICY)
+                    voice_display_policy=text_core.VOICE_DISPLAY_POLICY,
+                    reference_display_policy=text_core.REFERENCE_DISPLAY_POLICY)
         if header is not None:
             unit['header_text'] = header
         else:
@@ -328,13 +329,14 @@ def prepare(project, draft, span=None, replace_ids=None, *, check_camera=True,
                     # Historical units may predate the profile registry.  Do
                     # not silently attach a new profile while replacing them.
                     unit.pop(key, None)
-            for key in ('header_policy', 'header_text'):
+            for key in ('header_policy', 'header_text', 'reference_display_policy'):
                 if key in old:
                     unit[key] = copy.deepcopy(old[key])
                 else:
                     unit.pop(key, None)
         if unit.get('ratio_profile') is not None:
             ratio_profiles.require_unit_profile(unit)
+    text_core.check_reference_policy(state, units)
     plan = segment_naming.active_plan(project, state)
     identities = segment_naming.assignments(state, plan, units) if not replace_ids else None
     if identities:
@@ -901,6 +903,9 @@ def main():
     p.add_argument('--project', type=Path, required=True)
     p.add_argument('--request-id', required=True)
     p.add_argument('--output', type=Path, required=True)
+    p = commands.add_parser('segment-report', help='导出全部分段的正式内容统计TXT，不统计制作耗时')
+    p.add_argument('--project', type=Path, required=True)
+    p.add_argument('--output', type=Path, required=True)
     p = commands.add_parser('event')
     p.add_argument('--project', type=Path, required=True)
     p.add_argument('--name', required=True)
@@ -951,6 +956,9 @@ def main():
                 state, receipt['units'], authoring_gate=receipt.get('authoring_gate'),
                 historical_receipt=receipt))
             result = {'output':str(target), **d.receipt_summary(receipt)}
+        elif args.command == 'segment-report':
+            from delivery_reports import export_segment_report
+            result = export_segment_report(args.project, d.load(args.project), args.output)
         elif args.command == 'event':
             d.require(args.name != 'delivered', 'delivered由实际commit保存后记录，不能手工宣告')
             result = event(args.project, args.name, args.scene, args.note,

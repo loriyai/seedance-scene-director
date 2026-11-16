@@ -78,6 +78,10 @@ def _closure(data, catalog, requested, authored):
                         anchor and other_design.get("identity_anchor_id") == anchor):
                     add(other["id"], f"{aid}:shared_identity")
         elif category == "scene_assets":
+            for dependency in design.reference_design_ids(item, authored.get(aid, item.get('visual_design', {}))):
+                add(dependency, f'{aid}:image_reference')
+            if item.get('image_reference_asset_id'):
+                add(item['image_reference_asset_id'], f'{aid}:day_image')
             loc = item.get("location_id")
             require(loc in catalog and catalog[loc][0] == "locations", f"{aid}缺少LOC事实依赖")
             add(loc, f"{aid}:location_facts")

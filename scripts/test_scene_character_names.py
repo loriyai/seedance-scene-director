@@ -56,6 +56,7 @@ class SceneCharacterNames(unittest.TestCase):
             script_io.assemble(self.project, output, self.project / 'review.json')
             ledger.initialize(output, self.project, self.project / 'assets.json')
         data = json.loads((self.project / 'assets.json').read_text(encoding='utf-8'))
+        self.assertEqual(data['scene_lighting_policy'], 'scene-lighting-v1')
         first = data['characters'][0]
         self.assertEqual(first['name'], '阿明-黑衣')
         self.assertEqual(first['source_speaker'], '阿明-黑衣')
@@ -66,6 +67,8 @@ class SceneCharacterNames(unittest.TestCase):
         data['scene_assets'] = [{'id': 'SET0001', 'name': '房间', 'location_id': 'LOC0001',
                                  'variant': 'base', 'parent_id': None, 'visual_facts': []}]
         data['prop_coverage_review'].update(reviewed_full_script=True, reviewed_scene_ids=['SC0001'])
+        data = ledger.build_scene_assets(data, paragraphs)
+        self.assertEqual(data['scene_assets'][0]['lighting_state'], 'unspecified')
         ledger.validate(ledger.parse_script(output), paragraphs, data)
         bad = copy.deepcopy(data)
         bad['characters'][0]['source_speaker'] = '阿明'

@@ -16,6 +16,7 @@ from storyboard_blackout import (
 
 OUTPUT_FORMAT = "scene-text-v1"
 VOICE_DISPLAY_POLICY = "inner-voice-os-v1"
+from storyboard_reference_display import POLICY as REFERENCE_DISPLAY_POLICY
 HEADER = re.compile(r"## (SC\d{4,}) / ([A-Za-z][A-Za-z0-9_-]*) / (L\d{6,})-(L\d{6,})")
 REFERENCE = re.compile(r"@\{((?:CHAR|SET|PROP)\d{4,})\}")
 SHOT = re.compile(r"·(\d{2})秒-(\d{2})秒\[镜头(\d+)-([^\[\]]+)\]：（(.+)；转场：([^（）]+)）(.+)音效：(.+)。")
@@ -27,7 +28,7 @@ FRAMINGS = ("大远景", "大全景", "远景", "全景", "中景", "中近景",
 PROJECTION_FIELDS = (
     "output_format", "draft_key", "author_key", "main_scene", "source_records", "span",
     "duration", "character_ids", "scene_ids", "prop_ids", "asset_ids", "set_ids",
-    "time", "weather", "global", "shots", "source_text",
+    "time", "weather", "global", "shots", "source_text", "appearance_states",
 )
 
 
@@ -286,6 +287,13 @@ def _parse_units(text, state, *, _context_data=None, _diagnostics=None, _source_
             unit["global"] = line[5:]
             _require(unit["global"].strip(), f"{context}：人物站位不可为空")
             stage = 3
+        elif stage == 3 and line.startswith("形象状态："):
+            import storyboard_reference_display as display
+            try:
+                declaration = json.loads(line[len("形象状态："):])
+            except ValueError as exc:
+                raise ValueError(f"{context}：形象状态须为JSON对象") from exc
+            unit.setdefault(display.FIELD, []).append(display.parse_declaration(declaration))
         elif stage >= 3 and line.startswith("·"):
             match = SHOT.fullmatch(line)
             _require(match is not None, f"{context}：镜头行格式错误；须有时码、镜号、景别括号、转场、正文和音效末句")
@@ -748,6 +756,7 @@ def validate(state, units):
                  f'{current["draft_key"]}：静默来源参与者槽与当前候选不一致')
         _require(unit.get(text_voices.FIELD) == current.get(text_voices.FIELD),
                  f'{current["draft_key"]}：原剧情文字声音声明与当前候选不一致')
+    check_reference_policy(state, units)
     return _summary(state, fresh)
 
 
@@ -1081,6 +1090,27 @@ def _require_render_authorization(state, unit, authoring_gate=None):
         _require(unit['continuity_props'] == expected, '渲染单元的跨场道具声明未绑定当前作者闸门')
 
 
+def _display_context(state, unit):
+    import production_cast as casting
+    import source_background_slots as background
+    import source_participant_slots as participants
+    return participants.context(background.context(casting.context(state, unit.get('production_cast', [])),
+                               unit.get('source_background_slots', [])), unit.get('source_participant_slots', []))
+
+
+def check_reference_policy(state, units):
+    """Validate new display bindings; absent frozen policy retains old behavior."""
+    import storyboard_reference_display as display
+    for unit in units:
+        scoped = _display_context(state, unit)
+        assets = _context(scoped)[3]
+        names = display.Names(scoped, assets)
+        tracks = display.check(scoped, unit, names)
+        if unit.get('reference_display_policy') == REFERENCE_DISPLAY_POLICY:
+            display.roster(unit, names, lambda aid: '', tracks)
+    return units
+
+
 def render_unit(state, unit, reference_text=None, *, authoring_gate=None):
     """Render one checked unit; quoted speech never enters callbacks."""
     return _render_unit(state, unit, _context(state), reference_text,
@@ -1120,9 +1150,30 @@ def _render_unit(state, unit, context_data, reference_text=None, *, authoring_ga
             return item["name"]
         return convert("@" + item["name"] + " ")
 
+    import storyboard_reference_display as display
+    modern = unit.get('reference_display_policy') == REFERENCE_DISPLAY_POLICY
+    _require(unit.get('reference_display_policy') in (None, REFERENCE_DISPLAY_POLICY), '未知引用显示策略')
+    names = display.Names(_display_context(state, unit), assets) if modern else None
+    checked = dict(authored, reference_display_policy=unit.get('reference_display_policy'),
+                   source_text_voices=unit.get('source_text_voices', []))
+    tracks = display.check(_display_context(state, unit), checked, names) if modern else {}
+
+    def image_reference(aid):
+        return '' if assets[aid].get('visual_mode') == 'prompt_only' or aid in voice_only else asset(aid)
+
+    def person(aid, scene_id=None):
+        return names.character(aid, scene_id or authored['main_scene']) + image_reference(aid)
+
     def replace(value):
         _refs(value, authored["draft_key"])
-        return REFERENCE.sub(lambda match: asset(match.group(1)), value)
+        def replacement(match):
+            aid = match.group(1)
+            if modern and aid.startswith('CHAR'):
+                return names.character(aid, authored['main_scene'])
+            if modern and aid.startswith('SET'):
+                return names.scene(aid)
+            return asset(aid)
+        return REFERENCE.sub(replacement, value)
 
     def display_voice(value):
         if unit.get("voice_display_policy") == VOICE_DISPLAY_POLICY and value == "内心想法":
@@ -1137,7 +1188,8 @@ def _render_unit(state, unit, context_data, reference_text=None, *, authoring_ga
     # New authoring sets an explicit policy; old receipts retain that old default.
     header_policy = unit.get("header_policy", "visual-only-v2")
     header = d.fixed_header(header_policy, state, unit)
-    people = "，".join(asset(cid) for cid in authored["character_ids"]) or "无"
+    people = (display.roster(authored, names, image_reference, tracks) if modern
+              else "，".join(asset(cid) for cid in authored["character_ids"]) or "无")
     ratio = unit.get('video_ratio')
     _require(ratio in (None, '16:9', '9:16'), '视频比例须为16:9或9:16')
     # New deliveries freeze a ratio profile alongside the ratio.  Historical
@@ -1149,7 +1201,7 @@ def _render_unit(state, unit, context_data, reference_text=None, *, authoring_ga
     ratio_label = '' if ratio is None else ('横屏16:9' if ratio == '16:9' else '竖屏9:16')
     lines = [f'{title}（时长：{authored["duration"]}秒）{ratio_label}', style + ";" + header[0], header[1],
              "人物：" + people + "；",
-             "场景：" + "；".join(asset(sid) for sid in authored["set_ids"])
+             "场景：" + "；".join((names.scene(sid) if modern else "") + asset(sid) for sid in authored["set_ids"])
              + f'；时间：{replace(authored["time"])}；天气：{replace(authored["weather"])}；',
              "人物站位：" + replace(authored["global"])]
     for shot in authored["shots"]:
@@ -1166,6 +1218,10 @@ def _render_unit(state, unit, context_data, reference_text=None, *, authoring_ga
         for part in shot["dialogue_parts"]:
             if part.get("source_kind") == "non_character":
                 source = part["source_label"]
+            elif modern:
+                ids = part.get('character_ids', [part.get('character_id')])
+                source_record = record_map.get(part['record'], (None, {}))[1]
+                source = '、'.join(person(cid, source_record.get('scene')) for cid in ids)
             elif part['record'] in events:
                 source = asset(events[part['record']]['speaker'])
             elif casting.voice_actor(unit, record_map[part['record']][1], assets):
@@ -1179,6 +1235,6 @@ def _render_unit(state, unit, context_data, reference_text=None, *, authoring_ga
                 source = "、".join(_speaker(assets[cid], source_record["scene"]) for cid in part["character_ids"])
             else:
                 source = asset(part["character_id"])
-            line += source + display_voice(part["voice"]) + part["direction"] + '：“' + part["text"] + '”'
+            line += source + (" " if modern and not source.endswith(" ") else "") + display_voice(part["voice"]) + part["direction"] + '：“' + part["text"] + '”'
         lines.append(line + "音效：" + replace(sound))
     return "\n".join(lines) + "\n"

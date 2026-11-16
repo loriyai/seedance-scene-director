@@ -50,6 +50,78 @@ class DerivedImageInputs(unittest.TestCase):
     def test_dependencies_precede_derived_node(self):
         self.assertEqual([i['key'] for i in c.desired_assets(self.session)], ['CHAR0001', 'PROP0001', 'CHAR0002'])
 
+    def scene_session(self):
+        self.session['ledger']['characters'] = []
+        self.session['ledger']['props'] = []
+        self.session['ledger']['scene_assets'] = [
+            {'id': 'SET0002', 'name': 'Room-Night', 'image_prompt': '以 @Room-Day 为基础，转为夜景。',
+             'image_reference_asset_id': 'SET0001',
+             'visual_design': {'image_reference': {'base_asset_id': 'SET0001',
+                'changes': ['转为夜景'], 'preserve': ['空间结构']}},
+             'image_format': {'reference_policy': 'asset-image-reference-v1', 'reference_asset_ids': ['SET0001']}},
+            {'id': 'SET0001', 'name': 'Room-Day', 'image_prompt': 'day scene'}]
+
+    def test_scene_dependency_real_edge_media_and_generation_preservation(self):
+        self.scene_session()
+        self.assertEqual([i['key'] for i in c.desired_assets(self.session)], ['SET0001', 'SET0002'])
+        self.sync()
+        night = self.mapping('SET0002')['node_id']
+        day = self.mapping('SET0001')['node_id']
+        self.assertIsNotNone(c.reference_edge(self.cli.doc, day, night))
+        self.assertEqual(self.mapping('SET0002')['image_input']['status'], 'pending')
+        c.content(self.cli.doc, day).setdefault('appearanceInfo', {}).update(
+            pippitAssetId='DAY-MATERIAL', assetId='DAY-MEDIA')
+        settings = c.content(self.cli.doc, night)['generation']
+        settings.update(ratio='1:1', resolution='4K', seed=22)
+        settings['references'] = [{'id': 'USER-REFERENCE'}]
+        self.sync()
+        result = c.content(self.cli.doc, night)['generation']
+        self.assertEqual((result['ratio'], result['resolution'], result['seed']), ('1:1', '4K', 22))
+        self.assertEqual(result['references'][0], {'id': 'USER-REFERENCE'})
+        self.assertEqual(result['references'][1]['sourceNodeType'], c.KINDS['scene'])
+        self.assertEqual(result['references'][1]['assetId'], 'DAY-MEDIA')
+        self.assertEqual(self.mapping('SET0002')['image_input']['status'], 'ready')
+        before = copy.deepcopy(self.cli.doc)
+        self.sync()
+        self.assertEqual(before, self.cli.doc)
+        self.assertFalse(any(n == 'xyq.role.updateAppearance' for n, _ in self.cli.writes))
+
+    def test_scene_serial_entry_creates_real_reference_without_generation(self):
+        self.scene_session()
+        c.sync(self.project, self.cli, 'assets', session_override=self.session)
+        day, night = (self.mapping(k)['node_id'] for k in ('SET0001', 'SET0002'))
+        self.assertIsNotNone(c.reference_edge(self.cli.doc, day, night))
+        self.assertIn('<node-asset>' + day + '</node-asset>', c.prompt_of(self.cli.doc, night))
+        self.assertFalse(any('generate' in n.lower() for n, _ in self.cli.writes))
+
+    def test_scene_reference_write_protects_concurrent_non_generation_content(self):
+        self.scene_session()
+        self.sync()
+        day, night = (self.mapping(k)['node_id'] for k in ('SET0001', 'SET0002'))
+        c.content(self.cli.doc, day).setdefault('appearanceInfo', {}).update(
+            pippitAssetId='DAY-MATERIAL', assetId='DAY-MEDIA')
+        original_plan = c.asset_image_reference_plan
+        def edit_after_plan(*args, **kwargs):
+            result = original_plan(*args, **kwargs)
+            c.content(self.cli.doc, night)['userNote'] = 'concurrent user choice'
+            return result
+        before = copy.deepcopy(c.content(self.cli.doc, night)['generation'])
+        with patch.object(c, 'asset_image_reference_plan', side_effect=edit_after_plan):
+            with self.assertRaises(c.CanvasError) as error:
+                c.sync_asset_image_references(self.project, self.cli, self.session,
+                    c.read_state(self.project), copy.deepcopy(self.cli.doc), {'SET0002'})
+        self.assertEqual(error.exception.code, 'CONCURRENT_EDIT')
+        self.assertEqual(c.content(self.cli.doc, night)['userNote'], 'concurrent user choice')
+        self.assertEqual(c.content(self.cli.doc, night)['generation'], before)
+
+    def test_night_video_does_not_inherit_day_image_dependency(self):
+        self.scene_session()
+        self.session['ledger']['scenes'] = [{'id': 'SC0001', 'scene_asset_id': 'SET0002', 'prop_ids': []}]
+        unit = {'id': 'V1', 'output_format': 'scene-text-v1',
+                'asset_ids': ['SET0002'], 'character_ids': [], 'scene_ids': ['SC0001'],
+                'prop_ids': [], 'shots': [], 'global': ''}
+        self.assertEqual(c.unit_asset_ids(self.session, unit), {'SET0002'})
+
     def test_missing_compiled_contract_is_not_silently_treated_as_legacy(self):
         self.session['ledger']['characters'][0]['image_format'].pop('reference_policy')
         with self.assertRaisesRegex(ValueError, '图片引用编译合同缺失'):

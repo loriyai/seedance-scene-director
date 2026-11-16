@@ -67,11 +67,16 @@ python <skill>/scripts/script_partition.py boundary-template --project <project>
 python <skill>/scripts/script_partition.py plan --project <project> --participants 3 --boundaries <局部切点.json>
 python <skill>/scripts/script_partition.py show --project <project>
 python <skill>/scripts/script_partition.py resolve --project <project> --label A
+python <skill>/scripts/script_partition.py export --project <project> --output <正式版本目录/项目名-分段范围.txt>
 ```
 
-每项目单独保存正式`script-partition.json`，协议`partition-v1`，正式计划的`mode`为`count`。计划只在标准化和资产交付完成后生成，记录原文、标准稿、复核报告及绑定记录摘要，稳定`plan_id`、`version`、人数、计数口径、目标字数、候选切点、全局选择依据和最终分段。每段有代号、原文坐标、精确标准正文`span`、字数与原文首尾摘录。分段代号按A…Z、AA、AB延续。相同候选重复运行保持身份；已有分镜后不允许原位重拆重置分段身份，应保留旧计划或另建项目。来源变化使旧计划失效，不改摘要冒充仍有效。
+每项目单独保存正式`script-partition.json`，协议`partition-v1`，按人数计划的`mode`为`count`，自定义计划为`custom`。计划只在标准化和资产交付完成后生成，记录原文、标准稿、复核报告及绑定记录摘要，稳定`plan_id`、`version`、人数、计数口径、适用的目标字数、候选切点、选择依据和最终分段。每段有代号、原文坐标、精确标准正文`span`、字数与原文首尾摘录。分段代号按A…Z、AA、AB延续。相同候选重复运行保持身份；已有分镜后不允许原位重拆重置分段身份，应保留旧计划或另建项目。来源变化使旧计划失效，不改摘要冒充仍有效。
 
 用户自定义范围不生成自动切点，但在正式分镜前保存为可追溯的范围基准：每段必须有唯一可定位的起止内容或标准正文坐标，所有范围按原顺序连续、非空、无重叠、无遗漏，并绑定当前原文和标准稿摘要。无法唯一定位或无法完成覆盖核对时停止并请求补充范围。
+
+精确定位和核对完成后，用`script_partition.py custom-plan --project <project> --ranges <自定义范围.json>`登记同一正式计划。输入为`{"policy":"custom-partition-ranges-v1","sources":<当前source_snapshot摘要>,"segments":[{"span":[起点,终点],"source_range":[原文起点坐标,原文终点坐标],"reason":"实际范围依据"}]}`；`span`使用标准正文半开区间，原文坐标为`[1基段号,0基段内字符位置]`，沿用本页精确映射，不凭摘录近似填写。程序只核验并登记已选范围，不重分配切点，不代替局部连续性判断。按人数与自定义计划共用`export`及后续分段统计接口。
+
+计划中的`confirmed`表示已登记的核定范围，不是工具自动取得用户确认的证据。收到的明确范围、实际确认及已有制作授权按当前会话与项目记录判断；不得把一次命令成功冒称用户确认，也不为重复运行、恢复或导出未变范围再次询问。最终版范围确定后运行`export`，在项目work的不可变正式版本目录实际写出TXT，再按[输出保护](execution-contract.md#本地调用与输出保护)核验并发布到outputs。
 
 只读接口：`load_plan(project,state)`返回完整计划或`None`；文件损坏或来源失效时明确报错。`resolve_segment(project,state,label_or_span)`只接受已确认计划，按“A”/“A分段”或完全落在同一分段内的标准正文范围返回该段及计划身份；跨段范围返回`None`。调用方须继续保留实际重复覆盖检查，计划内尚未制作分段的顺序和间隔规则由分镜工作流统一处理。
 
@@ -79,7 +84,7 @@ python <skill>/scripts/script_partition.py resolve --project <project> --label A
 
 ## 用户输出
 
-按以下模板在聊天逐段报告范围，正式范围TXT及切点证据保存于项目work。默认outputs只发布最终剧本、资产和分段分镜文件，范围文件由后续步骤按路径复用。首尾各取实际原文1—2句话，保留原字词。分段很短时首尾摘录允许重合；仅展示重合不表示来源范围重叠。
+最终范围核定后，按以下模板在聊天逐段报告范围，并交付正式分段范围TXT链接。TXT由当前已校验计划直接导出，保存计划身份与版本、计数口径、总字数、各段准确范围与首尾摘录，以及适用的切点信息。正式原件及切点证据保存在项目work，当前范围TXT发布到outputs；不得只有JSON中的`text`或聊天文字而没有实际文件。首尾各取实际原文1—2句话，保留原字词。分段很短时首尾摘录允许重合；仅展示重合不表示来源范围重叠。
 
 ```text
 A分段：共n个字
@@ -91,6 +96,6 @@ B分段：共n个字
 结束：[本分段结束的1—2句话]
 ```
 
-正式范围交付还必须显示总字数、各目标字数、各段实际字数、目标偏移、最终切点的标准正文坐标及连续性理由。每个目标点的前后候选、safe状态和排除理由保存在boundary review中；只有一个候选时必须说明其他方向为何没有合法候选。空的boundary模板或只记录最终场界不能作为全局择点证据。
+按人数计划的正式范围交付还必须显示总字数、各目标字数、各段实际字数、目标偏移、最终切点的标准正文坐标及连续性理由；自定义计划显示准确范围及实际依据，不编造均分目标或偏移。每个目标点的前后候选、safe状态和排除理由保存在boundary review中；只有一个候选时必须说明其他方向为何没有合法候选。空的boundary模板或只记录最终场界不能作为全局择点证据。`export`拒绝覆盖已有文件及来源/状态/Skill路径，修订后先另存新正式版本，再依输出保护更新发布副本；旧正式原件保留。
 
 正式计划或用户自定义范围完成核对后，按[分镜工作流](storyboard-workflow.md)取得本次分镜范围。已记录且可唯一定位的范围直接复用，不重复询问；范围准确且历史检查已按对应工作流处理后进入分镜。

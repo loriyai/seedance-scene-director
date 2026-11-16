@@ -596,7 +596,7 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
     result = {"schema_version": 2, "source_digest": digest(new_paragraphs), "scenes": scenes,
               "characters": characters, "locations": locations, "props": props,
               "retired_ids": sorted(retired), "inactive_assets": inactive, "pending_reviews": pending}
-    for field in ("asset_policy", "group_policy", "character_variant_policy", "character_appearance_policy", "image_design_version", "visual_style", "identity_anchors", "delivery_contract"):
+    for field in ("asset_policy", "group_policy", "character_variant_policy", "character_appearance_policy", "scene_lighting_policy", "image_design_version", "visual_style", "identity_anchors", "delivery_contract"):
         if field in old:
             result[field] = copy.deepcopy(old[field])
     if old.get("schema_version") == 3:
@@ -617,6 +617,11 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
             if scene["scene_asset_id"] not in assets or not unchanged:
                 pending.append({"kind": "布景版本关联待核", "scene_id": scene["id"],
                                 "candidate_asset_id": scene["scene_asset_id"]})
+            if len(prior) == 1 and unchanged and prior[0].get('scene_lighting'):
+                scene['scene_lighting'] = copy.deepcopy(prior[0]['scene_lighting'])
+            elif any(s.get('scene_lighting') for s in prior):
+                pending.append({'kind': '场景光照选择待核', 'scene_id': scene['id'],
+                                'old_choices': [s.get('scene_lighting') for s in prior]})
             if len(prior) == 1 and unchanged and prior[0].get('prop_occurrences'):
                 scene['prop_occurrences'] = copy.deepcopy(prior[0]['prop_occurrences'])
             elif any(s.get('prop_occurrences') for s in prior):
@@ -675,14 +680,16 @@ def migrate(old_ledger_path, old_source_path, new_script_path, new_workdir, requ
             for fact in item["visual_facts"]:
                 revised = migrate_fact(fact, old_by_id, lineage, new_by_number, old_paragraphs, new_paragraphs, new_index)
                 linked = revised and all(new_by_id[sid]["location_id"] == item["location_id"] and
-                    (item["variant"] == "base" or new_by_id[sid]["scene_asset_id"] == item["id"])
+                    (item["variant"] == "base" or new_by_id[sid]["scene_asset_id"] == item["id"]
+                     or assets.get(new_by_id[sid]['scene_asset_id'], {}).get('structure_asset_id') == item['id'])
                     for sid in revised["scene_ids"])
                 if linked:
                     facts.append(revised)
                 else:
                     pending.append({"kind": "布景版本证据待核", "asset_id": item["id"], "fact": fact})
             item["visual_facts"] = facts
-            if item["variant"] != "base" and not any(s["scene_asset_id"] == item["id"] for s in scenes):
+            if item["variant"] != "base" and not any(s["scene_asset_id"] == item["id"]
+                    or assets.get(s['scene_asset_id'], {}).get('structure_asset_id') == item['id'] for s in scenes):
                 pending.append({"kind": "未用布景版本去向待核", "asset_id": item["id"]})
     if "design_source_scene_digests" in old:
         result["design_source_scene_digests"] = scene_source_digests(result, new_paragraphs)

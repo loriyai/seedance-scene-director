@@ -102,7 +102,7 @@ class TextDeliveryIntegration(unittest.TestCase):
         result = self.commit_fixture(request_id='fictional-joint')
         self.assertEqual(result['status'], 'committed')
         rendered = self.output.read_text(encoding='utf-8')
-        self.assertEqual(rendered.count('陈默、林青说：“把消息发给@群里。”'), 1)
+        self.assertEqual(rendered.count('陈默@陈默-基础形象 、林青@林青-基础形象 说：“把消息发给@群里。”'), 1)
         binding = {'canvas_id': 'fictional-canvas', 'team_id': 'fictional-team',
                    'account_id': 'fictional-account'}
         with patch.object(canvas, 'read_state', return_value={'binding': binding}):
@@ -542,6 +542,36 @@ class TextDeliveryIntegration(unittest.TestCase):
         self.cli('storyboard_text_delivery.py', 'render', '--project', self.project,
                  '--request-id', 'fictional-first', '--output', export)
         self.assertEqual(export.read_bytes(), original_bytes)
+
+    def test_historical_reference_policy_survives_reexport_and_targeted_edit(self):
+        # Construct an actual frozen pre-policy receipt through the normal commit.
+        original_prepare = delivery.prepare
+
+        def legacy_prepare(*args, **kwargs):
+            state, units, info = original_prepare(*args, **kwargs)
+            for unit in units:
+                unit.pop('reference_display_policy', None)
+            return state, units, info
+
+        with patch.object(delivery, 'prepare', side_effect=legacy_prepare):
+            self.commit_fixture(request_id='historical-reference')
+        old = d.load(self.project)
+        legacy_bytes = self.output.read_bytes()
+        self.assertNotIn('reference_display_policy', old['units'][0])
+        self.assertIn('人物：@陈默-基础形象', legacy_bytes.decode('utf-8'))
+        self.assertNotIn('人物：陈默@陈默-基础形象', legacy_bytes.decode('utf-8'))
+        replacement = self.write_draft('historical-edit.txt', self.authored_text([old['records'][0]], label='手部动作'))
+        revised = self.project / 'outputs' / 'historical-edited.txt'
+        self.commit_fixture(replacement, 'historical-targeted-edit', revised, replace_ids=[old['units'][0]['id']])
+        current = d.load(self.project)
+        self.assertNotIn('reference_display_policy', current['units'][0])
+        self.assertIn('人物：@陈默-基础形象', revised.read_text(encoding='utf-8'))
+        self.assertEqual(current['receipts'][0], old['receipts'][0])
+        self.assertEqual(self.output.read_bytes(), legacy_bytes)
+        again = self.project / 'outputs' / 'historical-again.txt'
+        self.cli('storyboard_text_delivery.py', 'render', '--project', self.project,
+                 '--request-id', 'historical-reference', '--output', again)
+        self.assertEqual(again.read_bytes(), legacy_bytes)
 
     def test_single_split_dialogue_unit_can_be_replaced_using_original_span(self):
         blocks = self.draft.read_text(encoding='utf-8').strip().split('\n\n')

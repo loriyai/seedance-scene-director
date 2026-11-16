@@ -12,6 +12,7 @@ import re
 from character_variants import (scene_character_ids, scene_appearance_tracks, is_wearable,
                                 reference_base, appearance_roots, APPEARANCE_POLICY)
 import design_scope
+import scene_lighting
 
 
 LEGACY_PROP_POLICY = "visible-reuse-v1"
@@ -76,8 +77,12 @@ def reference_design_ids(item, design=None):
             or set(reference) - {"base_asset_id", "changes", "preserve", "prop_asset_ids"}):
         raise ValueError(f"{item['id']} image_reference须含base_asset_id、changes、preserve")
     base_id = reference.get("base_asset_id")
-    if not isinstance(base_id, str) or not re.fullmatch(r"CHAR\d{4,}", base_id) or base_id == item["id"]:
+    is_set = item['id'].startswith('SET')
+    pattern = r"SET\d{4,}" if is_set else r"CHAR\d{4,}"
+    if not isinstance(base_id, str) or not re.fullmatch(pattern, base_id) or base_id == item["id"]:
         raise ValueError(f"{item['id']}图片基础引用无效或自引用")
+    if is_set and (base_id != item.get('image_reference_asset_id') or reference.get('prop_asset_ids')):
+        raise ValueError(f"{item['id']}场景派生须引用已审同结构日景，不添加道具图片输入")
     for key in ("changes", "preserve"):
         values = reference.get(key)
         if not isinstance(values, list) or not values:
@@ -151,9 +156,27 @@ def validate_image_references(data, asset_ids=None):
         category, item = catalog[aid]
         value = item.get("visual_design", {})
         ids = reference_design_ids(item, value)
+        if item.get('image_reference_asset_id') and not ids:
+            raise ValueError(f"{aid}夜景须填写同结构日景的image_reference")
         if ids:
+            if category == 'scene_assets':
+                if (data.get('image_design_version') != DESIGN_VERSION or not scene_lighting.enabled(data)
+                        or ids[0] not in catalog or catalog[ids[0]][0] != 'scene_assets'):
+                    raise ValueError(f"{aid}场景图片派生须为已审v2日夜资产")
+                base = catalog[ids[0]][1]
+                if (item.get('lighting_state') != 'night' or base.get('lighting_state') != 'day'
+                        or item.get('location_id') != base.get('location_id')
+                        or scene_lighting.structure_id(item) != scene_lighting.structure_id(base)):
+                    raise ValueError(f"{aid}夜景图片须引用同LOC、同结构版本的日景")
+                for field in ('space', 'materials_palette', 'furnishings'):
+                    if value.get(field) != base.get('visual_design', {}).get(field):
+                        raise ValueError(f"{aid}夜景须继承日景{field}，结构变化归独立布景版本")
+                visit(ids[0])
+                visiting.remove(aid)
+                checked.add(aid)
+                return
             if category != "characters" or is_group(item) or data.get("image_design_version") != DESIGN_VERSION:
-                raise ValueError(f"{aid}图片派生仅用于v2独立角色")
+                raise ValueError(f"{aid}图片派生仅用于v2独立角色或已审日夜场景")
             if ids[0] not in catalog or catalog[ids[0]][0] != "characters":
                 raise ValueError(f"{aid}缺少现用基础角色图片资产：{ids[0]}")
             base = catalog[ids[0]][1]
@@ -210,6 +233,9 @@ def image_reference_context(data, item, visiting=None):
                   if key not in ("source_fact_digest", "source_context_digest")}
         record = {key: copy.deepcopy(value.get(key)) for key in
                   ("id", "name", "appearance", "appearance_variant", "visual_facts", "asset_type", "species")}
+        if value.get('structure_asset_id'):
+            record['scene_state'] = {key: copy.deepcopy(value.get(key)) for key in
+                ('location_id', 'variant', 'parent_id', *scene_lighting.FIELDS)}
         record["visual_design"] = author
         record["dependencies"] = image_reference_context(data, value, visiting)
         dependencies.append(record)
@@ -421,6 +447,9 @@ def asset_facts(data, category, item):
         if prop:
             facts = facts + prop.get("visual_facts", [])
     if category == "scene_assets":
+        if item.get('variant') == 'lighting':
+            structure = next(a for a in data['scene_assets'] if a['id'] == item['structure_asset_id'])
+            return asset_facts(data, category, structure)
         location = next(loc for loc in data["locations"] if loc["id"] == item["location_id"])
         facts = location["visual_facts"] + facts
         if item["variant"] != "base":
@@ -490,6 +519,11 @@ def source_context_digest(data, category, item):
               "parent_id": item.get("parent_id"), "location_id": item.get("location_id")}
     if data.get('character_appearance_policy'):
         record['character_appearance_policy'] = data['character_appearance_policy']
+    if category == 'scene_assets' and data.get('scene_lighting_policy'):
+        record['scene_lighting_policy'] = data['scene_lighting_policy']
+        record['scene_state'] = {key: copy.deepcopy(item.get(key)) for key in scene_lighting.FIELDS}
+        record['lighting_uses'] = [{key: copy.deepcopy(s.get(key)) for key in
+            ('id', 'time_basis', 'scene_lighting')} for s in data['scenes'] if s.get('scene_asset_id') == item['id']]
     if item.get("scene_clothing"):
         record["scene_clothing"] = item["scene_clothing"]
     if item.get("scene_source_speakers"):
@@ -730,9 +764,11 @@ def validate_design_record(category, item, design, anchors, version=DESIGN_VERSI
         raise ValueError(f"{label}视觉设计须独立标注制作设计")
     design_scope.validate_presentation(category, design, version)
     if "image_reference" in design:
-        if category != "characters" or version != DESIGN_VERSION or is_group(item):
-            raise ValueError(f"{label}图片派生仅用于v2独立角色")
+        if category not in ('characters', 'scene_assets') or version != DESIGN_VERSION or is_group(item):
+            raise ValueError(f"{label}图片派生仅用于v2独立角色或已审日夜场景")
         reference_design_ids(item, design)
+    if category == 'scene_assets' and item.get('image_reference_asset_id') and 'image_reference' not in design:
+        raise ValueError(f"{label}夜景须填写同结构日景的image_reference")
     if "change_kind" in design:
         from character_variants import STATE_KINDS
         if category != 'characters' or design['change_kind'] not in STATE_KINDS:
@@ -982,6 +1018,19 @@ def compile_reference_prompt(data, item, design, style):
 
 def compile_prompt(data, category, item, design, anchors):
     style = nonempty(data["visual_style"].get("text"), "视觉风格")
+    if category == 'scene_assets' and design.get('image_reference') is not None:
+        validate_image_references(data, [item['id']])
+        reference = design['image_reference']
+        ids = reference_design_ids(item, design)
+        base = next(a for a in data['scene_assets'] if a['id'] == ids[0])
+        prompt = (f"统一视觉风格：{style}。以 @{base['name']} 为同一空间的基础图片，呈现夜景。"
+                  + "本版仅改变：" + "；".join(reference['changes']) + "。"
+                  + "保留：" + "；".join(reference['preserve']) + "。"
+                  + f"夜景受光：{design['lighting']}。保持基础图片的空间结构、固定陈设、材质本色和观察基准。"
+                  + "16:9横版，无人物单画面空间主视图；不绘前后对照或说明文字。")
+        return prompt, {'model': 'gpt-image-2', 'aspect_ratio': '16:9',
+                        'layout': 'single_environment_master_view',
+                        'reference_policy': IMAGE_REFERENCE_POLICY, 'reference_asset_ids': ids}
     if category == "characters" and design.get("image_reference") is not None:
         validate_image_references(data, [item["id"]])
         return compile_reference_prompt(data, item, design, style)

@@ -76,7 +76,7 @@ python <skill>/scripts/canvas_jobs.py recover-assets --project <project> --opera
 
 资产定稿且入口记录已授权同步、执行条件满足时，提交一个整体`assets`任务；每个已提交分段分别提交一个`videos`任务。入队核对真实任务ID及状态；失败或结果未知按[本地与同步边界](canvas-workflow.md)保留现场。正式分段及下一段本地制作以已验收的本地交付为前提，不等待任务入队或完成。后台脚本新建、核对、记录ID；同步进程不修改`session.json`的phase、分镜编号或历史范围。
 
-资产的`completed`表示名称、类型、空形象/视角名、完整image_prompt及ID映射均已核验；新建节点还须核对[资产图片默认参数](canvas.md#资产与视频节点)。提示词按[资产字段契约](canvas.md#资产与视频节点)核验generation.prompt，描述一致不能代替；回执记录generation-prompt-v2及prompt_hash，旧description_hash不作为提示词证据。派生角色同时按该节的图片输入合同处理引用，任务结果分别报告节点初始化和参考图片输入状态；节点计数不能代替引用配置验收。空图片节点允许完成初始化，缺少的参考图片另列待补，不宣称图片输入已就绪或图像一致性已建立。成功计数只包括已核验节点，不能把queued/running、已申请ID或单步ACK当完成。
+资产的`completed`表示名称、类型、空形象/视角名、完整image_prompt及ID映射均已核验；新建节点还须核对[资产图片默认参数](canvas.md#资产与视频节点)。提示词按[资产字段契约](canvas.md#资产与视频节点)核验generation.prompt，描述一致不能代替；回执记录generation-prompt-v2及prompt_hash，旧description_hash不作为提示词证据。派生人物及场景同时按该节的图片输入合同处理引用，任务结果分别报告节点初始化和参考图片输入状态；节点计数不能代替引用配置验收。空图片节点允许完成初始化，缺少的参考图片另列待补，不宣称图片输入已就绪或图像一致性已建立。成功计数只包括已核验节点，不能把queued/running、已申请ID或单步ACK当完成。
 
 主流程不再询问是否上传图片；status.image_choice_available恒为false，不因资产完成触发上传菜单、索取目录或扫描文件。独立images命令仍仅在用户明确要求上传时使用，旧image-choice接口仅为兼容已发生的交互保留。需要切换phase时由前台director执行，后台完成事件不能覆盖当前交互位置。
 

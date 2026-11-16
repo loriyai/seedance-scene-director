@@ -21,11 +21,11 @@ python <skill>/scripts/director.py range --project <project> --start <起点整�
 python <skill>/scripts/canvas.py preflight --project <project> --target <画布网址> [--team-id <空间ID>]
 ```
 
-设置命令按实际选择执行，不同时执行示例中的两种ratio保存方式。`header --file`要求输入两行非空固定抬头并独立保存为项目`video-header.txt`；`--choice 1`为16:9，`--choice 2`为9:16；比例保存后记录分段方式、人数或自定义范围、同步选择和画布网址。同步意图为是且已有网址时，立即运行只读`canvas.py preflight`并保存`canvas/preflight.json`；预检未通过按画布工作流记录待同步并阻断受影响云端操作，本地已授权制作继续。比例保存后由统一画幅配置绑定`landscape-v1`或`portrait-v1`，新分镜单元冻结该配置，历史回执仍按原格式读取。正式分段计划的生成、目标切点、局部连续性审查、全局择点、摘要与精确范围接口统一见[剧本分工规则](script-partition.md)。范围和异常确认按[工作流](storyboard-workflow.md#范围定位与历史检查)。原位rebind未实现，来源/台账变化用[绑定变更边界](binding-changes.md)，不能手改session摘要。
+设置命令按实际选择执行，不同时执行示例中的两种ratio保存方式。`header --file`要求输入两行非空固定抬头并独立保存为项目`video-header.txt`；`--choice 1`为16:9，`--choice 2`为9:16；比例保存后记录分段方式、人数或自定义范围、同步选择和画布网址。同步意图为是且已有网址时，立即运行只读`canvas.py preflight`并保存`canvas/preflight.json`；预检未通过按画布工作流记录待同步并阻断受影响云端操作，本地已授权制作继续。比例保存后由统一画幅配置绑定`landscape-v1`或`portrait-v1`，新分镜单元冻结该配置，历史回执仍按原格式读取。正式分段计划的生成、目标切点、局部连续性审查、全局择点、摘要、精确范围及最终范围TXT接口统一见[剧本分工规则](script-partition.md)。范围和异常确认按[工作流](storyboard-workflow.md#范围定位与历史检查)。原位rebind未实现，来源/台账变化用[绑定变更边界](binding-changes.md)，不能手改session摘要。
 
 ## 文本分镜接口
 
-新文字分镜的绑定/范围命令、check/preview/commit/render和场级报告，唯一维护在[文本母稿格式与接口](storyboard-text-format.md#文本分镜接口)；本页不重复接口内容。新稿时长由文字交付入口调用内部模块`scripts/storyboard_delivery_timing.py`原样冻结；旧减秒回执仅沿历史政策验证和重导出，边界见[最终时长冻结与历史兼容](storyboard-text-format.md#最终时长冻结与历史兼容)。
+新文字分镜的绑定/范围命令、check/preview/commit/render、分段详情导出和场级报告，唯一维护在[文本母稿格式与接口](storyboard-text-format.md#文本分镜接口)；本页不重复接口内容。新稿时长由文字交付入口调用内部模块`scripts/storyboard_delivery_timing.py`原样冻结；旧减秒回执仅沿历史政策验证和重导出，边界见[最终时长冻结与历史兼容](storyboard-text-format.md#最终时长冻结与历史兼容)。
 
 ## 事件计时
 

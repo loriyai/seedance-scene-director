@@ -125,11 +125,12 @@ def context_hash(state, project=None, *, scope=None):
         data['history_dependencies'] = _scoped_history(state, project, scope)
     required = ('references/storyboard-rules.md', 'references/storyboard-text-format.md',
                 'scripts/storyboard_text.py', 'scripts/storyboard_text_delivery.py',
-                'scripts/storyboard_blackout.py',
+                'scripts/storyboard_blackout.py', 'scripts/storyboard_reference_display.py',
                 'scripts/storyboard_delivery_timing.py',
                 'scripts/storyboard_authoring_gate.py', 'scripts/storyboard_context.py',
                 'scripts/continuity.py', 'scripts/source_references.py', 'scripts/production_cast.py',
                 'modules/screenplay-standardizer/scripts/character_variants.py',
+                'modules/screenplay-standardizer/scripts/scene_lighting.py',
                 'scripts/segment_naming.py', 'scripts/script_partition.py',
                 'scripts/video_settings.py', 'scripts/ratio_profiles.py',
                 'scripts/video_header.py',

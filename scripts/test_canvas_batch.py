@@ -178,6 +178,27 @@ class BatchBehavior(unittest.TestCase):
         self.assertEqual([p["reason"] for p in target["image_input"]["pending"]], ["missing_image", "missing_image"])
         self.assertEqual(c.content(self.cli.doc, target["node_id"])["generation"]["references"], [])
 
+    def test_scene_day_night_inputs_compile_with_official_sdk(self):
+        from test_canvas_image_inputs import DerivedImageInputs
+        DerivedImageInputs.scene_session(self)
+        self.assertEqual(self.assets()['status'], 'synced')
+        state = c.read_state(self.project)
+        day = state['mappings']['SET0001']['node_id']
+        night = state['mappings']['SET0002']['node_id']
+        self.assertIsNotNone(c.reference_edge(self.cli.doc, day, night))
+        self.assertIn(day, c.prompt_of(self.cli.doc, night))
+        self.assertEqual(state['mappings']['SET0002']['image_input']['status'], 'pending')
+        c.content(self.cli.doc, day).setdefault('appearanceInfo', {}).update(
+            pippitAssetId='DAY-MATERIAL', assetId='DAY-MEDIA')
+        generation = c.content(self.cli.doc, night)['generation']
+        generation['seed'] = 73
+        self.assertEqual(self.assets()['status'], 'synced')
+        generation = c.content(self.cli.doc, night)['generation']
+        self.assertEqual(generation['seed'], 73)
+        self.assertEqual(generation['references'][0]['assetId'], 'DAY-MEDIA')
+        self.assertEqual(generation['references'][0]['sourceNodeType'], c.KINDS['scene'])
+        self.assertEqual(c.read_state(self.project)['mappings']['SET0002']['image_input']['status'], 'ready')
+
     def test_multiple_video_nodes_and_empty_role_references_share_one_transaction(self):
         self.assets()
         before = len(self.cli.batch_writes)

@@ -168,6 +168,13 @@ def _dependencies(data, assignments, records=None):
             if anchor:
                 peers[aid] = {other for other, value in assignments.items() if value == anchor and other != aid}
         elif category == "scene_assets":
+            value = (records or {}).get(aid, item.get('visual_design', {}))
+            refs = design.reference_design_ids(item, value)
+            if item.get('image_reference_asset_id'):
+                refs = list(dict.fromkeys([item['image_reference_asset_id'], *refs]))
+            for dep in refs:
+                require(dep in ids and catalog[dep][0] == 'scene_assets', f'{aid}缺少日景图片依赖')
+                hard[aid].add(dep)
             loc = item.get("location_id")
             require(loc in catalog and catalog[loc][0] == "locations", f"{aid}缺少LOC依赖")
             locations[aid] = loc
@@ -216,7 +223,11 @@ def _space(data, aid, value, frozen):
             expected.add("old")
         require(set(delta) == expected and operation in ("append", "replace"), f"{aid}空间差异字段或操作无效")
         require(field in SPACE_FIELDS and field not in seen, f"{aid}每个空间字段最多一个明确差异")
-        require(delta["source_fact_text"] in facts, f"{aid}空间差异须引用本SET已验证原文事实text")
+        if item.get('variant') == 'lighting':
+            require(field == 'lighting' and delta['source_fact_text'] == item['lighting_state'],
+                    f'{aid}光照版本仅允许以已审lighting_state改变lighting')
+        else:
+            require(delta["source_fact_text"] in facts, f"{aid}空间差异须引用本SET已验证原文事实text")
         design.nonempty(delta["basis"], f"{aid}空间差异依据")
         new = design.nonempty(delta["new"], f"{aid}空间差异new")
         if operation == "replace":

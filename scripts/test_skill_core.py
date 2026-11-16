@@ -33,7 +33,7 @@ class SkillChecks(unittest.TestCase):
                 'source_paragraphs': [9], 'scene_ids': ['SC0003'], 'attribution': '叙述'}]})
         self.data['scenes'][2]['scene_asset_id'] = 'SET0002'
 
-    def test_day_night_share_one_set_and_all_assets_in_plan(self):
+    def test_legacy_day_night_share_one_set_and_all_assets_in_plan(self):
         self.validate()
         plan = c.desired_assets(self.state)
         self.assertEqual([a['key'] for a in plan if a['kind'] == 'scene'], ['SET0001'])

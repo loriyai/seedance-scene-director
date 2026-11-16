@@ -32,6 +32,7 @@ REQUIRED_FILES = (
     'scripts/state_effects.py',
     'modules/screenplay-standardizer/references/asset-ledger.md',
     'modules/screenplay-standardizer/scripts/character_variants.py',
+    'modules/screenplay-standardizer/scripts/scene_lighting.py',
 )
 
 # Explicit operational functions only. Unknown functions, imports, constants,

@@ -13,7 +13,7 @@ python <skill>/scripts/canvas.py bind --project <project> --target <画布链接
 python <skill>/scripts/canvas.py status --project <project>
 ```
 
-`setup`只接受官方CLI及npm运行时版本1.0.57，核对两者版本和本Skill实际调用的命令；缺少时用包内`ensure-cli.js`安装固定的`@pippit-dev/cli@1.0.57`到版本专用缓存。必要原生命令为status/login、canvas get/allocate/upload及space list；canvas get必须支持--team-id。必要语义命令覆盖快照、权限、apply_mutations、节点创建/更新/删除（含update_asset）、引用连线的create_edge与精确删除引用边的delete_edges、提示词写入、角色/场景描述及角色主图更新。create_edge用于派生角色图片引用及历史黑幕引用；新none-v1视频仍不创建黑幕连线。角色updateAppearance须支持patch.generationPrompt与expected.generationPrompt，以及派生图片引用所需的patch.generation与expected.generation整体配置字段；不能只凭命令名存在认定支持。create_checkpoint只在权限支持时使用，保持可选；不探测本Skill不调用的模型列表/描述、生图、生视频、超分、擦字幕、积分、query-result、logout或canvas create。`auth --login`先检查status，已有登录不重复打开授权页。首次提示用户完成浏览器授权；CLI自行保存安全凭据。配置文件只保存CLI/Node路径、版本和公开账号标识，禁止保存密钥、完整status、认证环境变量或浏览器存储。CLI报401/403时先判断账号/权限；仅确认浏览器凭据过期或撤销后使用`auth --login --force`，不将force作为常规操作。
+`setup`只接受官方CLI及npm运行时版本1.0.57，核对两者版本和本Skill实际调用的命令；缺少时用包内`ensure-cli.js`安装固定的`@pippit-dev/cli@1.0.57`到版本专用缓存。必要原生命令为status/login、canvas get/allocate/upload及space list；canvas get必须支持--team-id。必要语义命令覆盖快照、权限、apply_mutations、节点创建/更新/删除（含update_asset）、引用连线的create_edge与精确删除引用边的delete_edges、提示词写入、角色/场景描述及角色主图更新。create_edge用于派生角色与场景图片引用及历史黑幕引用；新none-v1视频仍不创建黑幕连线。角色updateAppearance须支持patch.generationPrompt与expected.generationPrompt，以及派生图片引用所需的patch.generation与expected.generation整体配置字段；不能只凭命令名存在认定支持。create_checkpoint只在权限支持时使用，保持可选；不探测本Skill不调用的模型列表/描述、生图、生视频、超分、擦字幕、积分、query-result、logout或canvas create。`auth --login`先检查status，已有登录不重复打开授权页。首次提示用户完成浏览器授权；CLI自行保存安全凭据。配置文件只保存CLI/Node路径、版本和公开账号标识，禁止保存密钥、完整status、认证环境变量或浏览器存储。CLI报401/403时先判断账号/权限；仅确认浏览器凭据过期或撤销后使用`auth --login --force`，不将force作为常规操作。
 
 链接按完整域名与路径共同解析，支持三种已核实的官方入口：`https://xyq.jianying.com/novel/detail/canvas?...`为个人空间候选；`https://xyq.jianying.com/project?...`与`https://www.xiaoyunque.com/project?...`均为团队空间入口，不能仅因域名含`xyq.jianying.com`就选择个人空间。严格校验域名、路径及唯一ID参数。收到完整链接时原样传给bind，由统一解析器保留projectId、canvasId及空间线索；不为绕过链接解析而抽出canvasId改走裸ID入口。入口分类用于选择候选空间，仍须只读核验画布身份与编辑权限后才保存绑定。overviewPippitAssetId须在选定空间后通过官方CLI解析实际canvas ID，不能把overview或project ID当成canvas ID。所有远端ID及TeamID保持字符串。
 
@@ -41,7 +41,7 @@ CLI的原生查询、分配、上传与语义查询、创建、编辑、删除�
 
 角色`updateDescription(field=appearance)`与场景`updateDescription(field=description)`只用于明确的描述编辑，不能代替生图提示词写入。三条资产入口——后台assets、直接assets、videos补建——共用canvas.py的资产初始化步骤与验收。创建后完成显示名/basicInfo.name、空形象/视角名和正确提示词回读；SDK工厂默认显示名不是最终名称。仅新建/未完成初始化节点检查上述默认图片参数，ready或采用节点的人工配置保持。所有操作仅配置节点，不触发生成。
 
-派生角色图片按[图片设计](asset-image-design.md)的已编译`asset-image-reference-v1`合同读取基础角色与道具依赖，按依赖顺序创建节点；旧台账没有该合同的独立提示词保持原样。完整制作名引用在写入时转换为查询确认的真实`<node-asset>`标签，并通过官方`create_edge`建立指向派生角色的reference连线。引用名称、节点ID、Pippit素材ID和云端媒体assetId分别核实，不互相代填。
+派生角色与场景图片按[图片设计](asset-image-design.md)的已编译`asset-image-reference-v1`合同读取实际依赖：角色引用基础角色及关联道具，夜景引用同结构日景SET。按依赖顺序创建节点，旧台账没有该合同的独立提示词保持原样。完整制作名引用在写入时转换为查询确认的真实`<node-asset>`标签，并通过官方`create_edge`建立指向派生图片节点的reference连线。角色使用updateAppearance合并generation，场景使用update_asset合并完整generation并保留包装结构、原配置及无关引用；实际节点、图片就绪分别验收。引用名称、节点ID、Pippit素材ID和云端媒体assetId分别核实，不互相代填。日景到夜景的图片依赖不自动带入视频参考清单。
 
 角色图片引用使用`xyq.role.updateAppearance`的`patch.generation`保存从最新快照完整合并的生成配置，同时传`expected.generation`；仅改文字时仍使用上表的`generationPrompt`。`generation.references`保存源节点身份、`type:image`、实际主图的`pippitAssetId/assetId`；基础角色还用`dataReferenceSelection`明确选择该图片，不能混入声音。保留模型、比例、清晰度、推理强度、无关引用、外观描述及当前主图；人工改过的受管理引用不得直接覆盖。不得对角色调用图片/视频专用的`xyq.generation.update_prompt`。
 
@@ -207,6 +207,6 @@ director.commit的replace会先保存本地版本并输出TXT，再提交已有�
 
 ## 全部资产与旧项目升级
 
-用户授权执行assets后，创建全部需图片的角色形象、基础布景及经证据核实的必要布景版本、全部主要道具，允许空节点；不因尚未写分镜或尚未准备图片而延迟创建。日夜、天气、光照、拍摄方向与场次排序变化不会新增场景节点。节点和图片都使用SET对应的完整name。
+用户授权执行assets后，创建全部需图片的角色形象、基础布景及经证据核实的必要布景版本、全部主要道具，允许空节点；不因尚未写分镜或尚未准备图片而延迟创建。场景节点以已审SET为准：新光照策略中实际存在的日景和夜景各有独立SET节点，同状态复用；天气、拍摄方向与场次排序不触发额外节点。旧无光照策略的台账保留原节点与映射。节点和图片都使用SET对应的完整name。
 
 旧schema 2项目不能直接继续assets/videos写入。先离线审核“保留、修改、合并、删除”方案：列出旧SC、目标LOC/SET、现有节点ID、主图、下游引用、拟保留节点及受影响单元；由用户决定后再执行升级。升级台账与新绑定不能自动迁移旧canvas映射，不静默复用或删除任何节点。明确名称引用必须后接英文空格，渲染匹配也检查该边界，禁止把短资产名匹配为长词前缀；旧单元的独占行@黑幕仅紧随标题下一行；历史edge-only-v1单元的黑幕只用独立连线，不写入提示词。

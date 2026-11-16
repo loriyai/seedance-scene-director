@@ -36,8 +36,11 @@ def setup_skill_fixture(self):
     with contextlib.redirect_stdout(io.StringIO()):
         ledger.initialize(self.script, self.work, path)
     draft = d.read_json(path)
-    # This fixture exercises legacy ledgers; new extraction policy has its own tests.
+    # Freeze the historical extraction/SET contracts used by reference-v2/v3
+    # byte-layout tests. New init defaults and day/night assets are tested by
+    # test_scene_character_names and test_scene_lighting_assets.
     draft.pop('asset_policy', None)
+    draft.pop('scene_lighting_policy', None)
     self.draft = copy.deepcopy(draft)
     draft['locations'] = [draft['locations'][0]]
     draft['locations'][0].update(identity_status='confirmed', identity_basis='原文明示陈默所属同一卧室')

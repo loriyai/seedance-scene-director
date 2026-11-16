@@ -17,6 +17,7 @@ POLICY = 'partition-v1'
 COUNT_POLICY = 'source-non-whitespace-including-punctuation-v1'
 BOUNDARY_POLICY = 'safe-partition-boundaries-v1'
 PARTITION_MODE = 'count'
+CUSTOM_POLICY = 'custom-partition-ranges-v1'
 
 
 def require(condition, message):
@@ -426,6 +427,47 @@ def build_plan(state, participants, mode=PARTITION_MODE, review=None):
     return _assemble_plan(state, participants, points, sources, targets)
 
 
+def build_custom_plan(state, ranges):
+    """Register already chosen ranges; never choose or move a user boundary."""
+    sources = source_snapshot(state)
+    require(isinstance(ranges, dict) and ranges.get('policy') == CUSTOM_POLICY
+            and ranges.get('sources') == sources, '自定义范围须绑定当前来源摘要')
+    rows = ranges.get('segments')
+    require(isinstance(rows, list) and rows, '自定义范围不能为空')
+    paragraphs, starts, text = source_data(state)
+    mapped = exact_source_map(state)
+    standard_cursor = source_cursor = 0
+    segments = []
+    for index, row in enumerate(rows, 1):
+        require(isinstance(row, dict), '自定义分段须为对象')
+        span, source_range = row.get('span'), row.get('source_range')
+        require(isinstance(span, list) and len(span) == 2
+                and all(type(n) is int for n in span), '自定义分段须有准确标准正文span')
+        a, b = span
+        require(a == standard_cursor and a < b <= state['length'], '自定义范围不连续、重叠、空白或越界')
+        require(isinstance(source_range, list) and len(source_range) == 2, '自定义分段须有原文坐标source_range')
+        x, y = [source_offset(position, paragraphs, starts) for position in source_range]
+        require(x == source_cursor and x < y <= len(text), '自定义原文范围不连续、重叠或为空')
+        if b < state['length']:
+            require(mapped[b - 1] < y <= mapped[b], '自定义原文边界与标准正文不精确对应')
+            require(not any(record['start'] < b < record['end'] for record in state['records']),
+                    '自定义分段不得切断一条对白或动作记录')
+        reason = row.get('reason')
+        require(isinstance(reason, str) and reason.strip(), '自定义范围须保留实际范围依据')
+        first, last = excerpts(text[x:y])
+        segments.append({'label': label_for(index), 'span': span, 'source_range': source_range,
+                         'source_offsets': [x, y], 'word_count': sum(not c.isspace() for c in text[x:y]),
+                         'start_excerpt': first, 'end_excerpt': last, 'reason': reason})
+        standard_cursor, source_cursor = b, y
+    require(standard_cursor == state['length'] and source_cursor == len(text), '自定义范围未完整覆盖来源')
+    plan = {'policy': POLICY, 'mode': 'custom', 'participants': len(segments), 'sources': sources,
+            'count_policy': COUNT_POLICY, 'status': 'confirmed', 'segments': segments,
+            'total_count': sum(row['word_count'] for row in segments), 'target_counts': [],
+            'selected_boundaries': [], 'boundaries': [], 'selection_policy': CUSTOM_POLICY}
+    plan['proposal_hash'] = digest(plan)
+    return plan
+
+
 def _seal(plan):
     plan['integrity'] = digest({key: value for key, value in plan.items() if key != 'integrity'})
     return plan
@@ -490,22 +532,47 @@ def resolve_segment(project, state, label_or_span):
 
 
 def render_plan(plan):
-    lines = []
+    lines = ['正式分段范围', f"计划：{plan['plan_id']}；版本：{plan['version']}",
+             '计数口径：原剧本所有非空白字符，含标点、原有标题及人物标签；不含工具新增文字。',
+             f"总字数：{plan['total_count']}；分段数：{len(plan['segments'])}", '']
     for segment in plan['segments']:
         lines.extend([f"{segment['label']}分段：共{segment['word_count']}个字",
-                      '开始：' + segment['start_excerpt'], '结束：' + segment['end_excerpt'], ''])
+                      '开始：' + segment['start_excerpt'], '结束：' + segment['end_excerpt'],
+                      f"标准正文范围：[{segment['span'][0]}, {segment['span'][1]})",
+                      f"原文坐标：{segment['source_range'][0]} → {segment['source_range'][1]}"])
+        if segment.get('reason'):
+            lines.append('范围依据：' + segment['reason'])
+        lines.append('')
+    for row in plan.get('selected_boundaries', []):
+        offset = plan['segments'][row['target_index'] - 1]['span'][1]
+        lines.append(f"切点{row['target_index']}：目标累计字数{row['target_count']:g}；实际累计字数{row['actual_count']}；"
+                     f"方向{'前' if row['side'] == 'before' else '后'}；偏移{row['distance']:g}；标准正文坐标{offset}。")
+        lines.append('连续性理由：' + row['reason'])
     return '\n'.join(lines).rstrip() + '\n'
+
+
+def export_plan(project, state, output):
+    from delivery_reports import write_text_report
+    plan = load_plan(project, state)
+    require(plan is not None and plan['status'] == 'confirmed', '须先核定并保存正式分段范围')
+    result = write_text_report(project, state, output, render_plan(plan))
+    return {**result, 'plan_id': plan['plan_id'], 'plan_version': plan['version'],
+            'segment_count': len(plan['segments']), 'total_count': plan['total_count']}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
-    for command in ('plan', 'show', 'resolve', 'boundary-template'):
+    for command in ('plan', 'custom-plan', 'show', 'resolve', 'boundary-template', 'export'):
         command_parser = sub.add_parser(command)
         command_parser.add_argument('--project', type=Path, required=True)
         if command == 'plan':
             command_parser.add_argument('--participants', type=int, required=True)
             command_parser.add_argument('--boundaries', type=Path)
+        elif command == 'custom-plan':
+            command_parser.add_argument('--ranges', type=Path, required=True)
+        elif command == 'export':
+            command_parser.add_argument('--output', type=Path, required=True)
         elif command == 'resolve':
             command_parser.add_argument('--label', required=True)
         elif command == 'boundary-template':
@@ -515,9 +582,10 @@ def main():
     try:
         import director
         state = director.load(args.project)
-        if args.command == 'plan':
-            proposal = build_plan(state, args.participants, PARTITION_MODE,
-                                  read_json(args.boundaries) if args.boundaries else None)
+        if args.command in ('plan', 'custom-plan'):
+            proposal = (build_custom_plan(state, read_json(args.ranges)) if args.command == 'custom-plan'
+                        else build_plan(state, args.participants, PARTITION_MODE,
+                                        read_json(args.boundaries) if args.boundaries else None))
             plan = save_plan(args.project, state, proposal)
             result = {'status': plan['status'], 'plan_id': plan['plan_id'], 'proposal_hash': plan['proposal_hash'],
                       'plan_file': str((args.project / PLAN_FILE).resolve()), 'text': render_plan(plan)}
@@ -528,12 +596,14 @@ def main():
             segment = resolve_segment(args.project, state, args.label)
             require(segment is not None, '没有与该代号匹配的有效分段')
             result = segment
+        elif args.command == 'export':
+            result = export_plan(args.project, state, args.output)
         else:
             result = boundary_template(state, args.participants)
             output = director.validate_output_path(state, args.project, args.output)
             require(not output.exists(), '安全切点输出已存在；请使用新路径，不能覆盖旧输入或决定')
             atomic_json(output, result)
-        if args.command == 'plan' and plan['status'] == 'confirmed' and state.get('phase') != 'range':
+        if args.command in ('plan', 'custom-plan') and plan['status'] == 'confirmed' and state.get('phase') != 'range':
             state['phase'] = 'range'
             director.save(args.project, state)
         print(json.dumps(result, ensure_ascii=False, indent=2))

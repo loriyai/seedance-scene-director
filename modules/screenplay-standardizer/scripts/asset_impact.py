@@ -13,7 +13,7 @@ CATEGORIES = ("scenes", *ASSETS)
 DERIVED = {"image_prompt", "image_format", "image_design_digest"}
 DESIGN_DERIVED = {"source_fact_digest", "source_context_digest"}
 BOOKKEEPING = {"asset_decision_receipts", "asset_decision_history", "asset_archive", "retired_ids", "inactive_assets", "pending_reviews"}
-GLOBAL_POLICIES = {"schema_version", "asset_policy", "group_policy", "character_variant_policy", "character_appearance_policy", "image_design_version", "visual_style", "temporal_layers"}
+GLOBAL_POLICIES = {"schema_version", "asset_policy", "group_policy", "character_variant_policy", "character_appearance_policy", "scene_lighting_policy", "image_design_version", "visual_style", "temporal_layers"}
 
 
 def _require(condition, message):
@@ -84,6 +84,8 @@ def _dependencies(data, authored=None):
         elif category == "scene_assets":
             edge(item.get("location_id"), aid, "LOC_space_or_facts_dependency")
             edge(item.get("parent_id"), aid, "SET_parent_version_dependency")
+            edge(item.get('structure_asset_id'), aid, 'SET_structure_dependency')
+            edge(item.get('image_reference_asset_id'), aid, 'SET_day_image_dependency')
             if item.get("variant") != "base":
                 for base in data.get("scene_assets", []):
                     if base.get("location_id") == item.get("location_id") and base.get("variant") == "base":

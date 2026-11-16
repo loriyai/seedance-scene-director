@@ -1233,10 +1233,10 @@ def desired_assets(session):
             d.dependency()
             from asset_visual_design import image_reference_asset_ids
             keys = image_reference_asset_ids(source[item["key"]])
-            d.require(item["kind"] == "role", "派生图片引用当前仅适用于角色形象")
+            d.require(item["kind"] in ("role", "scene"), "派生图片引用仅适用于角色形象或场景")
             d.require(all(k in source and k != item["key"] for k in keys), "派生图片引用缺失或自引用")
             item["image_reference_assets"] = [{"key": k, "name": source[k]["name"],
-                "kind": "role" if k.startswith("CHAR") else "image"} for k in keys]
+                "kind": "role" if k.startswith("CHAR") else "scene" if k.startswith("SET") else "image"} for k in keys]
     # Dependency order is shared by queued assets, direct assets and video preparation.
     ordered, active, done = [], set(), set()
     by_key = {item["key"]: item for item in result}
@@ -1331,7 +1331,7 @@ def asset_image_reference_plan(original, state, doc):
                 owned_edges = {sid: eid for sid, eid in owned_edges.items() if eid not in target["edge_ids"]}
     generation = copy.deepcopy(content(doc, nid).get("generation") or {})
     saved = generation.get("references", [])
-    d.require(isinstance(saved, list) and all(isinstance(r, dict) for r in saved), "角色图片引用结构非法")
+    d.require(isinstance(saved, list) and all(isinstance(r, dict) for r in saved), "派生图片引用结构非法")
     source_ids = {row["node_id"] for row in sources}
     old_ids = {r["sourceNodeId"] for r in previous}
     selected = [row["reference"] for row in sources if row.get("reference")]
@@ -1362,10 +1362,17 @@ def asset_image_reference_plan(original, state, doc):
             owned_edges[sid] = eid
     merged = {**generation, "prompt": item["image_prompt"], "references": [r for r in saved if not owned(r)] + selected}
     if merged != generation:
-        add("xyq.role.updateAppearance", {"nodeId": nid, "assetId": nid,
-            "expected": {"generation": generation}, "patch": {"generation": merged}},
-            [{"action": "generation_settings", "node_id": nid, "value": merged}])
+        checks = [{"action": "generation_settings", "node_id": nid, "value": merged}]
+        if original['kind'] == 'scene':
+            raw = doc['assets'][nid]['content']
+            patch = ({'data': {**copy.deepcopy(raw['data']), 'generation': merged}}
+                     if isinstance(raw.get('data'), dict) else {'generation': merged})
+            add('update_asset', {'assetId': nid, 'contentPatch': patch}, checks)
+        else:
+            add("xyq.role.updateAppearance", {"nodeId": nid, "assetId": nid,
+                "expected": {"generation": generation}, "patch": {"generation": merged}}, checks)
     return {"key": key, "node_id": nid, "sources": sources, "commands": commands, "targets": targets,
+            "expected_content": copy.deepcopy(doc['assets'][nid]['content']),
             "image_input": {"status": "pending" if item["image_reference_pending"] else "ready",
                 "pending": item["image_reference_pending"], "managed_references": copy.deepcopy(selected), "managed_edges": owned_edges}}
 
@@ -1388,9 +1395,10 @@ def sync_asset_image_references(project, cli, session, state, doc, keys=None):
                                    "pending": plan["image_input"]["pending"]}
         save(project, state)
         for step in plan["commands"]:
-            if step["name"] == "xyq.role.updateAppearance":
+            if step["name"] in ("xyq.role.updateAppearance", "update_asset"):
                 fresh = document(cli, state["binding"])
                 if (content(fresh, plan["node_id"]).get("generation", {}) != content(doc, plan["node_id"]).get("generation", {})
+                        or (original['kind'] == 'scene' and fresh['assets'][plan['node_id']]['content'] != plan['expected_content'])
                         or resolve_asset_image_item(original, state, fresh)["image_reference_sources"] != plan["sources"]):
                     fail("CONCURRENT_EDIT", "派生图片引用写入前配置或参考素材已变化。", key=key)
                 doc = fresh

@@ -22,6 +22,7 @@ from asset_review import (prepare_review_payload, apply_review_decisions, verify
                           validate_asset_lifecycle)
 from project_contract import delivery_contract, requires_design
 import scene_character_names
+import scene_lighting
 
 
 HEADING = re.compile(r"场景(\d+)(?=-(?:日|夜)-(?:内|外)-|：(?:日|夜)·(?:内|外)·)[：-](日|夜)[·-](内|外)[·-](.+)")
@@ -612,6 +613,15 @@ def validate_temporal_origins(data):
 
 
 def validate_scene_assets(data, paragraphs, scenes, locations):
+    if scene_lighting.enabled(data):
+        projected = scene_lighting.validate(data, paragraphs, _build_structure_assets)
+        _validate_structure_assets(projected, paragraphs, {s['id']: s for s in projected['scenes']}, locations)
+        reference_preflight(data)
+        return
+    _validate_structure_assets(data, paragraphs, scenes, locations)
+
+
+def _validate_structure_assets(data, paragraphs, scenes, locations):
     """SC identifies an occurrence; SET identifies a reusable visual set."""
     assets = {item["id"]: item for item in data["scene_assets"]}
     names = {item["name"] for category in ("characters", "props") for item in data[category]}
@@ -668,12 +678,20 @@ def validate_scene_assets(data, paragraphs, scenes, locations):
         raise ValueError("未使用的布景版本须先核实去向，不创建多余节点")
     validate_set_parents(assets)
     # The same deterministic policy checks existing links without rewriting them.
-    planned = build_scene_assets(data, paragraphs)
+    planned = _build_structure_assets(data, paragraphs)
     if len(planned["scene_assets"]) != len(data["scene_assets"]):
         raise ValueError("台账缺少按已审阅时间层建立的布景；请离线 build-scenes 并审核迁移")
 
 
 def build_scene_assets(data, paragraphs=None):
+    if scene_lighting.enabled(data):
+        result = scene_lighting.build(data, paragraphs, _build_structure_assets)
+        reference_preflight(result)
+        return result
+    return _build_structure_assets(data, paragraphs)
+
+
+def _build_structure_assets(data, paragraphs=None):
     """Group only by explicitly confirmed LOC IDs, never by heading/name/daylight."""
     if data.get("schema_version") != 3:
         raise ValueError("旧台账须先制定保留/修改/合并/删除方案并审核升级，不自动转换")
@@ -836,6 +854,7 @@ def initialize(script_path: Path, workdir: Path, output: Path, *, observations=N
         })
     data = {
         "schema_version": 3, "asset_policy": PROP_POLICY, "group_policy": GROUP_POLICY,
+        "scene_lighting_policy": scene_lighting.POLICY,
         "source_digest": digest(paragraphs), "scene_assets": [],
         "scenes": scenes, "characters": characters, "locations": locations,
         "props": [], "retired_ids": [], "inactive_assets": {"characters": []}, "pending_reviews": [],
@@ -881,6 +900,8 @@ def visual_text(facts: list[dict]) -> list[str]:
 
 def set_visual_facts(item, locations, assets):
     """Temporal parent links record lineage, not continued decor conditions."""
+    if item["variant"] == "lighting":
+        return set_visual_facts(assets[item["structure_asset_id"]], locations, assets)
     common = locations[item["location_id"]]["visual_facts"]
     if item["variant"] != "base":
         base = next(a for a in assets.values() if a["location_id"] == item["location_id"] and a["variant"] == "base")

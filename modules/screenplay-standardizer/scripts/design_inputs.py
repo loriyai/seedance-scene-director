@@ -26,6 +26,7 @@ RULE_FILES = (
     MODULE / "scripts/asset_visual_design.py",
     MODULE / "scripts/design_preview.py",
     MODULE / "scripts/design_scope.py",
+    MODULE / "scripts/scene_lighting.py",
     Path(__file__).resolve(),
 )
 

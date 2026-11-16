@@ -223,7 +223,7 @@ def dependency(path=None):
     instructions = found / ("INSTRUCTIONS.md" if (found / "INSTRUCTIONS.md").is_file() else "SKILL.md")
     required = {"INSTRUCTIONS.md", "references/asset-ledger.md",
                 "scripts/asset_ledger.py", "scripts/asset_migrate.py",
-                "scripts/asset_visual_design.py", "scripts/character_variants.py",
+                "scripts/asset_visual_design.py", "scripts/character_variants.py", "scripts/scene_lighting.py",
                 "scripts/asset_review.py", "scripts/design_preview.py",
                 "scripts/design_scope.py", "scripts/design_inputs.py", "scripts/evidence_draft.py",
                 "scripts/cast_contract.py", "scripts/source_compat.py", "scripts/scene_character_names.py",

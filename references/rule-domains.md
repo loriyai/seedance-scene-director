@@ -12,13 +12,14 @@
 | 阶段顺序、证据验收、过程问题性质和计量起止/类别 | [资产主流程](asset-workflow.md)的对应章节 |
 | 新项目/绑定项目状态入口及命令路由 | [后台接口](runtime.md) |
 | 已绑定分镜项目导出、导入、位置映射、关联历史和检查点恢复 | [项目迁移](project-portability.md)；`project_bundle.py`、`project_paths.py`、`project_continuation.py` |
-| 原剧本按人数拆分、合法切点、字数和精确范围映射 | [剧本分工与范围映射](script-partition.md)、`scripts/script_partition.py` |
+| 原剧本按人数拆分、合法切点、字数、精确范围映射及范围TXT | [剧本分工与范围映射](script-partition.md)、`scripts/script_partition.py` |
 | 分段轮次、段内序号及稳定分镜显示名称 | [交付版式](storyboard-rules.md#交付版式)、`scripts/segment_naming.py`与文本交付入口 |
 | 视频比例到分镜画幅配置的统一映射、版本与单元冻结 | `scripts/ratio_profiles.py`；适用创作规则见[画幅配置](storyboard-rules.md#画幅配置) |
 | 新文字分镜的创作、流程和语法 | 下述三份分镜权威资料 |
 | 分镜创作与脚本的职责边界、跨代理与包装器约束 | [共同执行契约](execution-contract.md#分镜创作与工具边界) |
 | 连续逐镜核对、按需增量诊断、逐段交付及同类问题闭环 | [分镜工作流](storyboard-workflow.md#范围一次当前场次逐步完成) |
 | 按场来源/资产/版本只读投影与上下文绑定 | `scripts/storyboard_context.py`；合法引用集合复用`storyboard_text.py` |
+| 全部分段内容统计与详情TXT | [交付版式](storyboard-rules.md#交付版式)维护口径；[分镜工作流](storyboard-workflow.md#交付与画布)维护完成触发；文本交付入口计算及导出 |
 | 新文字分镜事件、过程问题及耗时派生 | `scripts/storyboard_metrics.py`；命令仍由`storyboard_text_delivery.py`暴露，口径见[事件计时](storyboard-text-format.md#事件计时) |
 
 同次写稿完成属性去向和字段判断，既有代表组验收处理组合后的语义冲突；不能用增加重复清单、全文扫描或审阅轮次弥补职责不清。工具只验证其能确定的结构、来源和依赖，不以不断扩充题材禁词代替自然语言判断。本表只作导航，不复制各领域规则。

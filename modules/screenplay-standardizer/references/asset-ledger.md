@@ -16,6 +16,7 @@
 ```json
 {
   "schema_version": 3,
+  "scene_lighting_policy": "scene-lighting-v1",
   "asset_policy": "visual-continuity-v2",
   "group_policy": "visual-continuity-v2",
   "source_digest": "由 init 计算的原文段落摘要",
@@ -30,7 +31,7 @@
       "character_ids": ["CHAR0001"],
       "prop_ids": [],
       "visual_facts": [],
-      "time_basis": {"kind": "原文明示", "source_paragraphs": [1]}
+      "time_basis": {"kind": "格式默认", "source_paragraphs": []}
     }
   ],
   "characters": [
@@ -46,7 +47,7 @@
     {"id": "LOC0001", "name": "昏暗房间", "aliases": [], "visual_facts": [], "identity_status": "confirmed", "identity_basis": "核实原文所属主体及空间，关联场次为同一物理房间"}
   ],
   "scene_assets": [
-    {"id": "SET0001", "name": "昏暗房间", "location_id": "LOC0001", "variant": "base", "parent_id": null, "visual_facts": []}
+    {"id": "SET0001", "name": "昏暗房间", "location_id": "LOC0001", "variant": "base", "parent_id": null, "structure_asset_id": "SET0001", "structure_name": "昏暗房间", "lighting_state": "unspecified", "visual_facts": []}
   ],
   "props": [],
   "prop_coverage_review": {
@@ -198,7 +199,15 @@ scenes保留按标准化规则确定的全部剧情场次及heading，不删减�
 
 build-scenes是确定性索引脚本：先确认并合并LOC、登记时间层及原样基准，对新台账normalize消除逐场init产生的同名群像/道具候选，再调用build-scenes；该命令执行完整制作名称预检，不能带着未归并的重复CHAR名称进入。它按已确认LOC ID建立每个地点唯一的base SET，再依据人工审阅登记的时间层及原样基准建立或复用SET，填写各场scene_asset_id；不按名称字符串自动合并、不扫描全文猜测跳时、不提取或杜撰视觉事实。无时间层元数据的schema 3仍按既有base/decor规则处理；已有SET ID及有效关联保留，新增ID高于现用及废弃SET。旧SET关联与新时间层不一致时报告映射/绑定迁移需求，不静默覆盖。输出为新文件，再补充原文事实、完成群像筛选与美术设计并完整render校验。身份待核、重复基础布景、无效关联均阻止后续阶段。
 
-日夜、天气、光照、取景方向、场次号与排序仅属于SC或分镜，不能作为增加SET的理由。明示真实布景变化可建立少量版本：variant="decor"，parent_id指向同LOC基础SET，name为“地点-有依据的布景状态”，visual_facts须有原文证据并关联确实使用该版本的SC。明示大跨度跳时另用temporal版本，规则见下节。同一视觉状态及同一时间层复用对应SET，不逐场建立新版本；基础布景与LOC事实只承载所有版本共用的固定元素，decor/temporal分类描述继承这些共性，再追加本版本事实。temporal的parent_id可指向同LOC的base、decor或temporal；这是版本承接关系，不表示前一版婚堂、废墟或其他非共性状态延续。已移除物件或已改变状态必须从共用字段移出，分别登记于实际适用的版本，避免被继承至无此元素的版本。现有schema不含结构化删除/覆盖字段，程序不猜测自由中文描述中的删除语义；共用性及移除关系须人工核对。程序验证结构、同LOC及无循环parent链和证据出处，语义上是否真实改变布景仍须人工核实。
+场景资产分别维护物理地点、结构/时代版本和光照状态。新init登记`scene_lighting_policy: scene-lighting-v1`；同一结构实际需要日景和夜景时分别建立SET，同一状态复现复用原ID，不逐场或按拍摄方向建图。天气、取景方向、场次号与排序仍由SC或分镜表达，不据此机械增SET。明示真实布景变化可建立少量版本：variant="decor"，parent_id指向同LOC基础SET，name为“地点-有依据的布景状态”，visual_facts须有原文证据并关联确实使用该版本的SC。明示大跨度跳时另用temporal版本，规则见下节。同一视觉状态及同一时间层复用对应SET，不逐场建立新版本；基础布景与LOC事实只承载所有版本共用的固定元素，decor/temporal分类描述继承这些共性，再追加本版本事实。temporal的parent_id可指向同LOC的base、decor或temporal；这是版本承接关系，不表示前一版婚堂、废墟或其他非共性状态延续。已移除物件或已改变状态必须从共用字段移出，分别登记于实际适用的版本，避免被继承至无此元素的版本。现有schema不含结构化删除/覆盖字段，程序不猜测自由中文描述中的删除语义；共用性及移除关系须人工核对。程序验证结构、同LOC及无循环parent链和证据出处，语义上是否真实改变布景仍须人工核实。
+
+新光照策略由`scene_lighting.py`统一编译与验证：先按上述base/decor/temporal建立结构，再按各场真实需要分配光照用图。根结构SET记录`structure_asset_id`为自身、`structure_name`为已审结构名称、`lighting_state`为`day/night/unspecified`；有实际日景优先由根承载日景，仅夜景则根直接承载夜景，不补白天资产。其他实际用到的光照版本为`variant="lighting"`，`parent_id`与`structure_asset_id`均指准确结构SET。光照版本不复制结构，不新增LOC或时间层；结构事实继承准确结构版本，逐场光照事实仍在SC。日景/夜景制作名使用“结构名称-日景/夜景”，未明状态不宣称白天。即使先出夜景、后出日景，图片依赖顺序仍可先日后夜，剧情顺序不变。
+
+`time_basis.kind="原文明示"`时按已核标题日夜取得实际光照；`格式默认`的“日”仅得到`unspecified`。确需确定未明光照时，在SC显式登记`scene_lighting: {"state":"day", "kind":"制作选择", "basis":"本场具体制作依据"}`，不得与原文明示日夜冲突。无自然昼夜、黎明/黄昏及其他光照条件须在SC事实和设计lighting中保留真实条件，不硬造正午、深夜、月亮或窗灯；未确认为日/夜可保持unspecified。先核实来源与实际需求，不通过批量套默认日制造日景依赖。
+
+同结构实际同时有日景与夜景时，夜景另记录`image_reference_asset_id`指向对应日景，图片设计必须据此建立真实SET图片引用；不同decor/temporal结构不能只按同LOC错配日景。单一夜景没有该依赖。夜景视频引用夜景SET即可，日景图片依赖不自动进入视频引用清单。一个SC仍有一个主要`scene_asset_id`；SC内有来源支持的其他既有光照图需求时，按分镜`source_references`精确声明使用范围，不改变主要地点或将全场所有图自动加入每个单元。
+
+新策略的状态、结构关联、场次映射及图片依赖纳入设计摘要、冻结分组与受影响闭包。已经冻结的状态或映射改变时要求显式迁移；旧台账未声明此策略则保持原base/decor/temporal复用语义，安装更新不改既有SET、图片或画布节点。
 
 旧schema 2可读取或按旧版改稿迁移，不能直接传输画布。升级须先离线给出旧SC→LOC/SET及节点的保留/修改/合并/删除方案，保留旧文件和映射快照，由用户抉择后再建立schema 3新绑定。不得自动把所有旧SC改为SET、静默合并图片或删除节点。schema 3改稿迁移保持SET ID、时间层、原样基准及可定位证据；原文变动、时间层起始场/基准场对应不明确、版本关联不唯一或版本未使用进入pending_reviews，保存旧记录以供审核，不静默丢弃temporal_layers。处理后才能生成最终台账。
 
