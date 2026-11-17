@@ -597,10 +597,39 @@ def snapshot(cli, state, previous, items, sources=(), asset_reference_policy=Non
     from canvas_asset_reference_policy import source_target
     for node_id in targets | set(sources):
         if node_id and node_id not in targets:
-            identity = source_target(asset_reference_policy, previous, node_id, identity_only=source_identity_only)
+            identity_baseline = previous
+            if source_identity_only:
+                # A prior batch readback contains only that batch's assets. Its
+                # root membership is not proof that every source was loaded.
+                current_node = c.nodes(fresh).get(node_id)
+                if current_node is None:
+                    c.fail('CONCURRENT_EDIT' if value.get('complete') is True else 'READBACK_PENDING',
+                           '引用资产原节点不在本次根成员表，须按原ID核验。', node_id=node_id)
+                previous_node = c.nodes(previous).get(node_id)
+                if previous_node is None:
+                    c.fail('READBACK_PENDING', '前一快照缺少引用原节点身份，须按原ID补齐。', node_id=node_id)
+                if not isinstance(previous_node.get('type'), str) or not isinstance(current_node.get('type'), str):
+                    c.fail('READBACK_PENDING', '引用原节点类型尚未完整加载，须按原ID补齐。', node_id=node_id)
+                if c.kind_of(current_node) != c.kind_of(previous_node):
+                    c.fail('CONCURRENT_EDIT', '引用资产原节点类型改变，不能按名称替代。', node_id=node_id)
+                asset = fresh.get('assets', {}).get(node_id)
+                if (value.get('complete') is not True or not isinstance(asset, dict)
+                        or not isinstance(asset.get('type'), str) or not isinstance(asset.get('content'), dict)
+                        or not isinstance(asset.get('pippitAssetId'), str)):
+                    c.fail('READBACK_PENDING', '本次引用资产身份尚未完整返回，须按原ID补齐。', node_id=node_id)
+                prior_asset = previous.get('assets', {}).get(node_id)
+                if (not isinstance(prior_asset, dict) or not isinstance(prior_asset.get('type'), str)
+                        or not isinstance(prior_asset.get('content'), dict) or 'pippitAssetId' not in prior_asset):
+                    # Establish a newly loaded source from the complete current
+                    # snapshot only after checking its prior root identity.
+                    # Do not synthesize expected.asset=null from an unloaded row.
+                    identity_baseline = fresh
+            identity = source_target(asset_reference_policy, identity_baseline, node_id, identity_only=source_identity_only)
             if identity['action'] == 'bound_asset_identity':
-                if not c.target_satisfied(fresh, identity):
-                    c.fail('CONCURRENT_EDIT', '引用资产原节点已消失或类型改变，不能按名称替代。', node_id=node_id)
+                observed = c.target_state(fresh, identity)
+                if observed != 'matched':
+                    c.fail('READBACK_PENDING' if observed == 'unknown' else 'CONCURRENT_EDIT',
+                           '引用资产原节点身份尚未完整核验或类型改变，不能按名称替代。', node_id=node_id)
                 continue
         if node_id and (node_id not in c.nodes(fresh) or node_id not in c.nodes(previous) or node_id not in fresh['assets']):
             c.fail('READBACK_PENDING', '批次中的目标或引用节点尚未完整返回。', node_id=node_id)
