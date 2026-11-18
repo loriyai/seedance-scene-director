@@ -782,9 +782,11 @@ def _summary(state, fresh):
                              "duration": unit["duration"], "stored_minimum": minimum,
                              "stored_durations": durations,
                              "message": "当前时长不符合旧入口保存的时长偏好；新文本格式仍允许4～30秒，实际节奏由渲染文本复核。"})
+    shot_count = sum(len(u["shots"]) for u in fresh)
+    total_duration = sum(u["duration"] for u in fresh)
     return {"status": "checked", "unit_count": len(fresh),
-            "shot_count": sum(len(u["shots"]) for u in fresh),
-            "total_duration": sum(u["duration"] for u in fresh),
+            "shot_count": shot_count, "total_duration": total_duration,
+            "average_shot_seconds": total_duration / shot_count,
             "span": [fresh[0]["span"][0], fresh[-1]["span"][1]],
             "source_records": source_records, "warnings": warnings, "semantic_review": "not_performed",
             "observations": observations(state, fresh)}

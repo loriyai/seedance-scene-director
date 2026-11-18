@@ -192,6 +192,7 @@ class TextDeliveryIntegration(unittest.TestCase):
                           '--draft', self.draft)
         self.assertEqual(result['semantic_review'], 'not_performed')
         self.assertEqual(result['unit_count'], 4)
+        self.assertEqual(result['average_shot_seconds'], 4)
         stats = result['observations']
         self.assertEqual(result['status'], 'checked')
         self.assertEqual(stats['unit_duration_seconds'], {
@@ -217,6 +218,7 @@ class TextDeliveryIntegration(unittest.TestCase):
         self.assertIn('预览01-场景1-分镜1', preview.read_text(encoding='utf-8'))
         self.assertEqual(result['semantic_review'], 'not_performed')
         self.assertEqual(result['status'], 'checked')
+        self.assertEqual(result['average_shot_seconds'], 4)
         self.assertEqual(result['observations'], stats)
         self.assertEqual(preview.read_text(encoding='utf-8'),
                          delivery.render_units(*delivery.prepare(self.project, self.draft)[:2], preview=True))
@@ -227,6 +229,7 @@ class TextDeliveryIntegration(unittest.TestCase):
         before = self.snapshot()
         again = delivery.preview(self.project, self.draft)
         self.assertTrue(again['preview_reused'])
+        self.assertEqual(again['average_shot_seconds'], first['average_shot_seconds'])
         self.assertEqual(again['preview_event_ids'], first['preview_event_ids'])
         self.assertEqual(again['output'], first['output'])
         self.assertEqual(self.snapshot(), before)

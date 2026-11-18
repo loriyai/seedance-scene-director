@@ -84,7 +84,7 @@ context、bind-trace、增量/完整check、preview、作者闸门、原生场�
 交付程序读取当前绑定项目，先调用`director.load(project)`核验来源、台账与风格文件，再调用：
 
 - `parse(text, state, source_span=None) -> list[dict]`：校验作者文本并派生元数据，含`draft_key`、`source_records`、`span`、`duration`、`main_scene`、`scene_ids`、`character_ids`、`set_ids`、`prop_ids`、`asset_ids`及最小镜头缓存。`source_text`保存该单元唯一规范作者文本；镜头与台词字段只是可重新生成的缓存，不是第二份作者输入。可选`source_span=[start,end]`来自交付层已确认范围或被选中旧单元的确切范围，以`director.portion`裁剪原始记录再校验；作者文本必须完整覆盖此范围，不得任意缩小。它不修改绑定state或原剧本。
-- `validate(state, units) -> dict`：从`source_text`重新解析，拒绝被直接修改或失效的派生字段，返回单元数、镜头数、时长、范围和检查状态。`id/display_name/style`由交付层赋值，不纳入作者字段对比。
+- `validate(state, units) -> dict`：从`source_text`重新解析，拒绝被直接修改或失效的派生字段，返回`unit_count`、`shot_count`、`total_duration`、`average_shot_seconds`、范围和检查状态。均值为总秒数除以实际镜头数的未舍入数值，显示时保留两位小数；只描述传入的有效解析范围，不代表已经完成语义审阅。`id/display_name/style`由交付层赋值，不纳入作者字段对比。
 - `render_unit(state, unit, reference_text=None, *, authoring_gate=None) -> str`：从作者文本生成产品提示词，用已经保存的`style`、项目固定抬头及已分配的`id/display_name`。新绑定项目的`scene-text-v1`单元必须传入当前`prepare/check`产生且与该单元键匹配的作者闸门结果；未经过当前闸门的解析单元不得直接渲染。已提交回执的历史单元只能按已保存的稳定ID、正文和历史回执重导出，不能把任意新文本伪装成历史单元。新单元使用`custom-v1`抬头快照；旧单元沿用其历史抬头策略。作者单元头、来源ID、声音时间标记不输出；实际声源、必要情绪括注和原台词嵌回镜头末尾音效之前，括号外声音描述随镜头正文保留。必要的开口时机、同期动作、发声连续性和收束条件须由作者直接落实在对应镜头的动作或括号外声音描述中，内部声音窗口和侧车依据不能代替最终提示词的执行要求。可单独重导出已检查的拆句单元。
 
 `asset_ids`含所有身份引用，包括prompt_only人物；Canvas调用者须从图片边中排除prompt_only及仅用于已授权SV事件且没有其他既有图片需求的纯声源，不排除同CHAR已有合法视觉引用。这里只依赖Python标准库和本包director的既有常量/基础函数，不加载旧规划、状态、依赖或逐镜审批；确定的词面诊断不构成语义批准。
@@ -137,6 +137,8 @@ python <skill>/scripts/storyboard_text_delivery.py commit --project <project> --
 python <skill>/scripts/storyboard_text_delivery.py render --project <project> --request-id <已提交ID> --output <新导出.txt>
 python <skill>/scripts/storyboard_text_delivery.py segment-report --project <project> --output <全部分段详情.txt>
 ```
+
+完整`check`与`preview`（含同版预览复用）沿用`validate`的单元数、镜数、总秒数及平均单镜时长摘要，`semantic_review`仍为`not_performed`。逐场汇报仅在实际审阅闭环后使用匹配版本，累计范围与完成条件见[逐场进度](storyboard-workflow.md#逐场进度)；统计字段不进入作者语法、单元提示词或历史冻结数据。
 
 新绑定项目的完整`check`、`preview`和`commit`读取`<draft>.authoring.json`，也可用`--authoring-trace`指定。新稿采用`policy: shot-by-shot-v1`、`version: 4`的精简侧车；旧v3侧车按原协议检查，不自动转换或改写历史回执。侧车不进入最终提示词，正文仍是唯一执行文本。
 

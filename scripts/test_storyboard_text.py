@@ -69,8 +69,18 @@ class StoryboardTextTests(unittest.TestCase):
             self.assertNotIn(old, unit)
         report = st.validate(self.state, units)
         self.assertEqual((report['unit_count'], report['shot_count'], report['total_duration']), (1, 2, 5))
+        self.assertEqual(report['average_shot_seconds'], 2.5)
         self.assertEqual(report['semantic_review'], 'not_performed')
         self.assertEqual(self.state, original)
+
+    def test_average_shot_seconds_weights_actual_shots_without_rounding(self):
+        text = self.action_draft([5]) + self.action_draft([2, 3], key='u02')
+        units, parsed_report = st._parse_for_delivery(text, self.state)
+        report = st.validate(self.state, units)
+        self.assertEqual((report['unit_count'], report['shot_count'], report['total_duration']), (2, 3, 10))
+        self.assertEqual(report['average_shot_seconds'], 10 / 3)
+        self.assertEqual(parsed_report, report)
+        self.assertEqual(report['semantic_review'], 'not_performed')
 
     def test_roster_and_focal_refs_cannot_replace_global_character_ref(self):
         invalid = self.text.replace(
