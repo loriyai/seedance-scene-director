@@ -23,6 +23,7 @@ LEGACY_DESIGN_VERSION = "gpt-image-2-v1"
 DESIGN_VERSION = "gpt-image-2-v2"
 DESIGN_VERSIONS = (LEGACY_DESIGN_VERSION, DESIGN_VERSION)
 IMAGE_REFERENCE_POLICY = "asset-image-reference-v1"
+GROUP_BOARD_POLICY = "five-front-members-v1"
 ASSET_CATEGORIES = ("characters", "scene_assets", "props")
 FURNITURE = re.compile(r"(?:桌|床|椅|柜|沙发|茶几|凳)(?:子|铺)?$")
 DAILY_ITEMS = {"锅", "碗", "瓢", "盆", "锅碗瓢盆", "筷子", "餐具", "水杯", "杯子", "手机", "雨伞", "香烟", "茶杯", "盘子", "勺子"}
@@ -44,6 +45,13 @@ GROUP_LAYOUT = (
     "头顶至脚底完整入镜，人物彼此分开、不重叠、不遮挡，保留各自真实身高与体型比例。"
     "不绘面部特写，不绘同一人物的侧面或背面重复视图。"
     "样本数量仅用于展示造型差异，不规定剧情人数、队形、成员身份或各场同一批实体人物。"
+)
+FIVE_MEMBER_GROUP_LAYOUT = (
+    "一张16:9横版群像参考板，纯白背景。按下列样本顺序从左到右横向并排呈现恰好5个外貌各异的单人形象，"
+    "每位均为不同人物的造型样本，每个样本只出现一次完整正面全身，平视前方，自然静态站姿；"
+    "头顶至脚底完整入镜，人物彼此分开、不重叠、不遮挡，保留各自真实身高与体型比例。"
+    "不绘面部特写、侧面或背面视图，不把同一人物重复排列。"
+    "5个样本仅用于展示造型差异，不规定剧情人数、队形、成员身份或各场同一批实体人物。"
 )
 MASKED_CHARACTER_LAYOUT = (
     "16:9横版角色参考图，纯白背景。最左侧1/3为当前佩戴状态的正面头部特写，"
@@ -716,6 +724,8 @@ def validate_prop_policy(data, paragraphs, fact_validator):
 
 def validate_group_design(item, design):
     label = item["id"]
+    if "group_board_policy" in design and design["group_board_policy"] != GROUP_BOARD_POLICY:
+        raise ValueError(f"{label}不支持的群像参考板策略；新设计须使用{GROUP_BOARD_POLICY}")
     if "identity_anchor_id" in design or design.get("appearance_overrides"):
         raise ValueError(f"{label}群像使用独立样本，不使用单个人物身份锚点或版本覆盖")
     wardrobe = design.get("group_wardrobe")
@@ -726,6 +736,8 @@ def validate_group_design(item, design):
     if wardrobe["mode"] in ("uniform", "mixed"):
         nonempty(wardrobe.get("shared_style"), f"{label}群体共同服制")
     members = design.get("group_members")
+    if design.get("group_board_policy") == GROUP_BOARD_POLICY and (not isinstance(members, list) or len(members) != 5):
+        raise ValueError(f"{label}新群像参考板须恰好5个外貌可辨的group_members样本；样本数不是剧情人数")
     if not isinstance(members, list) or len(members) < 2:
         raise ValueError(f"{label}群像参考板须至少2个外貌可辨的group_members样本；样本数不是剧情人数")
     identifiers, appearances, outfits = set(), set(), []
@@ -762,6 +774,8 @@ def validate_design_record(category, item, design, anchors, version=DESIGN_VERSI
         raise ValueError(f"{label}发声群体多人参考板须使用{DESIGN_VERSION}")
     if not isinstance(design, dict) or design.get("attribution") != "制作设计":
         raise ValueError(f"{label}视觉设计须独立标注制作设计")
+    if "group_board_policy" in design and (category != "characters" or version != DESIGN_VERSION or not is_group(item)):
+        raise ValueError(f"{label}group_board_policy仅用于v2群像参考板")
     design_scope.validate_presentation(category, design, version)
     if "image_reference" in design:
         if category not in ('characters', 'scene_assets') or version != DESIGN_VERSION or is_group(item):
@@ -974,10 +988,13 @@ def compile_group_prompt(common, design):
         outfit = wardrobe["shared_style"] if wardrobe["mode"] == "uniform" else member["styling"]
         description += (f"从左到右第{index}个造型样本：年龄与性别感{member['age']}；"
                         f"体型{member['body']}；面容{member['face']}；发型{member['hair']}；服装{outfit}。")
-    prompt = common + GROUP_LAYOUT + description + "柔和均匀棚拍光，服装剪裁可信，材质层次明确。无剧情动作、额外手持物、说明文字、标签、水印或签名；原文限定的年龄、性别、服制与外貌范围优先，不增加人物身份。"
+    layout = FIVE_MEMBER_GROUP_LAYOUT if design.get("group_board_policy") == GROUP_BOARD_POLICY else GROUP_LAYOUT
+    prompt = common + layout + description + "柔和均匀棚拍光，服装剪裁可信，材质层次明确。无剧情动作、额外手持物、说明文字、标签、水印或签名；原文限定的年龄、性别、服制与外貌范围优先，不增加人物身份。"
     form = {"model": "gpt-image-2", "aspect_ratio": "16:9", "background": "pure_white",
             "layout": "distinct_members_single_front_full_body", "sample_count": len(design["group_members"]),
             "sample_count_is_story_count": False, "wardrobe_mode": wardrobe["mode"]}
+    if design.get("group_board_policy") == GROUP_BOARD_POLICY:
+        form["board_policy"] = GROUP_BOARD_POLICY
     return prompt, form
 
 
@@ -1280,6 +1297,10 @@ def _apply_design_compiled(data, payload, style_text, *, patch=False, paragraphs
             design = designs[item["id"]]
             if item["id"] in changed_ids:
                 prepare_image_reference(item, design, version)
+                if category == "characters" and version == DESIGN_VERSION and is_group(item):
+                    # Only explicit new writes freeze the current layout. Old
+                    # readback and unselected patch records keep their bytes.
+                    design.setdefault("group_board_policy", GROUP_BOARD_POLICY)
             validate_design_record(category, item, design, anchors, version)
             item["visual_design"] = design
     # All author designs are installed before any dependent CHAR is compiled;

@@ -38,7 +38,10 @@ class SpeakingEnsembleTests(unittest.TestCase):
           "group_wardrobe": {"mode": "varied", "era_region": "当代中国高校男生", "basis": "无统一制服要求，日常学生服饰"},
           "group_members": [
             {"sample_id": "01", "age": "成年青年男性", "body": "修长窄肩", "face": "长脸平眉", "hair": "黑色短直发", "styling": "白棉短袖与蓝牛仔裤"},
-            {"sample_id": "02", "age": "成年青年男性", "body": "中等身高宽肩", "face": "方脸圆眼", "hair": "黑色微卷短发", "styling": "灰色衬衫与黑休闲裤"}]})
+            {"sample_id": "02", "age": "成年青年男性", "body": "中等身高宽肩", "face": "方脸圆眼", "hair": "黑色微卷短发", "styling": "灰色衬衫与黑休闲裤"},
+            {"sample_id": "03", "age": "成年青年男性", "body": "较矮身高结实体型", "face": "圆脸浓眉", "hair": "深棕色寸发", "styling": "藏蓝短袖与米色长裤"},
+            {"sample_id": "04", "age": "成年青年男性", "body": "高挑清瘦体型", "face": "窄脸细眉", "hair": "乌黑侧分短发", "styling": "浅绿衬衫与灰色长裤"},
+            {"sample_id": "05", "age": "成年青年男性", "body": "中等身高圆肩", "face": "宽脸弯眉", "hair": "黑色短碎发", "styling": "米白卫衣与深蓝牛仔裤"}]})
 
     def compiled(self):
         value = design.apply_design(self.data, self.payload, "3D国漫写实厚涂风格")
@@ -50,6 +53,8 @@ class SpeakingEnsembleTests(unittest.TestCase):
         item = value["characters"][-1]
         self.assertEqual(item["image_format"]["layout"], "distinct_members_single_front_full_body")
         self.assertEqual(item["image_format"]["subject_kind"], "speaking_ensemble")
+        self.assertEqual(item["image_format"]["sample_count"], 5)
+        self.assertEqual(item["image_format"]["board_policy"], design.GROUP_BOARD_POLICY)
         self.assertFalse(item["image_format"]["sample_count_is_story_count"])
         self.assertIn("几位学弟(齐声)：学姐好。", self.script.read_text(encoding="utf-8"))
         self.assertNotIn("其他角色", item["image_prompt"])

@@ -1331,12 +1331,13 @@ def resolve_asset_image_item(item, state, doc):
     plain = item.setdefault("source_image_prompt", item["image_prompt"])
     resolved, sources, pending = {}, [], []
     for ref in refs:
-        nid = state["mappings"].get(ref["key"], {}).get("node_id")
+        mapping = state["mappings"].get(ref["key"], {})
+        nid = mapping.get("node_id")
         if nid not in nodes(doc):
             pending.append({**ref, "reason": "node_missing"})
             continue
-        if kind_of(nodes(doc)[nid]) != ref["kind"] or name_of(doc, nid) != ref["name"]:
-            fail("CONCURRENT_EDIT", "派生图片引用节点的名称或类型已改变。", key=ref["key"], node_id=nid)
+        if kind_of(nodes(doc)[nid]) != ref["kind"] or mapping.get("kind", ref["kind"]) != ref["kind"]:
+            fail("CONCURRENT_EDIT", "派生图片引用节点的类型已改变。", key=ref["key"], node_id=nid)
         resolved[ref["name"]] = "<node-asset>" + nid + "</node-asset>"
         data = content(doc, nid)
         selected = media.selected_image(doc, nid)
@@ -1809,7 +1810,7 @@ def asset_reconciliation_plan(session, state, doc, decisions=None, asset_referen
             continue
         mapping = state["mappings"].get(key, {})
         node_id = mapping.get("node_id")
-        if bound_identity and mapping and choice.get('reuse') is None:
+        if bound_identity and mapping and choice.get('reuse') in (None, node_id):
             if node_id not in nodes(doc):
                 conflicts.append({'key': key, 'name': name, 'node_id': node_id, 'reason': 'mapped_node_missing'})
             elif kind_of(nodes(doc)[node_id]) != kind or mapping.get('kind', kind) != kind:

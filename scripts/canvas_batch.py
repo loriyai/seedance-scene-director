@@ -921,7 +921,7 @@ def readback(project, cli, state, entry, targets, recover=True):
 
 def write_asset_group(project, cli, state, doc, items, positions):
     sources = {s["node_id"] for i in items for s in i.get("image_reference_sources", [])}
-    baseline = snapshot(cli, state, doc, items, sources)
+    baseline = snapshot(cli, state, doc, items, sources, source_identity_only=True)
     doc = baseline["document"]
     ids = reserve(project, cli, state, items)
     creates = [command("create_biz_node", {"nodeKind": i["kind"], "id": nid,
@@ -965,7 +965,7 @@ def write_asset_group(project, cli, state, doc, items, positions):
         targets.extend(exact_targets(compiled["document"], node_id))
         state["mappings"].setdefault(item["key"], {}).update(node_id=node_id, kind=item["kind"],
             name=item["name"], stage="writing", batch_initialization=True)
-    entry = submit(project, cli, state, baseline, compiled, targets)
+    entry = submit(project, cli, state, baseline, compiled, targets, source_identity_only=True)
     actual = readback(project, cli, state, entry, targets)
     for item, node_id in zip(items, ids):
         item["node_id"] = node_id
@@ -985,7 +985,7 @@ def sync_asset_inputs(project, cli, session, state, doc, keys=None, batch_size=D
         for item in group:
             item["node_id"] = state["mappings"].get(item["key"], {}).get("node_id")
         sources = {state["mappings"].get(r["key"], {}).get("node_id") for i in group for r in i["image_reference_assets"]}
-        baseline = snapshot(cli, state, doc, group, sources - {None})
+        baseline = snapshot(cli, state, doc, group, sources - {None}, source_identity_only=True)
         plans = [c.asset_image_reference_plan(i, state, baseline["document"]) for i in group]
         commands = [cmd for p in plans for cmd in p["commands"]]
         compiled = cli.compile_batch(baseline["document"], commands)
@@ -993,7 +993,7 @@ def sync_asset_inputs(project, cli, session, state, doc, keys=None, batch_size=D
         targets.extend(t for p in plans for t in p["targets"])
         for plan in plans:
             state["mappings"][plan["key"]]["image_input"] = {**plan["image_input"], "status": "pending"}
-        entry = submit(project, cli, state, baseline, compiled, targets)
+        entry = submit(project, cli, state, baseline, compiled, targets, source_identity_only=True)
         doc = readback(project, cli, state, entry, targets)
         for plan in plans:
             mapping = state["mappings"][plan["key"]]

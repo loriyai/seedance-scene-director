@@ -98,6 +98,9 @@ def _scoped_history(state, project, scope):
     references = scope['references']
     anchors = {r['anchor']['unit_id'] for r in references['continuity_props']
                if 'unit_id' in r.get('anchor', {})}
+    anchors.update(r['continuity']['anchor']['unit_id']
+                   for r in references.get('source_background_slots', [])
+                   if 'unit_id' in r.get('continuity', {}).get('anchor', {}))
     actor_keys = {r['actor_key'] for r in references['production_cast']}
     for index, row in enumerate(rows):
         if row['kind'] not in ('unit', 'related_unit'):

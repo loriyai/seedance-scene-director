@@ -199,6 +199,52 @@ class BatchBehavior(unittest.TestCase):
         self.assertEqual(generation['references'][0]['sourceNodeType'], c.KINDS['scene'])
         self.assertEqual(c.read_state(self.project)['mappings']['SET0002']['image_input']['status'], 'ready')
 
+    def test_video_preparation_compiles_derived_asset_from_renamed_uploaded_sources(self):
+        self.assets()
+        state = c.read_state(self.project)
+        source_ids = [state['mappings'][key]['node_id'] for key in ('CHAR0001', 'PROP0001')]
+        for nid in source_ids:
+            c.nodes(self.cli.doc)[nid].setdefault('data', {})['name'] = 'Uploaded ' + nid
+            data = c.content(self.cli.doc, nid)
+            data.setdefault('basicInfo', {})['name'] = 'Uploaded ' + nid
+            data['generation']['prompt'] = 'User prompt'
+            media = data.setdefault('appearanceInfo', {}) if c.kind_of(c.nodes(self.cli.doc)[nid]) == 'role' else data
+            media.update(pippitAssetId='MATERIAL-' + nid, assetId='MEDIA-' + nid)
+        before = {nid: copy.deepcopy(self.cli.doc['assets'][nid]) for nid in source_ids}
+        self.session['ledger']['characters'].append({'id': 'CHAR0002', 'name': 'Actor-Masked',
+            'image_prompt': 'Use @Actor with @Mask .',
+            'image_format': {'reference_policy': 'asset-image-reference-v1', 'reference_asset_ids': ['CHAR0001', 'PROP0001']},
+            'visual_design': {'image_reference': {'base_asset_id': 'CHAR0001', 'changes': ['mask'],
+                'preserve': ['clothes'], 'prop_asset_ids': ['PROP0001']}}})
+        self.cli.writes.clear()
+        _, result = c.reconcile_asset_nodes(self.project, self.cli, self.session, state, self.cli.doc, batch_mode=True)
+        self.assertEqual(result['conflicts'], [])
+        self.assertEqual(result['created'], ['CHAR0002'])
+        mapping = c.read_state(self.project)['mappings']['CHAR0002']
+        self.assertEqual(mapping['image_input']['status'], 'ready')
+        self.assertEqual({nid: self.cli.doc['assets'][nid] for nid in source_ids}, before)
+        self.assertEqual({row['sourceNodeId'] for row in c.content(self.cli.doc, mapping['node_id'])['generation']['references']}, set(source_ids))
+        self.assertFalse(any(value.get('nodeId', value.get('assetId', value.get('id'))) in before
+                             for _, value in self.cli.writes))
+
+    def test_derived_input_refresh_accepts_source_rename_since_previous_snapshot(self):
+        from test_canvas_image_inputs import DerivedImageInputs
+        DerivedImageInputs.scene_session(self)
+        self.assets()
+        state = c.read_state(self.project)
+        day, night = (state['mappings'][key]['node_id'] for key in ('SET0001', 'SET0002'))
+        previous = copy.deepcopy(self.cli.doc)
+        c.nodes(self.cli.doc)[day].setdefault('data', {})['name'] = 'Uploaded daytime room'
+        data = c.content(self.cli.doc, day)
+        data['basicInfo']['name'] = 'Uploaded daytime room'
+        data['generation']['prompt'] = 'User source prompt'
+        data['appearanceInfo'] = {'pippitAssetId': 'NEW-DAY', 'assetId': 'NEW-DAY-MEDIA'}
+        before = copy.deepcopy(self.cli.doc['assets'][day])
+        batch.sync_asset_inputs(self.project, self.cli, self.session, state, previous, {'SET0002'})
+        self.assertEqual(self.cli.doc['assets'][day], before)
+        self.assertEqual(c.content(self.cli.doc, night)['generation']['references'][0]['assetId'], 'NEW-DAY-MEDIA')
+        self.assertEqual(c.read_state(self.project)['mappings']['SET0002']['image_input']['status'], 'ready')
+
     def test_multiple_video_nodes_and_empty_role_references_share_one_transaction(self):
         self.assets()
         before = len(self.cli.batch_writes)

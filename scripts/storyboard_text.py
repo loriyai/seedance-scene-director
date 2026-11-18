@@ -413,7 +413,7 @@ class TextValidationError(ValueError):
 
 def _check(units, state, *, allow_partial_tail=False, _diagnostics=(), _voice_source_state=None):
     import source_background_slots as background
-    background.require_usage(units, background.from_units(units))
+    background.require_usage(units, background.usage_rows(units))
     import source_participant_slots as participants
     participants.require_usage(units, participants.from_units(units))
     import source_text_voices as text_voices
@@ -714,7 +714,9 @@ def validate(state, units):
     if all(unit in saved for unit in units):
         # Historical projections keep their accepted references even if an
         # earlier anchor has subsequently acquired a new production version.
-        context = participants.context(background.context(casting.context(_slice_state(state, span), casting.from_units(units)), background.from_units(units)), participants.from_units(units))
+        context = participants.context(background.frozen_context(
+            casting.context(_slice_state(state, span), casting.from_units(units)), units),
+            participants.from_units(units))
         fresh = _parse_units(text, context, _source_records=state["records"])
         for unit, current in zip(units, fresh):
             if unit.get('continuity_props'):

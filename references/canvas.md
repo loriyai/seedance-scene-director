@@ -55,7 +55,7 @@ CLI的原生查询、分配、上传与语义查询、创建、编辑、删除�
 
 角色`updateDescription(field=appearance)`与场景`updateDescription(field=description)`只用于明确的描述编辑，不能代替生图提示词写入。三条资产入口——后台assets、直接assets、videos补建——共用canvas.py的资产初始化步骤与验收。创建后完成显示名/basicInfo.name、空形象/视角名和正确提示词回读；SDK工厂默认显示名不是最终名称。仅新建/未完成初始化节点检查上述默认图片参数，ready或采用节点的人工配置保持。所有操作仅配置节点，不触发生成。
 
-派生角色与场景图片按[图片设计](asset-image-design.md)的已编译`asset-image-reference-v1`合同读取实际依赖：角色引用基础角色及关联道具，夜景引用同结构日景SET。按依赖顺序创建节点，旧台账没有该合同的独立提示词保持原样。完整制作名引用在写入时转换为查询确认的真实`<node-asset>`标签，并通过官方`create_edge`建立指向派生图片节点的reference连线。角色使用updateAppearance合并generation，场景使用update_asset合并完整generation并保留包装结构、原配置及无关引用；实际节点、图片就绪分别验收。引用名称、节点ID、Pippit素材ID和云端媒体assetId分别核实，不互相代填。日景到夜景的图片依赖不自动带入视频参考清单。
+派生角色与场景图片按[图片设计](asset-image-design.md)的已编译`asset-image-reference-v1`合同读取实际依赖：角色引用基础角色及关联道具，夜景引用同结构日景SET。按依赖顺序创建节点，旧台账没有该合同的独立提示词保持原样。完整制作名引用在写入时转换为查询确认的真实`<node-asset>`标签，并通过官方`create_edge`建立指向派生图片节点的reference连线。角色使用updateAppearance合并generation，场景使用update_asset合并完整generation并保留包装结构、原配置及无关引用；实际节点、图片就绪分别验收。源资产按已映射节点ID、预期类型及实际媒体归属核验；上传后改名或修改说明不阻断引用，也不回改源字段。台账名称仅用于解析作者侧引用，节点ID、Pippit素材ID和云端媒体assetId分别核实，不互相代填；派生目标的名称、提示词和配置写入仍按原基线保护。日景到夜景的图片依赖不自动带入视频参考清单。
 
 角色图片引用使用`xyq.role.updateAppearance`的`patch.generation`保存从最新快照完整合并的生成配置，同时传`expected.generation`；仅改文字时仍使用上表的`generationPrompt`。`generation.references`保存源节点身份、`type:image`、实际主图的`pippitAssetId/assetId`；基础角色还用`dataReferenceSelection`明确选择该图片，不能混入声音。保留模型、比例、清晰度、推理强度、无关引用、外观描述及当前主图；人工改过的受管理引用不得直接覆盖。不得对角色调用图片/视频专用的`xyq.generation.update_prompt`。
 
@@ -71,7 +71,7 @@ python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind videos 
 
 `assets`后台任务冻结session绑定台账，创建role/scene/image业务节点并写入完整image_prompt；各节点按本节字段契约写入generation.prompt，描述不作为提示词验收。只有最终字段与ID映射全部核验才算完成。仅需图片的角色使用台账完整name；visual_mode为prompt_only的群像不建节点、不匹配上传图片、不列为缺图，场景使用scene_assets[].name及SET ID，每个SET仅一个节点（包括有证据的时间版本和布置版本），SC heading不参与资产建节点，道具使用主name；角色/场景同时设置节点显示名和basicInfo.name，basicInfo.appearanceName为空。视频普通业务节点的name/title/caption逐字使用对应已提交单元display_name，例如 `A01-场景3-分镜2`；无新名称的旧单元继续使用原ID，不附加时长、镜头标签或布景名称。完整提示词直接由当前有效单元按其输出版本渲染写入generation.prompt，保留固定抬头、视频风格、换行和人物/场景前缀；不调用生成命令。
 
-分镜上传和引用刷新默认以项目保存的真实节点ID作为资产身份。启动时读取画布并核对已映射节点仍在绑定画布、类型正确；ID有效就复用，不核对其远端名称是否仍等于台账名，不因用户上传图片后改名而报冲突，也不自动改回名称。资产的远端提示词、主图及其他生成配置保留。台账名称仅用于把分镜中的正式资产标签解析为已保存ID，不用于替换有效映射。引用边、提示词中的真实ID及实际媒体对该源节点的归属仍须核验，节点ID与Pippit/云媒体ID不能混用。
+分镜上传和引用刷新默认以项目保存的真实节点ID作为资产身份。启动时读取画布并核对已映射节点仍在绑定画布、类型正确；ID有效就复用，不核对其远端名称是否仍等于台账名，不因用户上传图片后改名而报冲突，也不自动改回名称。资产的远端提示词、主图及其他生成配置保留。旧选择文件的reuse若仍指向同一有效映射ID，按幂等复用处理，不重新校对源名称或旧内容指纹；reuse指向其他ID时仍按新采用/改绑核验。台账名称仅用于把分镜中的正式资产标签解析为已保存ID，不用于替换有效映射。引用边、提示词中的真实ID及实际媒体对该源节点的归属仍须核验，节点ID与Pippit/云媒体ID不能混用。
 
 已保存的节点ID不存在或类型改变时，明确报告具体ID，不按同名猜测替代、不自动重建。首次尚无映射的资产仍按原初始化流程处理：按完整名称和类型核对唯一候选，不能唯一确定时保留待处理；确认缺失不超过10个时可创建空节点并初始化，超过10个先报告完整清单。资产首次创建使用台账名称；已有资产参与分镜引用时不改名。额外画布节点保留。来源在同步期间上传图片或改名时，重新读取该ID的素材，由官方命令解析引用；来源身份不变时继续同步，不将显示名、说明、图片配置的变化当作换了节点。只有目标视频的正式内容或引用身份确实变化才按具体冲突处理。
 
@@ -115,7 +115,7 @@ python <skill>/scripts/canvas_jobs.py enqueue --project <project> --kind videos 
 
 仅当用户明确授权重建并填写`recreate_missing=旧真实节点ID`，且当前snapshot确认该视频节点已不存在时，才将旧未确认日志保留为`superseded`并分配新ID；不重放旧写入，不删除历史或CLI隔离状态。
 
-### 按绑定节点ID引用
+### 历史严格冻结策略兼容（bound-node-id-v1）
 
 新分镜与引用任务默认遵循上文的有效映射ID规则，无需再次询问是否允许保留上传后的图片名称。以下授权文件协议仅用于兼容历史显式冻结全部映射的严格策略，不是普通分镜同步的额外确认步骤。
 

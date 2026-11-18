@@ -51,8 +51,19 @@ class Names:
 
     def character(self, aid, scene_id=None):
         item = self.characters[self.base(aid)]
+        # Anonymous supplemental slots have an explicitly reviewed display
+        # name, not a missing source-entry inferred from a production suffix.
+        slot_names = {row['name']
+                      for field in ('source_background_slots', 'source_participant_slots')
+                      for row in self.state.get('_' + field, [])
+                      if row['asset_id'] == aid and row['scene_id'] == scene_id
+                      and item.get('visual_mode') == 'prompt_only'
+                      and row['name'] == item['name']}
         # These are reviewed source fields, never a truncated production name.
-        if item.get('scene_clothing'):
+        if slot_names:
+            require(len(slot_names) == 1, aid + '静默槽显示名不唯一')
+            value = next(iter(slot_names))
+        elif item.get('scene_clothing'):
             value = item['scene_clothing']['base_name']
         elif item.get('source_speaker'):
             value = item['source_speaker']

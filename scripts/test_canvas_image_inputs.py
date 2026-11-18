@@ -164,6 +164,55 @@ class DerivedImageInputs(unittest.TestCase):
         role_id = self.mapping()['node_id']
         self.assertFalse(any(n == 'xyq.generation.update_prompt' and v['nodeId'] == role_id for n, v in self.cli.writes))
 
+    def test_video_preparation_adds_derived_asset_from_renamed_uploaded_sources(self):
+        derived = self.session['ledger']['characters'].pop(0)
+        self.sync()
+        self.add_media()
+        source_ids = [self.mapping(key)['node_id'] for key in ('CHAR0001', 'PROP0001')]
+        for nid in source_ids:
+            c.nodes(self.cli.doc)[nid].setdefault('data', {})['name'] = 'Uploaded ' + nid
+            c.content(self.cli.doc, nid).setdefault('basicInfo', {})['name'] = 'Uploaded ' + nid
+            c.content(self.cli.doc, nid)['generation']['prompt'] = 'User prompt'
+        before = {nid: copy.deepcopy(self.cli.doc['assets'][nid]) for nid in source_ids}
+        self.session['ledger']['characters'].append(derived)
+        self.cli.writes.clear()
+        state, doc = c.connected(self.project, self.cli)
+        _, result = c.reconcile_asset_nodes(self.project, self.cli, self.session, state, doc)
+        self.assertEqual(result['conflicts'], [])
+        self.assertEqual(result['created'], ['CHAR0002'])
+        self.assertEqual(self.mapping()['image_input']['status'], 'ready')
+        self.assertEqual({nid: self.cli.doc['assets'][nid] for nid in source_ids}, before)
+        self.assertEqual({row['sourceNodeId'] for row in self.generation()['references']}, set(source_ids))
+        self.assertEqual({row['assetId'] for row in self.generation()['references']}, {'MEDIA-A', 'MEDIA-P'})
+        self.assertFalse(any(value.get('nodeId', value.get('assetId', value.get('id'))) in before
+                             for _, value in self.cli.writes))
+
+    def test_scene_image_reference_refresh_preserves_renamed_source(self):
+        self.scene_session()
+        self.sync()
+        day, night = (self.mapping(key)['node_id'] for key in ('SET0001', 'SET0002'))
+        c.nodes(self.cli.doc)[day].setdefault('data', {})['name'] = 'Uploaded day scene'
+        data = c.content(self.cli.doc, day)
+        data['basicInfo']['name'] = 'Uploaded day scene'
+        data['generation']['prompt'] = 'User scenery prompt'
+        data['appearanceInfo'] = {'pippitAssetId': 'DAY-MATERIAL', 'assetId': 'DAY-MEDIA'}
+        before = copy.deepcopy(self.cli.doc['assets'][day])
+        c.sync_asset_image_references(self.project, self.cli, self.session,
+            c.read_state(self.project), self.cli.doc, {'SET0002'})
+        self.assertEqual(self.cli.doc['assets'][day], before)
+        self.assertEqual(c.content(self.cli.doc, night)['generation']['references'][0]['assetId'], 'DAY-MEDIA')
+        self.assertEqual(self.mapping('SET0002')['image_input']['status'], 'ready')
+
+    def test_derived_reference_still_rejects_source_type_change(self):
+        self.sync()
+        state = c.read_state(self.project)
+        original = next(item for item in c.desired_assets(self.session) if item['key'] == 'CHAR0002')
+        nid = self.mapping('CHAR0001')['node_id']
+        c.nodes(self.cli.doc)[nid]['type'] = c.KINDS['scene']
+        with self.assertRaises(c.CanvasError) as error:
+            c.resolve_asset_image_item(original, state, self.cli.doc)
+        self.assertEqual(error.exception.code, 'CONCURRENT_EDIT')
+
     def test_video_preparation_preserves_manually_edited_completed_derived_asset(self):
         self.sync()
         generation = self.generation()

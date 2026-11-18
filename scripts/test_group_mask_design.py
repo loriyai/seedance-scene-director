@@ -39,6 +39,15 @@ class GroupMaskDesignTests(unittest.TestCase):
             {"sample_id": "sample02", "age": "成年女性", "body": "较矮身形，窄肩匀称",
              "face": "鹅蛋脸，眉尾柔和，小巧鼻形", "hair": "黑发低髻",
              "styling": "灰蓝右衽上衣，深青布裙，褐色布鞋"},
+            {"sample_id": "sample03", "age": "青年男性", "body": "高挑瘦长，肩部较窄",
+             "face": "长脸，细长眉，直鼻梁", "hair": "深棕发束高髻",
+             "styling": "浅褐交领短衫，深灰布裤，黑色布鞋"},
+            {"sample_id": "sample04", "age": "中年女性", "body": "中等身高，体态丰实",
+             "face": "圆脸，短眉，圆润鼻尖", "hair": "乌黑发盘圆髻",
+             "styling": "暗绿对襟布衣，灰褐布裙，青色布鞋"},
+            {"sample_id": "sample05", "age": "老年男性", "body": "较矮身形，骨架清瘦",
+             "face": "窄方脸，疏眉，高颧骨", "hair": "灰白发束小髻",
+             "styling": "暗褐交领长衫，靛青布裤，灰色布鞋"},
         ]
         if mode in ("uniform", "mixed"):
             record["group_wardrobe"].update(
@@ -129,7 +138,10 @@ class GroupMaskDesignTests(unittest.TestCase):
         item = result["characters"][0]
         self.assertEqual(result["image_design_version"], design.DESIGN_VERSION)
         self.assertEqual(item["image_format"]["layout"], "distinct_members_single_front_full_body")
-        self.assertEqual(item["image_format"]["sample_count"], 2)
+        self.assertEqual(item["image_format"]["sample_count"], 5)
+        self.assertEqual(item["visual_design"]["group_board_policy"], design.GROUP_BOARD_POLICY)
+        self.assertEqual(item["image_format"]["board_policy"], design.GROUP_BOARD_POLICY)
+        self.assertEqual(item["image_format"]["aspect_ratio"], "16:9")
         self.assertIs(item["image_format"]["sample_count_is_story_count"], False)
         prompt = item["image_prompt"]
         for member in record["group_members"]:
@@ -137,16 +149,23 @@ class GroupMaskDesignTests(unittest.TestCase):
             self.assertEqual(prompt.count(member["styling"]), 1)
         self.assertNotIn("无剧情动作、额外手持物、其他角色", prompt)
         self.assertNotIn("最左侧超大正面面部特写", prompt)
+        self.assertIn("恰好5个外貌各异的单人形象", prompt)
+        self.assertIn("每个样本只出现一次完整正面全身", prompt)
+        self.assertIn("不绘面部特写、侧面或背面视图", prompt)
+        self.assertIn("剧情中三十名村民", prompt)
         self.assertEqual(self.compile(), result)
 
     def test_group_requires_real_multiple_designs_and_wardrobe_decision(self):
         _, record = self.group()
         members = copy.deepcopy(record["group_members"])
         cases = (
-            ([members[0]], "至少2个"),
-            ([members[0], dict(members[0], sample_id="other")], "外貌样本重复"),
-            ([members[0], dict(members[1], styling=members[0]["styling"])], "各异服装"),
-            ([members[0], dict(members[1], name="凭空新增人物")], "不新增姓名"),
+            (members[:1], "恰好5个"),
+            (members[:2], "恰好5个"),
+            (members[:4], "恰好5个"),
+            (members + [dict(members[0], sample_id="sixth")], "恰好5个"),
+            ([members[0], dict(members[0], sample_id="other"), *members[2:]], "外貌样本重复"),
+            ([members[0], dict(members[1], styling=members[0]["styling"]), *members[2:]], "各异服装"),
+            ([members[0], dict(members[1], name="凭空新增人物"), *members[2:]], "不新增姓名"),
         )
         for values, expected in cases:
             with self.subTest(expected=expected):
@@ -157,6 +176,53 @@ class GroupMaskDesignTests(unittest.TestCase):
         record["group_wardrobe"]["era_region"] = ""
         with self.assertRaisesRegex(ValueError, "era_region"):
             self.compile()
+
+    def test_explicit_unsupported_board_policy_cannot_bypass_five_members(self):
+        _, record = self.group()
+        record["group_members"] = record["group_members"][:2]
+        for policy in (None, "", "legacy", "dynamic-members-v1"):
+            with self.subTest(policy=policy):
+                record["group_board_policy"] = policy
+                with self.assertRaisesRegex(ValueError, "不支持的群像参考板策略"):
+                    self.compile()
+
+    def historical_v2_group(self):
+        _, record = self.group()
+        result = self.compile()
+        item = result["characters"][0]
+        stored = item["visual_design"]
+        stored.pop("group_board_policy")
+        stored["group_members"] = stored["group_members"][:2]
+        item["image_prompt"], item["image_format"] = design.compile_prompt(
+            result, "characters", item, stored, design.identity_map(result))
+        item["image_design_digest"] = design.fingerprint(stored)
+        return result, record
+
+    def test_historical_v2_readback_and_unselected_patch_keep_two_member_bytes(self):
+        result, _ = self.historical_v2_group()
+        before = copy.deepcopy(result["characters"][0])
+        encoded = before["image_prompt"] + "\n" + json.dumps(before["image_format"], ensure_ascii=False, sort_keys=True)
+        # Captured before introducing the five-member board policy.
+        self.assertEqual(hashlib.sha256(encoded.encode()).hexdigest(),
+                         "734a5568837dc34a1fd54afc3b91f8944f7d1ebaca27f5f011236f5f9a4a43d1")
+        design.validate_visual_design(result)
+        self.assertEqual(result["characters"][0], before)
+        updated = design.apply_design(result, {"designs": [
+            dict(next(row for row in self.payload["designs"] if row["asset_id"] == "SET0001"),
+                 basis="复核原有空间，群像不在本次修改范围")
+        ]}, "古装写实", patch=True)
+        self.assertEqual(updated["characters"][0], before)
+
+    def test_explicit_redesign_of_historical_group_requires_five_members(self):
+        result, record = self.historical_v2_group()
+        selected = dict(copy.deepcopy(result["characters"][0]["visual_design"]),
+                        asset_id=result["characters"][0]["id"])
+        with self.assertRaisesRegex(ValueError, "恰好5个"):
+            design.apply_design(result, {"designs": [selected]}, "古装写实", patch=True)
+        updated = design.apply_design(result, {"designs": [record]}, "古装写实", patch=True)
+        self.assertEqual(updated["characters"][0]["image_format"]["sample_count"], 5)
+        self.assertEqual(updated["characters"][0]["visual_design"]["group_board_policy"], design.GROUP_BOARD_POLICY)
+        self.assertNotIn("group_board_policy", result["characters"][0]["visual_design"])
 
     def test_uniform_clothing_inherits_one_shared_outfit_and_rejects_conflict(self):
         _, record = self.group("uniform")

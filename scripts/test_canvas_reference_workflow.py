@@ -253,6 +253,38 @@ class ReferenceWorkflowChecks(unittest.TestCase):
         self.assertIn("R1", c.nodes(self.cli.doc))
         self.assertEqual(result["asset_reconciliation"]["conflicts"], [])
 
+    def test_same_mapped_reuse_ignores_old_name_and_fingerprint_without_asset_writes(self):
+        self.prepared()
+        decisions = {key: {'reuse': nid, 'fingerprint': c.fingerprint(self.cli.doc, nid)}
+                     for key, nid in (('CHAR1', 'ROLE'), ('SET1', 'SET'), ('PROP1', 'PROP'))}
+        for nid in ('ROLE', 'SET', 'PROP'):
+            c.nodes(self.cli.doc)[nid].setdefault('data', {})['name'] = 'Uploaded ' + nid
+            data = c.content(self.cli.doc, nid)
+            data.setdefault('basicInfo', {})['name'] = 'Uploaded ' + nid
+            data['generation'] = {'prompt': 'User image prompt'}
+        c.content(self.cli.doc, 'ROLE')['appearanceInfo'] = {'pippitAssetId': 'UPLOADED'}
+        before = {nid: copy.deepcopy(self.cli.doc['assets'][nid]) for nid in ('ROLE', 'SET', 'PROP')}
+        result = self.sync(ids=[self.session['units'][0]['id']], decisions=decisions)
+        self.assertEqual(result['status'], 'synced')
+        self.assertEqual(result['asset_reconciliation']['conflicts'], [])
+        self.assertEqual({nid: self.cli.doc['assets'][nid] for nid in before}, before)
+        self.assertFalse(any(value.get('nodeId', value.get('assetId', value.get('id'))) in before
+                             for _, value in self.cli.writes))
+
+    def test_same_mapped_reuse_still_rejects_missing_or_retyped_original(self):
+        self.prepared()
+        for change, reason in (('missing', 'mapped_node_missing'), ('type', 'node_type_changed')):
+            with self.subTest(change=change):
+                doc = copy.deepcopy(self.cli.doc)
+                if change == 'missing':
+                    c.nodes(doc).pop('ROLE')
+                else:
+                    c.nodes(doc)['ROLE']['type'] = c.KINDS['scene']
+                plan, conflicts = c.asset_reconciliation_plan(self.session, self.state, doc,
+                    {'CHAR1': {'reuse': 'ROLE', 'fingerprint': 'old'}}, bound_identity=True)
+                self.assertEqual(next(row['reason'] for row in conflicts if row['key'] == 'CHAR1'), reason)
+                self.assertNotIn('CHAR1', {row['key'] for row in plan})
+
     def test_explicit_correct_reuse_can_replace_a_renamed_or_retyped_mapping(self):
         add_node(self.cli.doc, "OLD", "image", "Actor manually changed")
         add_node(self.cli.doc, "RIGHT", "role", "Actor")
